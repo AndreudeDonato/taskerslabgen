@@ -9,6 +9,12 @@ and a charge list (one charge per atom). The library:
 - plots planes and chosen cut lines
 - builds cut slabs for a list of thicknesses
 
+## Diagram
+
+See `docs/images/cutdiagram_IrO2rutile100.png` for a schematic overview.
+
+![Tasker slab generation diagram](docs/images/cutdiagram_IrO2rutile100.png)
+
 ## Folder layout
 
 - `src/taskerslabgen/core.py`  
