@@ -7,6 +7,7 @@ from .core import (
     select_best_sequence,
     compute_cut_positions,
     generate_slabs_for_miller,
+    cutslab,
 )
 from .plotting import plot_unitcell_atoms
 from .builder import build_cut_slabs
@@ -21,6 +22,7 @@ __all__ = [
     "select_best_sequence",
     "compute_cut_positions",
     "generate_slabs_for_miller",
+    "cutslab",
     "plot_unitcell_atoms",
     "build_cut_slabs",
     "parse_hirshfeld_fhi_aims",

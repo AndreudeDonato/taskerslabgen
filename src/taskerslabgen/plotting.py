@@ -57,7 +57,7 @@ def plot_unitcell_atoms(
             textcoords="offset points",
             ha="center",
             va="bottom",
-            fontsize=24,
+            fontsize=7,
             color="gray",
         )
 

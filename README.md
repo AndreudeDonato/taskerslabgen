@@ -27,6 +27,8 @@ See `docs/images/cutdiagram_IrO2rutile100.png` for a schematic overview.
   Charge parsing helpers (FHI-aims Hirshfeld).
 - `example/genslab.py`  
   Example script that runs the full flow for multiple Miller indices.
+- `example/visualize_slab.py`  
+  Example script that generates and visualizes a (001) slab.
 - `bulk_files/`  
   Example bulk input files (e.g., `IrO2_rutile.in` `IrO2_rutile.out`).
 - `example/output/`  
