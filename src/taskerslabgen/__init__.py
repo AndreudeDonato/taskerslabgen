@@ -12,6 +12,13 @@ from .core import (
 from .plotting import plot_unitcell_atoms
 from .builder import build_cut_slabs
 from .chargeparsers import parse_hirshfeld_fhi_aims
+from .tasker3 import (
+    build_adjacency_matrix,
+    print_adjacency_matrix,
+    find_tasker3_candidates,
+    build_tasker3_slabs,
+    reconstruct_tasker_iii,
+)
 
 __all__ = [
     "build_surface",
@@ -26,4 +33,9 @@ __all__ = [
     "plot_unitcell_atoms",
     "build_cut_slabs",
     "parse_hirshfeld_fhi_aims",
+    "build_adjacency_matrix",
+    "print_adjacency_matrix",
+    "find_tasker3_candidates",
+    "build_tasker3_slabs",
+    "reconstruct_tasker_iii",
 ]
