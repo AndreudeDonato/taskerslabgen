@@ -12,6 +12,7 @@ dependencies = [
   "ase",
   "numpy",
   "matplotlib",
+  "scipy",
 ]
 
 [project.scripts]
