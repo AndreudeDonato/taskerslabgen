@@ -26,6 +26,8 @@ def main():
         output_ext=None,
         verbose=True,
         plot=True,
+        savetasker3candidates=True,
+        tasker3_recon_id=0,
     )
 
     slab = result["slab_atoms"][0]

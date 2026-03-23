@@ -42,6 +42,7 @@ def main():
         layers=1,
         verbose=False,
         output_ext="in",
+        prefer_plane=("O",),  # CeO2 001: select plane with oxygen content
     )
 
     thick_slab = genslab_result["slab_atoms"][0]

@@ -33,7 +33,7 @@ from taskerslabgen import generate_slabs_for_miller, cutslab
 # -----------------------------------------------------------------------------
 MILLER_BY_CRYSTAL = {
     "rutile": [(1, 1, 1), (0, 0, 1), (1, 0, 0), (1, 0, 1), (1, 1, 0)],
-    "CeO2_fluorite": [(1, 1, 1), (1, 1, 0), (1, 0, 0)],
+    "CeO2_fluorite": [(0, 0, 1), (1, 1, 1), (1, 1, 0)],
     "PtO2_marcasite": [
         (1, 0, 0),
         (0, 1, 0),
@@ -125,13 +125,20 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _TASKERSLABGEN_DIR = _SCRIPT_DIR.parent
 WORKBULKFILES = _TASKERSLABGEN_DIR / "workbulkfiles"
 OUTPUT_DIR = _TASKERSLABGEN_DIR / "output_slabs"
-PLANE_TOL = 0.05
+PLANE_TOL = 0.005
 THICK_LAYERS = 3  # thick reference slab (formula units) before cutting
 VACUUM = 15.0
 OUTPUT_EXT = "in"
 DIPOLE_TOL_GENSLAB = 9e-1  # prefer Tasker II over III when |dipole| <= this (e.g. P0-P0 cuts)
 DIPOLE_TOL = 9e-1  # relax for cutslab reference-matched cuts (Tasker III)
-MATCH_REFERENCE_PLANES = False  # False: cut wherever dipole=0, no plane matching; True: match planes to reference
+# Per (stem, miller): use plane matching (required for reconstructed surfaces like CeO2 001)
+USE_PLANE_MATCHING = {
+    ("CeO2_fluorite", (0, 0, 1)),
+}
+# Per (stem, miller): preferred plane termination for genslab (plane name or elements, e.g. ("O",))
+PREFER_PLANE = {
+    ("CeO2_fluorite", (0, 0, 1)): ("O",),  # CeO2 001: select plane with oxygen content
+}
 VERBOSE = False
 
 
@@ -157,7 +164,7 @@ def get_crystal_type(stem: str) -> str:
         return "PtO2_marcasite"
     if "anatase" in stem:
         return "TiO2_anatase"
-    if "brookite" in stem or (stem == "PbO2_rutile"):
+    if "brookite" in stem:
         return "PbO2_brookite"
     if "C2m" in stem:
         return "VO2_C2m"
@@ -229,6 +236,8 @@ def main():
 
         for miller in millers:
             h, k, l = miller
+            use_plane_matching = (stem, miller) in USE_PLANE_MATCHING
+            prefer_plane = PREFER_PLANE.get((stem, miller))
             try:
                 # Step 1: generate thick reference slab
                 genslab_result = generate_slabs_for_miller(
@@ -248,6 +257,7 @@ def main():
                     bond_distances=BOND_DISTANCES,
                     plane_tol=PLANE_TOL,
                     dipole_tol=DIPOLE_TOL_GENSLAB,
+                    prefer_plane=prefer_plane,
                 )
                 thick_slab = genslab_result["slab_atoms"][0]
 
@@ -266,7 +276,7 @@ def main():
                     reference_termination=genslab_result,
                     plane_tol=PLANE_TOL,
                     cuts="left",
-                    match_reference_planes=MATCH_REFERENCE_PLANES,
+                    match_reference_planes=use_plane_matching,
                 )
 
                 # Step 3: write all cuts with crystal structure and hkl in filename

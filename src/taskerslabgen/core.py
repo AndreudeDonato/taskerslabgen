@@ -380,10 +380,11 @@ def extract_termination(reference, charges, axis=2, plane_tol=0.1, charge_tol=1e
 
     if isinstance(reference, dict) and "tasker_type" in reference:
         slab = reference["slab_atoms"][0]
+        if "plane_classification" in reference:
+            plane_names = reference["plane_classification"]["plane_names"]
+            plane_name_map = reference["plane_classification"]["plane_name_map"]
         if "reconstruction" in reference and reference["reconstruction"] is not None:
             reconstruction = reference["reconstruction"]
-            plane_names = reconstruction["plane_names"]
-            plane_name_map = reconstruction["plane_name_map"]
         reference = slab
 
     if not hasattr(reference, "positions"):
@@ -518,7 +519,28 @@ def generate_slabs_for_miller(
     bond_threshold=(0.85, 1.15),
     bond_distances=None,
     filename_template=None,
+    prefer_plane=None,
+    savetasker3candidates=False,
+    tasker3_recon_id=None,
 ):
+    """
+    Generate slabs for a Miller index, returning plane classification.
+
+    prefer_plane : str, or iterable of element symbols, optional
+        Preferred plane termination for Tasker III. Use a plane name (e.g. "P0")
+        from a previous run's plane_classification, or element symbols (e.g. ("O",))
+        to prefer planes whose reconstructed surface contains those elements.
+
+    savetasker3candidates : bool, default False
+        If True (and surface is Tasker III), save all reconstruction candidates
+        to an xyz file with recon_id metadata. Use tasker3_recon_id on a
+        subsequent call to build the slab for a specific candidate.
+
+    tasker3_recon_id : int, optional
+        When set, use this candidate index (instead of the best) for the Tasker III
+        reconstruction. Use after inspecting the candidates xyz from a run with
+        savetasker3candidates=True.
+    """
     from .plotting import plot_unitcell_atoms
     from .builder import build_cut_slabs
 
@@ -584,12 +606,19 @@ def generate_slabs_for_miller(
             out_dir=out_dir, filename_template=filename_template, output_ext=ext,
         )
 
+        planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
+        plane_names, plane_name_map = assign_plane_names(planes_sorted)
+
         return {
             "plot": plot_path,
             "slabs": slab_paths,
             "slab_atoms": slabs,
             "best_sequence": best_seq,
             "tasker_type": "I/II",
+            "plane_classification": {
+                "plane_names": plane_names,
+                "plane_name_map": plane_name_map,
+            },
         }
 
     # ---- Tasker III: surface reconstruction ----
@@ -605,6 +634,8 @@ def generate_slabs_for_miller(
     )
 
     planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
+    plane_names, plane_name_map = assign_plane_names(planes_sorted)
+
     adj = build_adjacency_matrix(
         surf_bulk, threshold=bond_threshold, bond_distances=bond_distances,
     )
@@ -617,13 +648,57 @@ def generate_slabs_for_miller(
         planes_sorted, atoms_z_matrix, reduced_counts, adj, L,
         surf_bulk=surf_bulk, bond_distances=bond_distances,
         charge_tol=charge_tol, verbose=verbose,
+        prefer_plane=prefer_plane,
+        plane_names=plane_names,
     )
     if not candidates:
         raise ValueError("No Tasker III reconstruction candidates found.")
 
-    best_t3 = candidates[0]
+    # Select candidate: by ID if given, else best
+    if tasker3_recon_id is not None:
+        if not (0 <= tasker3_recon_id < len(candidates)):
+            raise ValueError(
+                f"tasker3_recon_id={tasker3_recon_id} out of range [0, {len(candidates)-1}]"
+            )
+        best_t3 = candidates[tasker3_recon_id]
+        if verbose:
+            print(f"Using Tasker III candidate {tasker3_recon_id} (user-specified)\n")
+    else:
+        best_t3 = candidates[0]
 
-    plane_names, plane_name_map = assign_plane_names(planes_sorted)
+    # Optionally save all candidates to xyz for inspection
+    candidates_xyz_path = None
+    if savetasker3candidates:
+        from pathlib import Path
+        out_dir_p = Path(out_dir)
+        out_dir_p.mkdir(parents=True, exist_ok=True)
+        all_slabs_for_xyz = []
+        for i, cand in enumerate(candidates):
+            slabs_i, _ = build_tasker3_slabs(
+                bulk_atoms, miller, layer_thickness_list=[layer_thickness_list[0]],
+                cut_plane_idx=cand["cut_plane_idx"],
+                deletion_mask=cand["deletion_mask"],
+                planes_sorted=planes_sorted,
+                atoms_z_matrix=atoms_z_matrix,
+                L=L,
+                repeat=(1, 1, 1),
+                vacuum=vacuum,
+                out_dir=out_dir_p,
+                output_ext=None,
+                plane_tol=plane_tol,
+            )
+            slab = slabs_i[0]
+            slab = slab.copy()
+            for key in list(slab.arrays):
+                if key not in ("positions", "numbers"):
+                    del slab.arrays[key]
+            slab.info = {"recon_id": i}
+            all_slabs_for_xyz.append(slab)
+        candidates_xyz_path = out_dir_p / f"{bulk_name}_hkl_{h}{k}{l}_tasker3_candidates.xyz"
+        write(candidates_xyz_path.as_posix(), all_slabs_for_xyz, format="extxyz")
+        if verbose:
+            print(f"Saved {len(all_slabs_for_xyz)} Tasker III candidates to {candidates_xyz_path}\n")
+
     cut_plane = planes_sorted[best_t3["cut_plane_idx"]]
     cut_plane_name = plane_names[best_t3["cut_plane_idx"]]
 
@@ -691,21 +766,26 @@ def generate_slabs_for_miller(
         plane_tol=plane_tol,
     )
 
-    return {
+    result = {
         "plot": plot_path,
         "slabs": slab_paths,
         "slab_atoms": slabs,
         "best_candidate": best_t3,
         "all_candidates": candidates,
         "tasker_type": "III",
+        "plane_classification": {
+            "plane_names": plane_names,
+            "plane_name_map": plane_name_map,
+        },
         "reconstruction": {
             "cut_plane_name": cut_plane_name,
             "cut_plane_counts": dict(cut_plane["counts"]),
             "delete_info": delete_info,
-            "plane_names": plane_names,
-            "plane_name_map": plane_name_map,
         },
     }
+    if candidates_xyz_path is not None:
+        result["tasker3_candidates_xyz"] = str(candidates_xyz_path)
+    return result
 
 
 def cutslab(
@@ -727,6 +807,7 @@ def cutslab(
     cuts="center",
     vacuum=15.0,
     match_reference_planes=True,
+    prefer_plane=None,
 ):
     from .plotting import plot_unitcell_atoms
 
@@ -883,6 +964,8 @@ def cutslab(
         print_adjacency_matrix,
     )
 
+    plane_names, plane_name_map = assign_plane_names(planes_sorted)
+
     adj = build_adjacency_matrix(
         atoms, threshold=bond_threshold, bond_distances=bond_distances,
     )
@@ -895,6 +978,8 @@ def cutslab(
         planes_sorted, atoms_z_matrix, reduced_counts, adj, L,
         surf_bulk=atoms, bond_distances=bond_distances,
         charge_tol=charge_tol, verbose=verbose,
+        prefer_plane=prefer_plane,
+        plane_names=plane_names,
     )
     if not candidates:
         raise ValueError("No Tasker III reconstruction candidates found.")
