@@ -3,6 +3,8 @@ from pathlib import Path
 from ase.build import surface
 from ase.io import write
 
+from .core import apply_vacuum_to_slab
+
 
 def build_cut_slabs(
     bulk_atoms,
@@ -12,7 +14,7 @@ def build_cut_slabs(
     ztop,
     L,
     repeat=(1, 1, 1),
-    vacuum=10.0,
+    vacuum=15.0,
     out_dir=".",
     filename_template="surf_bulk_layers_{layer_thickness}.xyz",
     output_ext="xyz",
@@ -31,7 +33,7 @@ def build_cut_slabs(
         if repeat is not None:
             slab = slab.repeat(tuple(repeat))
         slab.set_pbc((True, True, True))
-        slab.center(vacuum=vacuum, axis=2)
+        apply_vacuum_to_slab(slab, vacuum=vacuum, axis=2)
 
         if output_ext is not None and filename_template is not None:
             out_path = out_dir / filename_template.format(layer_thickness=layer_thickness)

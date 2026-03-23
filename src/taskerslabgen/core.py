@@ -270,6 +270,42 @@ def compute_cut_positions(planes, L, bottom_cut_index, top_cut_index):
     return midpoint(bottom_cut_index), midpoint(top_cut_index)
 
 
+def apply_vacuum_to_slab(atoms, vacuum=15.0, axis=2):
+    """
+    Add vacuum above and below a slab by shifting atoms and resizing the cell.
+
+    Atoms are shifted so the bottom of the slab sits at 0 along the given axis,
+    and the cell is extended by `vacuum` Å on each side (top and bottom).
+
+    Parameters
+    ----------
+    atoms : ase.Atoms
+        Slab structure (modified in place).
+    vacuum : float
+        Vacuum thickness in Å to add on each side (default 15.0).
+        If 0, no change is made.
+    axis : int
+        Stacking axis (default 2 = z).
+    """
+    if vacuum <= 0:
+        return
+    positions = atoms.get_positions()
+    z_positions = positions[:, axis]
+    zmin = float(np.min(z_positions))
+    zmax = float(np.max(z_positions))
+    new_zmin = zmin - vacuum
+    new_zmax = zmax + vacuum
+    new_height = new_zmax - new_zmin
+    positions[:, axis] -= new_zmin
+    atoms.set_positions(positions)
+    cell = atoms.get_cell().copy()
+    vec = np.zeros(3)
+    vec[axis] = new_height
+    cell[axis] = vec
+    atoms.set_cell(cell)
+    atoms.set_pbc([True, True, True])
+
+
 def assign_plane_names(planes_sorted):
     """
     Assign a name to each plane based on its elemental composition.
@@ -475,12 +511,13 @@ def generate_slabs_for_miller(
     plane_tol=0.1,
     charge_tol=1e-3,
     dipole_tol=1e-6,
-    vacuum=10.0,
+    vacuum=15.0,
     plot=True,
     verbose=None,
     output_ext="xyz",
     bond_threshold=(0.85, 1.15),
     bond_distances=None,
+    filename_template=None,
 ):
     from .plotting import plot_unitcell_atoms
     from .builder import build_cut_slabs
@@ -637,7 +674,10 @@ def generate_slabs_for_miller(
         fname_tmpl = None
     else:
         ext = output_ext.lstrip(".")
-        fname_tmpl = f"{bulk_name}_hkl_{h}{k}{l}_tasker3_layers_{{layer_thickness}}.{ext}"
+        if filename_template is not None:
+            fname_tmpl = filename_template
+        else:
+            fname_tmpl = f"{bulk_name}_hkl_{h}{k}{l}_tasker3_layers_{{layer_thickness}}.{ext}"
 
     slabs, slab_paths = build_tasker3_slabs(
         bulk_atoms, miller, layer_thickness_list,
@@ -684,8 +724,9 @@ def cutslab(
     bond_threshold=(0.85, 1.15),
     bond_distances=None,
     reference_termination=None,
-    xy_tol=0.3,
     cuts="center",
+    vacuum=15.0,
+    match_reference_planes=True,
 ):
     from .plotting import plot_unitcell_atoms
 
@@ -722,13 +763,12 @@ def cutslab(
 
     planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
 
-    # ---- Reference-termination mode ----
-    if reference_termination is not None:
+    # ---- Reference-termination mode (plane matching) ----
+    if reference_termination is not None and match_reference_planes:
         return _cutslab_reference(
             atoms, atoms_z_matrix, planes, planes_sorted, reduced_counts,
             L, axis, miller, charges, stem,
             reference_termination=reference_termination,
-            xy_tol=xy_tol,
             plane_tol=plane_tol,
             charge_tol=charge_tol,
             dipole_tol=dipole_tol,
@@ -739,17 +779,48 @@ def cutslab(
             plot=plot,
             verbose=verbose,
             cuts=cuts,
+            vacuum=vacuum,
         )
 
-    # ---- Standard mode (no reference) ----
+    # ---- Standard mode: cut wherever dipole is zero (no plane matching) ----
     sequences = enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=charge_tol)
-
-    min_cut = max(seq["bottom_cut"] for seq in sequences)
-    sequences.sort(key=lambda x: x['top_cut'])
-    valid_sequences = [
+    zero_dipole = [
         s for s in sequences
-        if s["is_stoich"] and abs(s["net_dipole"]) <= dipole_tol and s["bottom_cut"] == min_cut
+        if s["is_stoich"] and s["is_neutral"] and abs(s["net_dipole"]) <= dipole_tol
     ]
+
+    if cuts == "all":
+        valid_sequences = zero_dipole
+    else:
+        if not zero_dipole:
+            valid_sequences = []
+        else:
+            all_bot = sorted(set(s["bottom_cut"] for s in zero_dipole))
+            all_top = sorted(set(s["top_cut"] for s in zero_dipole), reverse=True)
+            if cuts == "center":
+                n_pairs = min(len(all_bot), len(all_top))
+                valid_sequences = []
+                for k in range(n_pairs):
+                    pair = (all_bot[k], all_top[k])
+                    if pair[0] >= pair[1]:
+                        break
+                    valid_sequences.extend(
+                        s for s in zero_dipole
+                        if s["bottom_cut"] == pair[0] and s["top_cut"] == pair[1]
+                    )
+            elif cuts == "left":
+                fixed_top = all_top[0]
+                valid_sequences = [s for s in zero_dipole if s["top_cut"] == fixed_top]
+            elif cuts == "right":
+                fixed_bot = all_bot[0]
+                valid_sequences = [s for s in zero_dipole if s["bottom_cut"] == fixed_bot]
+            else:
+                raise ValueError(
+                    f"Unknown cuts mode: {cuts!r}. "
+                    f"Must be 'center', 'left', 'right', or 'all'."
+                )
+
+    valid_sequences.sort(key=lambda s: (s["bottom_cut"], s["top_cut"]))
 
     # ---- Tasker I / II path ----
     if valid_sequences:
@@ -777,6 +848,7 @@ def cutslab(
                 atom_indices.extend(planes_sorted[pidx]["indices"])
             atom_indices = sorted(set(atom_indices))
             slab = atoms[atom_indices]
+            apply_vacuum_to_slab(slab, vacuum=vacuum, axis=axis)
             slab_atoms.append(slab)
 
             if save_files and ext is not None:
@@ -797,6 +869,7 @@ def cutslab(
             "slab_atoms": slab_atoms,
             "slab_paths": slab_paths,
             "valid_sequences": [entry[1] for entry in cut_entries],
+            "valid_cuts": [entry[1] for entry in cut_entries],
             "tasker_type": "I/II",
         }
 
@@ -855,6 +928,7 @@ def cutslab(
     deleted_set = set(best["deletion_mask"])
     keep = [i for i in range(len(atoms)) if i not in deleted_set]
     slab = atoms[keep]
+    apply_vacuum_to_slab(slab, vacuum=vacuum, axis=axis)
     slab_atoms.append(slab)
 
     if save_files and ext is not None:
@@ -862,9 +936,16 @@ def cutslab(
         write(out_path, slab)
         slab_paths.append(out_path)
 
+    # Compute stoich_k for valid_cuts compatibility
+    slab_counts = {Z: int(np.sum(slab.numbers == Z)) for Z in np.unique(slab.numbers)}
+    _, stoich_k = is_stoichiometric_sequence(slab_counts, reduced_counts)
+    if stoich_k is None:
+        stoich_k = 1
+
     return {
         "slab_atoms": slab_atoms,
         "slab_paths": slab_paths,
+        "valid_cuts": [{"stoich_k": stoich_k}],
         "best_candidate": best,
         "all_candidates": candidates,
         "tasker_type": "III",
@@ -913,7 +994,6 @@ def _cutslab_reference(
     atoms, atoms_z_matrix, planes, planes_sorted, reduced_counts,
     L, axis, miller, charges, stem,
     reference_termination,
-    xy_tol,
     plane_tol,
     charge_tol,
     dipole_tol,
@@ -924,6 +1004,7 @@ def _cutslab_reference(
     plot,
     verbose,
     cuts="center",
+    vacuum=15.0,
 ):
     """
     Reference-termination mode for cutslab.
@@ -981,8 +1062,8 @@ def _cutslab_reference(
     for i, plane in enumerate(planes_sorted):
         b_match, b_rmsd = plane_match_score(plane, ref_bot, atoms, axis=axis)
         t_match, t_rmsd = plane_match_score(plane, ref_top, atoms, axis=axis)
-        bot_scores.append((b_match and b_rmsd <= xy_tol, b_rmsd))
-        top_scores.append((t_match and t_rmsd <= xy_tol, t_rmsd))
+        bot_scores.append((b_match and b_rmsd <= plane_tol, b_rmsd))
+        top_scores.append((t_match and t_rmsd <= plane_tol, t_rmsd))
 
     bot_indices = [i for i in range(n) if bot_scores[i][0]]
     top_indices = [i for i in range(n) if top_scores[i][0]]
@@ -1012,7 +1093,7 @@ def _cutslab_reference(
             print(f"  reconstruction plane: {cut_plane_name} "
                   f"(unreconstructed={_comp_label(cut_plane_counts)})  "
                   f"delete_info: {len(delete_info)} atoms")
-        print(f"\nPlane matching (xy_tol={xy_tol}):")
+        print(f"\nPlane matching (plane_tol={plane_tol}):")
         for i, plane in enumerate(planes_sorted):
             b_ok, b_rmsd = bot_scores[i]
             t_ok, t_rmsd = top_scores[i]
@@ -1211,6 +1292,7 @@ def _cutslab_reference(
                 keep = [i for i in range(len(slab)) if i not in set(all_delete)]
                 slab = slab[keep]
 
+        apply_vacuum_to_slab(slab, vacuum=vacuum, axis=axis)
         slab_atoms.append(slab)
 
         if save_files and ext is not None:

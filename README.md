@@ -75,7 +75,7 @@ When working with relaxed supercells, the recommended workflow is:
    planes match the reference.
 
 Matching uses a hard stoichiometry constraint and a soft xy-position
-similarity score (Hungarian assignment with PBC, controlled by `xy_tol`).
+similarity score (Hungarian assignment with PBC, controlled by `plane_tol`).
 
 ## Install
 

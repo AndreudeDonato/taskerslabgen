@@ -69,7 +69,7 @@ def main():
         plot=True,
         verbose=True,
         reference_termination=genslab_result,
-        xy_tol=0.3,
+        plane_tol=0.3,
     )
 
     print(f"\nGenerated {len(cut_result['slab_atoms'])} sub-slabs "

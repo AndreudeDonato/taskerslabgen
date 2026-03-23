@@ -11,6 +11,7 @@ from .core import (
     compute_projection,
     identify_planes,
     compute_reduced_counts,
+    apply_vacuum_to_slab,
 )
 
 
@@ -404,7 +405,7 @@ def build_tasker3_slabs(
     atoms_z_matrix,
     L,
     repeat=(1, 1, 1),
-    vacuum=10.0,
+    vacuum=15.0,
     out_dir=".",
     filename_template=None,
     output_ext=None,
@@ -496,7 +497,7 @@ def build_tasker3_slabs(
         if repeat is not None:
             slab = slab.repeat(tuple(repeat))
         slab.set_pbc((True, True, True))
-        slab.center(vacuum=vacuum, axis=2)
+        apply_vacuum_to_slab(slab, vacuum=vacuum, axis=2)
 
         slabs.append(slab)
 
@@ -521,7 +522,7 @@ def reconstruct_tasker_iii(
     plane_tol=0.1,
     charge_tol=1e-3,
     dipole_tol=1e-6,
-    vacuum=10.0,
+    vacuum=15.0,
     plot=True,
     verbose=None,
     output_ext="xyz",
