@@ -55,7 +55,7 @@ The example scripts write (into `example/output/`):
   Plot of atoms along z with plane IDs, compositions, charges, and cut
   lines. In reference-termination mode, matched planes are highlighted
   in green.
-- `*_layers_{thickness}.{ext}`  
+- `*_layers_{thickness}.{ext}` 
   Slab structure files for each requested thickness.
 
 File names include the bulk file stem, Miller index, and thickness.

@@ -10,9 +10,11 @@ from .core import (
     compute_delete_info,
     extract_termination,
     plane_match_score,
-    generate_slabs_for_miller,
-    cutslab,
+    apply_vacuum_to_slab,
+    is_stoichiometric_sequence,
 )
+from .genslab import generate_slabs_for_miller
+from .slabcut import cutslab
 from .plotting import plot_unitcell_atoms
 from .builder import build_cut_slabs
 from .chargeparsers import parse_hirshfeld_fhi_aims
@@ -36,6 +38,8 @@ __all__ = [
     "compute_delete_info",
     "extract_termination",
     "plane_match_score",
+    "apply_vacuum_to_slab",
+    "is_stoichiometric_sequence",
     "generate_slabs_for_miller",
     "cutslab",
     "plot_unitcell_atoms",

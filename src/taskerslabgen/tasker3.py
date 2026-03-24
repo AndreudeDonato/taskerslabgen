@@ -1,36 +1,54 @@
 import numpy as np
 from itertools import combinations
-from pathlib import Path
+from math import comb as math_comb
 
-from ase.data import covalent_radii, chemical_symbols
+from ase.data import atomic_numbers, covalent_radii, chemical_symbols
 from ase.build import surface
-from ase.io import write
 
 from .core import (
     build_surface,
     compute_projection,
     identify_planes,
     compute_reduced_counts,
+    assign_plane_names,
     apply_vacuum_to_slab,
 )
 
 
-def build_adjacency_matrix(atoms, threshold=(0.85, 1.15), bond_distances=None):
+def build_adjacency_matrix(atoms, threshold=(0.85, 1.15), bond_distances=None,
+                           bulk_atoms=None):
     """
     Build a boolean adjacency matrix using covalent radii and PBC.
 
-    bond_distances: optional dict specifying per-pair reference distances.
-        Keys can be:
-          - "Ce-O" style strings (order doesn't matter, "Ce-O" == "O-Ce")
-          - tuples like ("Ce","O"), (58, 8), or mixed
-        Values:
-          - float: reference distance (scaled by threshold)
-          - None:  pair is forbidden (no bond allowed)
+    Parameters
+    ----------
+    atoms : Atoms
+        The structure whose atom indices will label the adjacency matrix.
+    bulk_atoms : Atoms, optional
+        Original bulk cell.  When provided the **bulk** cell vectors are
+        used for the minimum-image distance calculation, which avoids
+        artifacts that arise when ``ase.build.surface`` produces a
+        c-vector that is not a true bulk repeat along the surface normal.
+    bond_distances : dict, optional
+        Per-pair reference distances.
+        Keys: ``"Ce-O"`` style strings (order irrelevant) or tuples.
+        Values: ``float`` (scaled by *threshold*) or ``None`` (forbid).
     """
+    from ase import Atoms as AseAtoms
     from ase.data import atomic_numbers as ase_atomic_numbers
 
     n = len(atoms)
-    dists = atoms.get_all_distances(mic=True)
+
+    if bulk_atoms is not None:
+        temp = AseAtoms(
+            numbers=atoms.numbers,
+            positions=atoms.get_positions(),
+            cell=bulk_atoms.cell[:],
+            pbc=[True, True, True],
+        )
+        dists = temp.get_all_distances(mic=True)
+    else:
+        dists = atoms.get_all_distances(mic=True)
     adj = np.zeros((n, n), dtype=bool)
     lo, hi = threshold
 
@@ -281,15 +299,49 @@ def find_tasker3_candidates(
     bond_distances=None,
     charge_tol=1e-3,
     verbose=None,
+    prefer_plane=None,
+    plane_names=None,
 ):
     """
     For each plane in the unit cell, compute stoichiometric excess,
     enumerate symmetric deletion masks, and score each by dipole and
     broken bonds.  The same mask is applied to both top and bottom
     surfaces of the slab.
+
+    Masks that produce identical spatial deletion patterns (same species
+    at the same fractional xy positions) are deduplicated before scoring.
     """
     n = len(planes_sorted)
     candidates = []
+
+    frac_all = surf_bulk.get_scaled_positions() if surf_bulk is not None else None
+
+    total_raw_combos = 0
+    for i in range(n):
+        plane = planes_sorted[i]
+        excess, k = _compute_plane_excess(plane["counts"], reduced_counts)
+        if excess is None or all(v == 0 for v in excess.values()):
+            continue
+        groups = {}
+        for idx in plane["indices"]:
+            Z = int(atoms_z_matrix[idx, 0])
+            groups.setdefault(Z, []).append(idx)
+        n_combos = 1
+        for Z, n_del in excess.items():
+            if n_del == 0:
+                continue
+            available = len(groups.get(Z, []))
+            if available < n_del:
+                n_combos = 0
+                break
+            n_combos *= math_comb(available, n_del)
+        total_raw_combos += n_combos
+
+    if total_raw_combos > 10000:
+        print(
+            f"WARNING: ~{total_raw_combos} Tasker III deletion combinations "
+            f"to evaluate. This may take a while."
+        )
 
     for i in range(n):
         plane = planes_sorted[i]
@@ -306,6 +358,21 @@ def find_tasker3_candidates(
         masks = _enumerate_deletion_masks(plane["indices"], atoms_z_matrix, excess)
         if not masks:
             continue
+
+        if frac_all is not None and len(masks) > 1:
+            seen_fingerprints = set()
+            unique_masks = []
+            for mask in masks:
+                fp = frozenset(
+                    (int(atoms_z_matrix[idx, 0]),
+                     round(float(frac_all[idx, 0]) % 1.0, 3),
+                     round(float(frac_all[idx, 1]) % 1.0, 3))
+                    for idx in mask
+                )
+                if fp not in seen_fingerprints:
+                    seen_fingerprints.add(fp)
+                    unique_masks.append(mask)
+            masks = unique_masks
 
         for mask in masks:
             deleted_list = list(mask)
@@ -342,6 +409,26 @@ def find_tasker3_candidates(
             else:
                 dist_score = 0.0
 
+            recon_counts = dict(plane["counts"])
+            for idx in mask:
+                Z = int(atoms_z_matrix[idx, 0])
+                recon_counts[Z] = recon_counts.get(Z, 0) - 1
+
+            matches_prefer = False
+            if prefer_plane is not None:
+                if isinstance(prefer_plane, str) and plane_names is not None:
+                    matches_prefer = plane_names[i] == prefer_plane
+                else:
+                    try:
+                        elements = set(prefer_plane)
+                        for e in elements:
+                            z = atomic_numbers[e] if isinstance(e, str) else int(e)
+                            if recon_counts.get(z, 0) > 0:
+                                matches_prefer = True
+                                break
+                    except (TypeError, AttributeError, KeyError):
+                        pass
+
             candidates.append({
                 "cut_plane_idx": i,
                 "plane_z": plane["z_center"],
@@ -358,16 +445,23 @@ def find_tasker3_candidates(
                 "total_charge": total_q,
                 "q_recon": q_recon,
                 "distribution_score": dist_score,
+                "matches_prefer_plane": matches_prefer,
             })
 
-    candidates.sort(key=lambda c: (c["abs_dipole"], c["bond_score"], c["distribution_score"]))
+    def _sort_key(c):
+        base = (c["abs_dipole"], c["bond_score"], c["distribution_score"])
+        if prefer_plane is not None:
+            return (0 if c["matches_prefer_plane"] else 1,) + base
+        return base
+
+    candidates.sort(key=_sort_key)
 
     if verbose:
         print(f"\nTasker III reconstruction candidates: {len(candidates)}")
         print(
             f"{'#':>4s}  {'plane':>5s}  {'z':>7s}  {'del':>3s}  "
             f"{'excess':<16s}  {'Q_slab':>8s}  {'Q_surf':>8s}  "
-            f"{'mu':>12s}  {'bonds':>5s}  {'(top':>5s}  {'bot)':>5s}  "
+            f"{'mu':>12s}  {'brkn':>5s}  {'(top':>5s}  {'bot)':>5s}  "
             f"{'distr':>8s}"
         )
         for i, c in enumerate(candidates):
@@ -404,20 +498,15 @@ def build_tasker3_slabs(
     planes_sorted,
     atoms_z_matrix,
     L,
-    repeat=(1, 1, 1),
     vacuum=15.0,
-    out_dir=".",
-    filename_template=None,
-    output_ext=None,
-    plane_tol=0.2,
+    plane_tol=0.05,
 ):
     """
     Build Tasker III slabs: cut at the given plane, then symmetrically
     delete the same atoms from both the top and bottom surface planes.
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
+    Returns a list of Atoms objects (one per thickness).
+    """
     cut_plane = planes_sorted[cut_plane_idx]
     n_planes = len(planes_sorted)
     z_sorted = np.array([p["z_center"] % L for p in planes_sorted])
@@ -443,8 +532,6 @@ def build_tasker3_slabs(
     plane_z_uc = cut_plane["z_center"] % L
 
     slabs = []
-    paths = []
-
     for lt in layer_thickness_list:
         slab_full = surface(bulk_atoms, miller, layers=lt + 4, vacuum=0.0)
         slab_full.set_pbc((True, True, True))
@@ -493,20 +580,11 @@ def build_tasker3_slabs(
 
         keep = [i for i in range(len(slab)) if i not in to_delete]
         slab = slab[keep]
-
-        if repeat is not None:
-            slab = slab.repeat(tuple(repeat))
         slab.set_pbc((True, True, True))
         apply_vacuum_to_slab(slab, vacuum=vacuum, axis=2)
-
         slabs.append(slab)
 
-        if output_ext is not None and filename_template is not None:
-            out_path = out_dir / filename_template.format(layer_thickness=lt)
-            write(out_path.as_posix(), slab)
-            paths.append(out_path.as_posix())
-
-    return slabs, paths
+    return slabs
 
 
 def reconstruct_tasker_iii(
@@ -515,19 +593,16 @@ def reconstruct_tasker_iii(
     miller,
     layer_thickness_list,
     bulk_name,
-    repeat=(1, 1, 1),
-    out_dir=".",
-    plot_out_dir=".",
-    layers=1,
     plane_tol=0.1,
     charge_tol=1e-3,
     dipole_tol=1e-6,
     vacuum=15.0,
     plot=True,
+    plot_out_dir=".",
     verbose=None,
-    output_ext="xyz",
     bond_threshold=(0.85, 1.15),
     bond_distances=None,
+    prefer_plane=None,
 ):
     """
     Standalone Tasker III reconstruction pipeline.
@@ -542,7 +617,7 @@ def reconstruct_tasker_iii(
         print(f"\nTasker III reconstruction for {bulk_name} ({h},{k},{l})\n")
 
     surf_bulk = build_surface(
-        bulk_atoms, miller, layers=layers, vacuum=0.0, verbose=verbose
+        bulk_atoms, miller, layers=1, vacuum=0.0, verbose=verbose
     )
     atoms_z_matrix, L = compute_projection(
         bulk_atoms, surf_bulk, charges, miller, verbose=verbose
@@ -554,17 +629,21 @@ def reconstruct_tasker_iii(
     planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
 
     adj = build_adjacency_matrix(
-        surf_bulk, threshold=bond_threshold, bond_distances=bond_distances
+        surf_bulk, threshold=bond_threshold, bond_distances=bond_distances,
+        bulk_atoms=bulk_atoms,
     )
     if verbose:
         n_bonds = int(np.sum(adj)) // 2
-        print(f"Planes: {len(planes_sorted)}, reduced: {reduced_counts}, bonds: {n_bonds}\n")
+        print(f"Planes: {len(planes_sorted)}, reduced: {reduced_counts}, bonds_broken: {n_bonds}\n")
         print_adjacency_matrix(adj, surf_bulk)
 
+    plane_names, _ = assign_plane_names(planes_sorted)
     candidates = find_tasker3_candidates(
         planes_sorted, atoms_z_matrix, reduced_counts, adj, L,
         surf_bulk=surf_bulk, bond_distances=bond_distances,
         charge_tol=charge_tol, verbose=verbose,
+        prefer_plane=prefer_plane,
+        plane_names=plane_names,
     )
     if not candidates:
         raise ValueError("No Tasker III reconstruction candidates found.")
@@ -573,7 +652,7 @@ def reconstruct_tasker_iii(
     if verbose:
         print(
             f"\n→ Best: plane {best['cut_plane_idx']}  "
-            f"mu={best['net_dipole']:+.4e}  bonds={best['bond_score']}\n"
+            f"mu={best['net_dipole']:+.4e}  bonds_broken={best['bond_score']}\n"
         )
 
     z_s = np.array([p["z_center"] % L for p in planes_sorted])
@@ -591,28 +670,17 @@ def reconstruct_tasker_iii(
             zbot=zbot, ztop=ztop, dipole=best["net_dipole"],
         )
 
-    ext = None if output_ext is None else output_ext.lstrip(".")
-    fname_tmpl = None
-    if ext is not None:
-        fname_tmpl = (
-            f"{bulk_name}_hkl_{h}{k}{l}_tasker3_layers_{{layer_thickness}}.{ext}"
-        )
-
-    slabs, slab_paths = build_tasker3_slabs(
+    slabs = build_tasker3_slabs(
         bulk_atoms, miller, layer_thickness_list,
         cut_plane_idx=best["cut_plane_idx"],
         deletion_mask=best["deletion_mask"],
         planes_sorted=planes_sorted,
         atoms_z_matrix=atoms_z_matrix,
-        L=L,
-        repeat=repeat, vacuum=vacuum,
-        out_dir=out_dir, filename_template=fname_tmpl, output_ext=ext,
-        plane_tol=plane_tol,
+        L=L, vacuum=vacuum, plane_tol=plane_tol,
     )
 
     return {
         "plot": plot_path,
-        "slabs": slab_paths,
         "slab_atoms": slabs,
         "best_candidate": best,
         "all_candidates": candidates,
