@@ -339,7 +339,13 @@ def _tasker12_path(
         slabs = build_cut_slabs(bulk_atoms, miller, layer_thickness_list, zbot, ztop, L, vacuum)
 
         if plot:
-            plot_path = f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}_P_{tid}.png"
+            n_pl = len(planes_sorted)
+            bp = plane_names[(seq["bottom_cut"] + 1) % n_pl]
+            tp = plane_names[seq["top_cut"]]
+            plot_path = (
+                f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}"
+                f"_{bp}_{tp}_{tid}.png"
+            )
             plot_unitcell_atoms(
                 atoms_z_matrix, L, miller,
                 out_png=plot_path, plane_tol=plane_tol, planes=planes,
@@ -500,7 +506,12 @@ def _tasker3_path(
             recon_names = list(plane_names)
             recon_names[cand["cut_plane_idx"]] = f"{plane_names[cand['cut_plane_idx']]}-recon"
 
-            plot_path = f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}_P_{tid}.png"
+            bp = f"{plane_names[cand['cut_plane_idx']]}-recon"
+            tp = bp
+            plot_path = (
+                f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}"
+                f"_{bp}_{tp}_{tid}.png"
+            )
             plot_unitcell_atoms(
                 atoms_z_matrix, L, miller,
                 out_png=plot_path, plane_tol=plane_tol, planes=planes,
