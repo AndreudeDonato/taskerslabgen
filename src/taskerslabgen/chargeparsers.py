@@ -1,9 +1,16 @@
 def parse_hirshfeld_fhi_aims(output_path):
     """
-    Parse Hirshfeld charges from an FHI-aims .out file.
+    Parse Hirshfeld charges from an FHI-aims output file.
 
-    Returns:
-        charges (list of float): Hirshfeld charges in atom order.
+    Parameters
+    ----------
+    output_path : str or Path
+        Path to the FHI-aims ``.out`` file.
+
+    Returns
+    -------
+    list of float
+        Hirshfeld charges in atom order.
     """
     charges = []
     in_block = False

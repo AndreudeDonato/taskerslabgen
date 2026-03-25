@@ -1,3 +1,4 @@
 ase
 numpy
 matplotlib
+scipy

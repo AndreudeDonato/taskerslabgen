@@ -12,7 +12,6 @@ from .core import (
     compute_cut_positions,
     assign_plane_names,
     compute_delete_info,
-    is_stoichiometric_sequence,
 )
 
 
@@ -21,21 +20,21 @@ def _filter_by_prefer_plane(terminations, prefer_plane):
     Filter a {plane_id: info} dict by prefer_plane.
 
     prefer_plane semantics:
-      - None      → keep only ID 0 (the best termination)
-      - "all"     → keep every termination (no filtering)
-      - int       → keep that single ID
-      - list[int] → keep those IDs
-      - str       → element filter (e.g. "O"): keep all terminations
-                     whose cut plane contains any atoms of that element
-      - list[str] → same, matching any of the listed elements
-    """
-    if prefer_plane == "all":
-        return dict(terminations)
+      - ``None``        → no filter (keep everything)
+      - ``int``         → keep that single termination ID
+      - ``list[int]``   → keep those termination IDs
+      - ``str``         → element symbol (e.g. ``"O"``) or plane type
+                           name (e.g. ``"P0"``).
+      - ``list[str]``   → match any of the listed strings
 
+    Element matching is **exclusive**: ``"O"`` keeps only planes whose
+    atoms are *all* oxygen.  A mixed CeO plane would NOT match ``"O"``.
+    Use ``["O", "Ce"]`` to keep pure-O planes OR pure-Ce planes (but
+    still not mixed CeO planes).  To select mixed planes use the plane
+    type name (e.g. ``"P0"``).
+    """
     if prefer_plane is None:
-        if 0 in terminations:
-            return {0: terminations[0]}
-        return {}
+        return dict(terminations)
 
     if isinstance(prefer_plane, int):
         prefer_plane = [prefer_plane]
@@ -44,26 +43,46 @@ def _filter_by_prefer_plane(terminations, prefer_plane):
         return {tid: terminations[tid] for tid in prefer_plane if tid in terminations}
 
     if isinstance(prefer_plane, str):
-        elements = [prefer_plane]
+        str_list = [prefer_plane]
     elif isinstance(prefer_plane, (list, tuple)) and prefer_plane and all(isinstance(x, str) for x in prefer_plane):
-        elements = list(prefer_plane)
+        str_list = list(prefer_plane)
     else:
         raise ValueError(f"Invalid prefer_plane: {prefer_plane!r}")
 
-    target_Zs = set()
-    for e in elements:
-        if e not in atomic_numbers:
-            raise ValueError(f"Unknown element symbol: {e}")
-        target_Zs.add(atomic_numbers[e])
+    element_Zs = set()
+    plane_type_names = set()
+    for s in str_list:
+        if s in atomic_numbers:
+            element_Zs.add(atomic_numbers[s])
+        else:
+            plane_type_names.add(s)
 
     selected = {}
     for tid, term in terminations.items():
         counts = term.get("plane_counts", {})
-        if any(Z in counts and counts[Z] > 0 for Z in target_Zs):
-            selected[tid] = term
+        present_Zs = {Z for Z, c in counts.items() if c > 0}
+
+        if element_Zs:
+            for target_Z in element_Zs:
+                if present_Zs == {target_Z}:
+                    selected[tid] = term
+                    break
+            if tid in selected:
+                continue
+
+        if plane_type_names:
+            pt = term.get("plane_type", "")
+            base_pt = pt.replace("-recon", "")
+            if pt in plane_type_names or base_pt in plane_type_names:
+                selected[tid] = term
+                continue
 
     if not selected:
-        raise ValueError(f"No termination plane contains element(s) {elements}")
+        raise ValueError(
+            f"No termination matches prefer_plane={prefer_plane!r}. "
+            f"Available plane types: "
+            f"{sorted(set(t.get('plane_type','') for t in terminations.values()))}"
+        )
     return selected
 
 
@@ -73,7 +92,7 @@ def generate_slabs_for_miller(
     millers,
     layer_thickness_list,
     bulk_name="slab",
-    plane_tol=0.1,
+    plane_tol=0.05,
     charge_tol=1e-3,
     dipole_tol=1e-6,
     vacuum=15.0,
@@ -83,34 +102,86 @@ def generate_slabs_for_miller(
     bond_threshold=(0.85, 1.15),
     bond_distances=None,
     prefer_plane=None,
+    candidates="best",
     savecandidates=False,
-    candidate_id=None,
 ):
     """
     Generate non-polar slabs for one or more Miller indices.
 
+    Automatically classifies each surface as Tasker I/II (zero-dipole)
+    or Tasker III (requires reconstruction) and returns fully built
+    slab structures.
+
     Parameters
     ----------
+    bulk_atoms : Atoms
+        Bulk unit cell.
+    charges : dict or list
+        Formal charges.  A dict maps element symbols (or atomic numbers)
+        to charge values; a list gives per-atom charges.
     millers : tuple or list of tuples
-        Single Miller index ``(h,k,l)`` or list of Miller indices.
+        Single Miller index ``(h, k, l)`` or list of Miller indices.
     layer_thickness_list : list of int
         Slab thicknesses in bulk repeat units.
-    prefer_plane : None, "all", int, list[int], str, or list[str]
-        - ``None``: return only the best termination (ID 0).
-        - ``"all"``: return every generated termination/reconstruction.
-        - ``int`` or ``list[int]``: return terminations with those IDs.
-        - ``str`` (element symbol, e.g. ``"O"``): return all terminations
-          whose cut plane contains any atoms of that element.
+    bulk_name : str
+        Label used in plot and output filenames.
+    plane_tol : float
+        Tolerance (angstrom) for grouping atoms into planes.
+    charge_tol : float
+        Tolerance for charge neutrality.
+    dipole_tol : float
+        Threshold below which the dipole is considered zero (Tasker I/II).
+    vacuum : float
+        Vacuum to add (angstrom, per side).
+    plot : bool
+        Generate stacking-axis plots.
+    plot_out_dir : str
+        Directory for output plots.
+    verbose : bool or None
+        Print detailed information.
+    bond_threshold : tuple of float
+        ``(lo, hi)`` scaling factors for the adjacency matrix (Tasker
+        III only).
+    bond_distances : dict or None
+        Per-pair bond reference distances.  Keys are ``"X-Y"`` strings
+        (e.g. ``"Ce-O"``).  Values are ``float`` (reference distance)
+        or ``None`` (forbid that pair).
+    prefer_plane : None, int, list[int], str, or list[str]
+        Plane-type filter applied before candidate selection.
+
+        - ``None``: no filtering.
+        - ``int`` or ``list[int]``: keep only terminations with those IDs.
+        - ``str`` (element symbol, e.g. ``"O"``): keep terminations
+          whose cut plane is **exclusively** that element.  A mixed
+          CeO plane would NOT match ``"O"``.
+        - ``str`` (plane type name, e.g. ``"P0"``): keep terminations
+          whose plane type matches (``"P0-recon"`` also matches ``"P0"``).
+        - ``list[str]``: match any entry.  ``["O", "Ce"]`` keeps pure-O
+          planes OR pure-Ce planes, but not mixed CeO planes.
+    candidates : str
+        - ``"best"`` (default): return only the single best candidate
+          (lowest dipole, then bond score, then distribution score)
+          after plane filtering.
+        - ``"all"``: return every candidate, generating a plot for each.
     savecandidates : bool
-        Save all valid candidates to an xyz file for visual inspection.
-    candidate_id : int, optional
-        Legacy shorthand for ``prefer_plane=[candidate_id]``.
+        Save all valid candidates to an extxyz file for visual inspection.
 
     Returns
     -------
     dict
-        ``{miller: {plane_id: {"atoms": [...], "tasker_type": ..., ...}}}``
+        Nested dict ``{miller: {plane_id: info}}`` where each ``info``
+        dict contains:
+
+        - ``"atoms"`` -- list of ``Atoms`` (one per thickness)
+        - ``"tasker_type"`` -- ``"I/II"`` or ``"III"``
+        - ``"plane_type"`` -- symbolic name (e.g. ``"P0-recon"``)
+        - ``"plane_counts"`` -- element composition of the cut plane
+        - ``"reconstruction"`` -- reconstruction metadata (or None)
+        - ``"candidate"`` -- raw scoring dict
     """
+    if candidates not in ("best", "all"):
+        raise ValueError(f"candidates must be 'best' or 'all', got {candidates!r}")
+
     if isinstance(millers, tuple) and len(millers) == 3 and all(isinstance(x, (int, float)) for x in millers):
         millers = [millers]
 
@@ -121,7 +192,7 @@ def generate_slabs_for_miller(
             plane_tol, charge_tol, dipole_tol, vacuum,
             plot, plot_out_dir, verbose,
             bond_threshold, bond_distances,
-            prefer_plane, savecandidates, candidate_id,
+            prefer_plane, candidates, savecandidates,
         )
 
     return result
@@ -132,7 +203,7 @@ def _generate_for_one_miller(
     plane_tol, charge_tol, dipole_tol, vacuum,
     plot, plot_out_dir, verbose,
     bond_threshold, bond_distances,
-    prefer_plane, savecandidates, candidate_id,
+    prefer_plane, candidates, savecandidates,
 ):
     from .plotting import plot_unitcell_atoms
     from .builder import build_cut_slabs
@@ -162,7 +233,7 @@ def _generate_for_one_miller(
         raise ValueError("No valid stoichiometry sequences found.")
 
     planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
-    plane_names, plane_name_map = assign_plane_names(planes_sorted)
+    plane_names, plane_name_map = assign_plane_names(planes_sorted, atoms=surf_bulk)
 
     if verbose:
         valid_sequences = [s for s in sequences if s["is_neutral"] and s["is_stoich"]]
@@ -187,7 +258,7 @@ def _generate_for_one_miller(
             sequences, reduced_counts, atoms_z_matrix, L, surf_bulk,
             dipole_tol, vacuum, plane_tol,
             plot, plot_out_dir, verbose,
-            prefer_plane, savecandidates, candidate_id,
+            prefer_plane, candidates, savecandidates,
         )
 
     # ---- Tasker III ----
@@ -203,7 +274,7 @@ def _generate_for_one_miller(
         vacuum, plane_tol, charge_tol,
         plot, plot_out_dir, verbose,
         bond_threshold, bond_distances,
-        prefer_plane, savecandidates, candidate_id,
+        prefer_plane, candidates, savecandidates,
     )
 
 
@@ -213,7 +284,7 @@ def _tasker12_path(
     sequences, reduced_counts, atoms_z_matrix, L, surf_bulk,
     dipole_tol, vacuum, plane_tol,
     plot, plot_out_dir, verbose,
-    prefer_plane, savecandidates, candidate_id,
+    prefer_plane, candidates_mode, savecandidates,
 ):
     from .plotting import plot_unitcell_atoms
     from .builder import build_cut_slabs
@@ -234,14 +305,13 @@ def _tasker12_path(
             "plane_counts": dict(planes_sorted[bot_plane_idx]["counts"]),
         }
 
-    if candidate_id is not None:
-        if candidate_id not in all_terminations:
-            raise ValueError(
-                f"candidate_id={candidate_id} out of range [0, {len(all_terminations)-1}]"
-            )
-        selected = {candidate_id: all_terminations[candidate_id]}
+    filtered = _filter_by_prefer_plane(all_terminations, prefer_plane)
+
+    if candidates_mode == "best" and filtered:
+        best_tid = min(filtered, key=lambda t: abs(filtered[t]["sequence"]["net_dipole"]))
+        selected = {best_tid: filtered[best_tid]}
     else:
-        selected = _filter_by_prefer_plane(all_terminations, prefer_plane)
+        selected = filtered
 
     if savecandidates and zero_dipole:
         from pathlib import Path
@@ -262,23 +332,25 @@ def _tasker12_path(
         if verbose:
             print(f"Saved {len(all_slabs_for_xyz)} Tasker I/II candidates to {cand_path}\n")
 
-    if plot:
-        first_tid = min(selected.keys()) if selected else 0
-        first_seq = all_terminations.get(first_tid, all_terminations[0])["sequence"]
-        zbot_plot, ztop_plot = compute_cut_positions(planes, L, first_seq["bottom_cut"], first_seq["top_cut"])
-        plot_path = f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}_atoms.png"
-        plot_unitcell_atoms(
-            atoms_z_matrix, L, miller,
-            out_png=plot_path, plane_tol=plane_tol, planes=planes,
-            zbot=zbot_plot, ztop=ztop_plot, dipole=first_seq["net_dipole"],
-            plane_names=plane_names,
-        )
-
     output = {}
     for tid, term_info in selected.items():
         seq = term_info["sequence"]
         zbot, ztop = compute_cut_positions(planes, L, seq["bottom_cut"], seq["top_cut"])
         slabs = build_cut_slabs(bulk_atoms, miller, layer_thickness_list, zbot, ztop, L, vacuum)
+
+        if plot:
+            plot_path = f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}_P_{tid}.png"
+            plot_unitcell_atoms(
+                atoms_z_matrix, L, miller,
+                out_png=plot_path, plane_tol=plane_tol, planes=planes,
+                zbot=zbot, ztop=ztop, dipole=seq["net_dipole"],
+                plane_names=plane_names,
+            )
+
+        for slab in slabs:
+            slab.info["bulk_name"] = bulk_name
+            slab.info["miller"] = miller
+
         output[tid] = {
             "atoms": slabs,
             "tasker_type": "I/II",
@@ -298,7 +370,7 @@ def _tasker3_path(
     vacuum, plane_tol, charge_tol,
     plot, plot_out_dir, verbose,
     bond_threshold, bond_distances,
-    prefer_plane, savecandidates, candidate_id,
+    prefer_plane, candidates_mode, savecandidates,
 ):
     from .plotting import plot_unitcell_atoms
     from .tasker3 import (
@@ -312,7 +384,7 @@ def _tasker3_path(
     h, k, l = miller
 
     adj = build_adjacency_matrix(
-        surf_bulk, threshold=bond_threshold, bond_distances=bond_distances,
+        surf_bulk, bond_threshold=bond_threshold, bond_distances=bond_distances,
         bulk_atoms=bulk_atoms,
     )
     if verbose:
@@ -321,44 +393,47 @@ def _tasker3_path(
         print_adjacency_matrix(adj, surf_bulk)
 
     t3_prefer = None
-    if isinstance(prefer_plane, str) and prefer_plane != "all":
+    if isinstance(prefer_plane, str):
         t3_prefer = prefer_plane
     elif isinstance(prefer_plane, (list, tuple)) and prefer_plane and all(isinstance(x, str) for x in prefer_plane):
         t3_prefer = prefer_plane
 
-    candidates = find_tasker3_candidates(
+    t3_candidates = find_tasker3_candidates(
         planes_sorted, atoms_z_matrix, reduced_counts, adj, L,
         surf_bulk=surf_bulk, bond_distances=bond_distances,
         charge_tol=charge_tol, verbose=verbose,
         prefer_plane=t3_prefer,
         plane_names=plane_names,
     )
-    if not candidates:
+    if not t3_candidates:
         raise ValueError("No Tasker III reconstruction candidates found.")
 
     all_terminations = {}
-    for tid, cand in enumerate(candidates):
+    for tid, cand in enumerate(t3_candidates):
         all_terminations[tid] = {
             "candidate": cand,
             "plane_type": plane_names[cand["cut_plane_idx"]],
             "plane_counts": dict(cand["plane_counts"]),
         }
 
-    if candidate_id is not None:
-        if candidate_id not in all_terminations:
-            raise ValueError(
-                f"candidate_id={candidate_id} out of range [0, {len(all_terminations)-1}]"
-            )
-        selected = {candidate_id: all_terminations[candidate_id]}
+    filtered = _filter_by_prefer_plane(all_terminations, prefer_plane)
+
+    if candidates_mode == "best" and filtered:
+        best_tid = min(filtered, key=lambda t: (
+            abs(filtered[t]["candidate"]["net_dipole"]),
+            filtered[t]["candidate"]["bond_score"],
+            filtered[t]["candidate"]["distribution_score"],
+        ))
+        selected = {best_tid: filtered[best_tid]}
     else:
-        selected = _filter_by_prefer_plane(all_terminations, prefer_plane)
+        selected = filtered
 
     if savecandidates:
         from pathlib import Path
         out_p = Path(plot_out_dir)
         out_p.mkdir(parents=True, exist_ok=True)
         all_slabs_for_xyz = []
-        for tid, cand in enumerate(candidates):
+        for tid, cand in enumerate(t3_candidates):
             slabs_i = build_tasker3_slabs(
                 bulk_atoms, miller, [layer_thickness_list[0]],
                 cut_plane_idx=cand["cut_plane_idx"],
@@ -415,6 +490,28 @@ def _tasker3_path(
                 f"mu={cand['net_dipole']:+.4e}  bonds_broken={cand['bond_score']}"
             )
 
+        if plot:
+            z_s = np.array([p["z_center"] % L for p in planes_sorted])
+            bot_idx = (cand["cut_plane_idx"] - 1) % len(planes_sorted)
+            top_idx = cand["cut_plane_idx"]
+            zbot = _midpoint(z_s, L, bot_idx)
+            ztop = _midpoint(z_s, L, top_idx)
+
+            recon_names = list(plane_names)
+            recon_names[cand["cut_plane_idx"]] = f"{plane_names[cand['cut_plane_idx']]}-recon"
+
+            plot_path = f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}_P_{tid}.png"
+            plot_unitcell_atoms(
+                atoms_z_matrix, L, miller,
+                out_png=plot_path, plane_tol=plane_tol, planes=planes,
+                zbot=zbot, ztop=ztop, dipole=cand["net_dipole"],
+                plane_names=recon_names,
+            )
+
+        for slab in slabs:
+            slab.info["bulk_name"] = bulk_name
+            slab.info["miller"] = miller
+
         output[tid] = {
             "atoms": slabs,
             "tasker_type": "III",
@@ -429,26 +526,5 @@ def _tasker3_path(
             },
             "candidate": cand,
         }
-
-    if plot and selected:
-        first_tid = min(selected.keys())
-        first_cand = selected[first_tid]["candidate"]
-
-        z_s = np.array([p["z_center"] % L for p in planes_sorted])
-        bot_idx = (first_cand["cut_plane_idx"] - 1) % len(planes_sorted)
-        top_idx = first_cand["cut_plane_idx"]
-        zbot = _midpoint(z_s, L, bot_idx)
-        ztop = _midpoint(z_s, L, top_idx)
-
-        recon_names = list(plane_names)
-        recon_names[first_cand["cut_plane_idx"]] = f"{plane_names[first_cand['cut_plane_idx']]}-recon"
-
-        plot_path = f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}_tasker3.png"
-        plot_unitcell_atoms(
-            atoms_z_matrix, L, miller,
-            out_png=plot_path, plane_tol=plane_tol, planes=planes,
-            zbot=zbot, ztop=ztop, dipole=first_cand["net_dipole"],
-            plane_names=recon_names,
-        )
 
     return output

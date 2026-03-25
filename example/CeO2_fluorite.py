@@ -1,6 +1,6 @@
 """
 Generate all dipole-zero Tasker III reconstructions for CeO2 (001)
-using generate_slabs_for_miller with prefer_plane="all" and plot=True.
+using generate_slabs_for_miller with candidates="all" and plot=True.
 """
 from pathlib import Path
 
@@ -11,11 +11,12 @@ from taskerslabgen import generate_slabs_for_miller
 
 
 def main():
-    bulk_path = Path("../bulk_files/CeO2_fluorite.cif")
+    here = Path(__file__).resolve().parent
+    bulk_path = here / ".." / "bulk_files" / "CeO2_fluorite.cif"
     charges = {"Ce": 4.0, "O": -2.0}
     miller = (0, 0, 1)
 
-    output_dir = Path("output_tasker3")
+    output_dir = here / "output_tasker3"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     bulk = read(bulk_path.as_posix())
@@ -26,13 +27,14 @@ def main():
         millers=miller,
         layer_thickness_list=[2],
         bulk_name="CeO2",
-        plane_tol=0.1,
+        plane_tol=0.05,
         vacuum=15.0,
         plot=True,
         plot_out_dir=output_dir.as_posix(),
         verbose=True,
         bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35},
-        prefer_plane="all",
+        candidates="all",
+        prefer_plane="O",
     )
 
     slabs = []

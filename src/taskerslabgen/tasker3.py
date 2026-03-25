@@ -15,15 +15,21 @@ from .core import (
 )
 
 
-def build_adjacency_matrix(atoms, threshold=(0.85, 1.15), bond_distances=None,
+def build_adjacency_matrix(atoms, bond_threshold=(0.85, 1.15), bond_distances=None,
                            bulk_atoms=None):
     """
     Build a boolean adjacency matrix using covalent radii and PBC.
+
+    Two atoms are bonded when their minimum-image distance falls within
+    ``[lo * d_ref, hi * d_ref]`` where ``d_ref`` is either the
+    user-supplied reference or the sum of covalent radii.
 
     Parameters
     ----------
     atoms : Atoms
         The structure whose atom indices will label the adjacency matrix.
+    bond_threshold : tuple of float
+        ``(lo, hi)`` scaling factors applied to the reference distance.
     bulk_atoms : Atoms, optional
         Original bulk cell.  When provided the **bulk** cell vectors are
         used for the minimum-image distance calculation, which avoids
@@ -31,8 +37,15 @@ def build_adjacency_matrix(atoms, threshold=(0.85, 1.15), bond_distances=None,
         c-vector that is not a true bulk repeat along the surface normal.
     bond_distances : dict, optional
         Per-pair reference distances.
-        Keys: ``"Ce-O"`` style strings (order irrelevant) or tuples.
-        Values: ``float`` (scaled by *threshold*) or ``None`` (forbid).
+        Keys: ``"Ce-O"`` style strings (order irrelevant) or tuples of
+        atomic numbers.
+        Values: ``float`` (scaled by *bond_threshold*) or ``None``
+        (forbid that pair entirely).
+
+    Returns
+    -------
+    ndarray, shape (N, N)
+        Boolean adjacency matrix.
     """
     from ase import Atoms as AseAtoms
     from ase.data import atomic_numbers as ase_atomic_numbers
@@ -50,7 +63,7 @@ def build_adjacency_matrix(atoms, threshold=(0.85, 1.15), bond_distances=None,
     else:
         dists = atoms.get_all_distances(mic=True)
     adj = np.zeros((n, n), dtype=bool)
-    lo, hi = threshold
+    lo, hi = bond_threshold
 
     manual_map = {}
     if bond_distances:
@@ -89,7 +102,16 @@ def build_adjacency_matrix(atoms, threshold=(0.85, 1.15), bond_distances=None,
 
 
 def print_adjacency_matrix(adj, atoms):
-    """Print the adjacency matrix with element labels as row/column headers."""
+    """
+    Print the adjacency matrix with element labels as row/column headers.
+
+    Parameters
+    ----------
+    adj : ndarray
+        Boolean adjacency matrix.
+    atoms : Atoms
+        Corresponding atomic structure (used for labels).
+    """
     n = len(atoms)
     labels = []
     elem_count = {}
@@ -237,11 +259,12 @@ def _compute_distribution_score(
     Score how well-distributed the remaining atoms are on the
     reconstructed surface plane (lower is better).
 
-    Forbidden pairs (None in bond_distances): should be far apart
-    and evenly spaced -> penalty = -d_ij (large distance = good).
+    Forbidden pairs (None in bond_distances): use a Coulomb-like
+    repulsive penalty  1/d_ij  so that short distances are strongly
+    penalised.  This favours checkerboard-like arrangements over
+    stripes.
 
     Allowed pairs (float in bond_distances or covalent-radii fallback):
-    should be close to the reference bond distance and evenly spaced ->
     penalty = |d_ij - d_ref|.
 
     Both terms are normalised by their pair count.
@@ -271,7 +294,8 @@ def _compute_distribution_score(
             if pair in bd_map:
                 ref = bd_map[pair]
                 if ref is None:
-                    forbidden_sum += -d_ij
+                    if d_ij > 1e-12:
+                        forbidden_sum += 1.0 / d_ij
                     forbidden_count += 1
                 else:
                     allowed_sum += abs(d_ij - ref)
@@ -303,13 +327,48 @@ def find_tasker3_candidates(
     plane_names=None,
 ):
     """
-    For each plane in the unit cell, compute stoichiometric excess,
-    enumerate symmetric deletion masks, and score each by dipole and
-    broken bonds.  The same mask is applied to both top and bottom
-    surfaces of the slab.
+    Enumerate and score Tasker III reconstruction candidates.
 
-    Masks that produce identical spatial deletion patterns (same species
-    at the same fractional xy positions) are deduplicated before scoring.
+    For each plane in the unit cell the stoichiometric excess is computed
+    and all unique deletion masks are enumerated.  Each mask is scored by
+    broken bonds, dipole moment, and surface charge distribution.  Masks
+    that produce identical spatial deletion patterns are deduplicated.
+
+    Parameters
+    ----------
+    planes_sorted : list of dict
+        Planes sorted by z-centre (from :func:`identify_planes`).
+    atoms_z_matrix : ndarray
+        ``[Z, z, q]`` matrix.
+    reduced_counts : dict
+        Reduced bulk stoichiometry.
+    adj : ndarray
+        Boolean adjacency matrix.
+    L : float
+        Lattice-plane spacing (angstrom).
+    surf_bulk : Atoms or None
+        Surface slab used for distribution scoring.
+    bond_distances : dict or None
+        Per-pair reference distances (same format as
+        :func:`build_adjacency_matrix`).
+    charge_tol : float
+        Tolerance for charge neutrality.
+    verbose : bool or None
+        Print candidate table.
+    prefer_plane : str, list[str], or None
+        Preferred plane element/type; matching candidates are sorted
+        first.  Element matching is **exclusive** (``"O"`` matches only
+        pure-O planes).
+    plane_names : list of str or None
+        Symbolic plane names (e.g. ``["P0", "P1", ...]``).
+
+    Returns
+    -------
+    list of dict
+        Candidates sorted by ``(prefer_match, abs_dipole, bond_score,
+        distribution_score)``.  Each dict contains ``cut_plane_idx``,
+        ``deletion_mask``, ``net_dipole``, ``bond_score``,
+        ``distribution_score``, ``plane_counts``, and more.
     """
     n = len(planes_sorted)
     candidates = []
@@ -416,14 +475,21 @@ def find_tasker3_candidates(
 
             matches_prefer = False
             if prefer_plane is not None:
-                if isinstance(prefer_plane, str) and plane_names is not None:
-                    matches_prefer = plane_names[i] == prefer_plane
+                present_Zs = {
+                    Z for Z, c in recon_counts.items() if c > 0
+                }
+                if isinstance(prefer_plane, str):
+                    if plane_names is not None and prefer_plane in set(plane_names):
+                        matches_prefer = plane_names[i] == prefer_plane
+                    else:
+                        z = atomic_numbers.get(prefer_plane)
+                        if z is not None:
+                            matches_prefer = present_Zs == {z}
                 else:
                     try:
-                        elements = set(prefer_plane)
-                        for e in elements:
+                        for e in prefer_plane:
                             z = atomic_numbers[e] if isinstance(e, str) else int(e)
-                            if recon_counts.get(z, 0) > 0:
+                            if present_Zs == {z}:
                                 matches_prefer = True
                                 break
                     except (TypeError, AttributeError, KeyError):
@@ -502,10 +568,39 @@ def build_tasker3_slabs(
     plane_tol=0.05,
 ):
     """
-    Build Tasker III slabs: cut at the given plane, then symmetrically
-    delete the same atoms from both the top and bottom surface planes.
+    Build Tasker III slabs with symmetric surface reconstruction.
 
-    Returns a list of Atoms objects (one per thickness).
+    Cuts at the specified plane, then symmetrically deletes the same
+    atoms from both the top and bottom surface planes to restore
+    stoichiometry.
+
+    Parameters
+    ----------
+    bulk_atoms : Atoms
+        Bulk unit cell.
+    miller : tuple of int
+        Miller index ``(h, k, l)``.
+    layer_thickness_list : list of int
+        Slab thicknesses in bulk repeat units.
+    cut_plane_idx : int
+        Index into *planes_sorted* identifying the reconstruction plane.
+    deletion_mask : tuple
+        Atom indices to delete from the reconstruction plane.
+    planes_sorted : list of dict
+        Planes sorted by z-centre.
+    atoms_z_matrix : ndarray
+        ``[Z, z, q]`` matrix from :func:`compute_projection`.
+    L : float
+        Lattice-plane spacing (angstrom).
+    vacuum : float
+        Vacuum to add (angstrom, applied to each side).
+    plane_tol : float
+        Tolerance for identifying surface planes by z-coordinate.
+
+    Returns
+    -------
+    list of Atoms
+        One slab per requested thickness, sorted by atom count.
     """
     cut_plane = planes_sorted[cut_plane_idx]
     n_planes = len(planes_sorted)
@@ -584,6 +679,7 @@ def build_tasker3_slabs(
         apply_vacuum_to_slab(slab, vacuum=vacuum, axis=2)
         slabs.append(slab)
 
+    slabs.sort(key=len)
     return slabs
 
 
@@ -593,7 +689,7 @@ def reconstruct_tasker_iii(
     miller,
     layer_thickness_list,
     bulk_name,
-    plane_tol=0.1,
+    plane_tol=0.05,
     charge_tol=1e-3,
     dipole_tol=1e-6,
     vacuum=15.0,
@@ -608,7 +704,46 @@ def reconstruct_tasker_iii(
     Standalone Tasker III reconstruction pipeline.
 
     Can be called directly when you already know the surface is Tasker III,
-    or it is called automatically from generate_slabs_for_miller.
+    or it is called automatically by :func:`generate_slabs_for_miller`.
+
+    Parameters
+    ----------
+    bulk_atoms : Atoms
+        Bulk unit cell.
+    charges : dict or list
+        Formal charges (same format as :func:`compute_projection`).
+    miller : tuple of int
+        Miller index ``(h, k, l)``.
+    layer_thickness_list : list of int
+        Slab thicknesses in bulk repeat units.
+    bulk_name : str
+        Label used in filenames.
+    plane_tol : float
+        Tolerance for plane identification (angstrom).
+    charge_tol : float
+        Tolerance for charge neutrality.
+    dipole_tol : float
+        Threshold below which dipole is considered zero.
+    vacuum : float
+        Vacuum to add (angstrom, per side).
+    plot : bool
+        Generate a stacking-axis plot.
+    plot_out_dir : str
+        Directory for plot files.
+    verbose : bool or None
+        Print detailed output.
+    bond_threshold : tuple of float
+        ``(lo, hi)`` scaling factors for adjacency matrix.
+    bond_distances : dict or None
+        Per-pair bond reference distances.
+    prefer_plane : str, list[str], or None
+        Preferred plane element/type for candidate ranking.
+
+    Returns
+    -------
+    dict
+        Contains ``"slab_atoms"``, ``"best_candidate"``,
+        ``"all_candidates"``, ``"tasker_type"``, and ``"plot"`` path.
     """
     from .plotting import plot_unitcell_atoms
 
@@ -629,7 +764,7 @@ def reconstruct_tasker_iii(
     planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
 
     adj = build_adjacency_matrix(
-        surf_bulk, threshold=bond_threshold, bond_distances=bond_distances,
+        surf_bulk, bond_threshold=bond_threshold, bond_distances=bond_distances,
         bulk_atoms=bulk_atoms,
     )
     if verbose:
@@ -637,7 +772,7 @@ def reconstruct_tasker_iii(
         print(f"Planes: {len(planes_sorted)}, reduced: {reduced_counts}, bonds_broken: {n_bonds}\n")
         print_adjacency_matrix(adj, surf_bulk)
 
-    plane_names, _ = assign_plane_names(planes_sorted)
+    plane_names, _ = assign_plane_names(planes_sorted, atoms=surf_bulk)
     candidates = find_tasker3_candidates(
         planes_sorted, atoms_z_matrix, reduced_counts, adj, L,
         surf_bulk=surf_bulk, bond_distances=bond_distances,

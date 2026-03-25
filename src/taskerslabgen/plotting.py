@@ -21,7 +21,7 @@ def plot_unitcell_atoms(
     L,
     miller,
     out_png="atoms_z_unitcell.png",
-    plane_tol=0.1,
+    plane_tol=0.05,
     planes=None,
     zbot=None,
     ztop=None,
@@ -33,18 +33,39 @@ def plot_unitcell_atoms(
     """
     Plot atoms along the stacking axis with plane annotations.
 
+    Produces a 1-D projection of the unit cell showing atom positions,
+    plane labels, compositions, charges, and (optionally) cut positions
+    and dipole value.
+
     Parameters
     ----------
+    atoms_z : ndarray, shape (N, 3)
+        ``[atomic_number, z_position, charge]`` matrix.
+    L : float
+        Lattice-plane spacing (angstrom).
+    miller : tuple of int
+        Miller index, used in the default title.
+    out_png : str
+        Output image path.
+    plane_tol : float
+        Tolerance for plane identification (only used if *planes* is
+        None).
+    planes : list of dict or None
+        Pre-computed planes.  When None, :func:`identify_planes` is
+        called internally.
+    zbot : float or None
+        z-coordinate of the bottom cut line (dashed red).
+    ztop : float or None
+        z-coordinate of the top cut line (dashed blue).
+    dipole : float or None
+        Dipole value shown in the lower-right corner.
     matched_planes : set of int or None
-        Plane indices (into the sorted planes list) that match a reference
-        termination.  Matched planes are drawn in green, others in gray.
-        When None, all planes are gray (original behaviour).
+        Plane indices that match a reference termination.  Matched
+        planes are drawn in green, others in gray.
     plane_names : list of str or None
-        Per-plane symbolic names (e.g. "P0", "P1-recon").  When provided,
-        used instead of the auto-generated "P{i}" labels.
+        Per-plane symbolic names (e.g. ``"P0"``, ``"P1-recon"``).
     title : str or None
-        Custom title for the plot.  When None the default Miller-index
-        based title is used.
+        Custom title.  When None the default Miller-index title is used.
     """
     z_uc = atoms_z[:, 1] % L
     z_uc_types = atoms_z[:, 0].astype(int)

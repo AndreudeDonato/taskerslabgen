@@ -10,7 +10,8 @@ from taskerslabgen import generate_slabs_for_miller
 
 
 def main():
-    bulk_path = Path("../bulk_files/IrO2_rutile.cif")
+    here = Path(__file__).resolve().parent
+    bulk_path = here / ".." / "bulk_files" / "IrO2_rutile.cif"
     charges = {"Ir": 4.0, "O": -2.0}
 
     millers = [
@@ -21,7 +22,7 @@ def main():
         (1, 1, 0),
     ]
 
-    output_dir = Path("output_tasker2")
+    output_dir = here / "output_tasker2"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     bulk = read(bulk_path.as_posix())
@@ -36,6 +37,8 @@ def main():
         plot_out_dir=output_dir.as_posix(),
         verbose=True,
         plot=True,
+        #candidates="all",
+        candidates="best",
     )
 
     slabs = []
@@ -44,11 +47,14 @@ def main():
         if not terminations:
             print(f"  No termination found for {miller}")
             continue
-        first_tid = min(terminations.keys())
-        slab = terminations[first_tid]["atoms"][0]
-        ttype = terminations[first_tid]["tasker_type"]
-        print(f"  {miller}: {len(slab)} atoms, Tasker {ttype}")
-        slabs.append(slab)
+        print(f"  {miller}: {len(terminations)} termination(s)")
+        for tid, info in terminations.items():
+            slab = info["atoms"][0]
+            print(
+                f"    ID {tid}: {len(slab)} atoms, Tasker {info['tasker_type']}  "
+                f"plane={info['plane_type']}"
+            )
+            slabs.append(slab)
 
     if slabs:
         view(slabs)

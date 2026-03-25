@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taskerslabgen"
-version = "0.2.0"
+version = "0.3.0"
 description = "Tasker I/II/III slab generation and cutting utilities for ASE."
 readme = "README.md"
 requires-python = ">=3.9"

@@ -1,3 +1,25 @@
 __pycache__/
 *.pyc
+*.pyo
 *.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+.venv/
+venv/
+*.so
+
+# Example output directories
+example/output*/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
