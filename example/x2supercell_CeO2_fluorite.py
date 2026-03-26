@@ -29,11 +29,13 @@ def main():
     bulk = read(bulk_path.as_posix())
     stem = bulk_path.stem
 
-    for miller in millers:
+    plane = [None, "O"]
+    for i, miller in enumerate(millers):
         hkl_str = "".join(str(i) for i in miller)
         print("=" * 60)
         print(f"Miller {miller}")
         print("=" * 60)
+
 
         # Step 1: generate a thick reference slab (best O-terminated)
         genslab_result = generate_slabs_for_miller(
@@ -46,7 +48,7 @@ def main():
             plot=True,
             plot_out_dir=output_dir.as_posix(),
             bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35},
-            prefer_plane="O",
+            prefer_plane=plane[i],
             candidates="best",
         )
 
