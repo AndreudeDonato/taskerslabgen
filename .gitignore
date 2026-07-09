@@ -12,6 +12,11 @@ venv/
 
 # Example output directories
 example/output*/
+X1output_slabs/
+x2output_slabs/
+
+# FHI-aims bulk inputs (user-provided, not versioned)
+workbulkfiles/**/*.out
 
 # IDE / editor
 .vscode/

@@ -49,6 +49,15 @@ python example/IrO2_rutile.py
 python example/x2supercell_CeO2_fluorite.py
 ```
 
+### Batch slab generation (many unit-cell bulks)
+
+```
+python example/batch_unitcell_slabs.py
+```
+
+See `example/BATCH_SLABS.md` for setup (bulk inputs, expected filenames,
+and troubleshooting).
+
 Example scripts use `Path(__file__)`-relative paths and can be run from any
 working directory.
 
