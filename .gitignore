@@ -8,6 +8,7 @@ build/
 .eggs/
 .venv/
 venv/
+.pytest_cache/
 *.so
 
 # Example output directories

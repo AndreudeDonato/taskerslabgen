@@ -8,15 +8,28 @@ For each Miller index:
   3. Each sub-slab is saved with the naming convention:
 
      {stem}_hkl_{millerindex}_between_{bottom}_{top}_cut_{cutindex}.cif
+
+Headless by default. Pass --plot to write PNG stacking plots.
 """
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
 
 from ase.io import read, write
 
-from taskerslabgen import generate_slabs_for_miller, cutslab
+from taskerslabgen import cutslab, generate_slabs_for_miller
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Write stacking-axis PNG plots next to the structures.",
+    )
+    args = parser.parse_args(argv)
+
     here = Path(__file__).resolve().parent
     bulk_path = here / ".." / "bulk_files" / "CeO2_fluorite_supercell2x2x2.cif"
     charges = {"Ce": 4.0, "O": -2.0}
@@ -31,13 +44,11 @@ def main():
 
     plane = [None, "O"]
     for i, miller in enumerate(millers):
-        hkl_str = "".join(str(i) for i in miller)
+        hkl_str = "".join(str(x) for x in miller)
         print("=" * 60)
         print(f"Miller {miller}")
         print("=" * 60)
 
-
-        # Step 1: generate a thick reference slab (best O-terminated)
         genslab_result = generate_slabs_for_miller(
             bulk_atoms=bulk,
             charges=charges,
@@ -45,7 +56,7 @@ def main():
             layer_thickness_list=[3],
             bulk_name=stem,
             vacuum=15.0,
-            plot=True,
+            plot=args.plot,
             plot_out_dir=output_dir.as_posix(),
             bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35},
             prefer_plane=plane[i],
@@ -65,16 +76,13 @@ def main():
             f"Tasker {term['tasker_type']}, plane={term['plane_type']}"
         )
 
-        # Step 2: cutslab preserving termination
-        #   For Tasker III surfaces, pass reconstruction so that newly
-        #   exposed interior planes receive the same atomic deletion.
         print(f"\n  Cutting thick slab for {miller}...")
         sub_slabs = cutslab(
             input_structure=thick_slab,
             charges=charges,
             axis=2,
             dipole_tol=1e-1,
-            plot=True,
+            plot=args.plot,
             plot_out_dir=output_dir.as_posix(),
             cut_at="termination",
             reconstruction=term.get("reconstruction"),
@@ -83,13 +91,12 @@ def main():
             cuts="right",
         )
 
-        # Step 3: save each sub-slab using metadata from cutslab
         print(f"\n  Generated {len(sub_slabs)} sub-slabs for {miller}")
-        for i, slab in enumerate(sub_slabs):
+        for cut_i, slab in enumerate(sub_slabs):
             bp = slab.info.get("cut_bottom_plane", "?")
             tp = slab.info.get("cut_top_plane", "?")
             fname = (
-                f"{stem}_hkl_{hkl_str}_between_{bp}_{tp}_cut_{i}.{ext}"
+                f"{stem}_hkl_{hkl_str}_between_{bp}_{tp}_cut_{cut_i}.{ext}"
             )
             out_path = output_dir / fname
             write(out_path.as_posix(), slab)
@@ -97,6 +104,8 @@ def main():
 
         print()
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

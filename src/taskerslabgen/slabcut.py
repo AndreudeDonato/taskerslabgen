@@ -10,6 +10,7 @@ from .core import (
     apply_vacuum_to_slab,
     assign_plane_names,
     is_stoichiometric_sequence,
+    plane_name_matches,
 )
 
 
@@ -17,11 +18,11 @@ def cutslab(
     input_structure,
     charges,
     axis=2,
-    plane_tol=0.05,
+    plane_tol=None,
     charge_tol=1e-3,
     dipole_tol=1e-6,
     plot_out_dir=".",
-    plot=True,
+    plot=False,
     verbose=None,
     bond_threshold=(0.85, 1.15),
     bond_distances=None,
@@ -42,8 +43,10 @@ def cutslab(
         Formal charges (same format as :func:`compute_projection`).
     axis : int
         Cartesian axis perpendicular to the surface (0, 1, or 2).
-    plane_tol : float
-        Tolerance (angstrom) for grouping atoms into planes.
+    plane_tol : float or None
+        Tolerance (angstrom) for grouping atoms into planes.  ``None``
+        (default) uses adaptive z-gap clustering; a float forces a fixed
+        override.
     charge_tol : float
         Tolerance for charge neutrality.
     dipole_tol : float
@@ -51,7 +54,7 @@ def cutslab(
     plot_out_dir : str
         Directory for output plots.
     plot : bool
-        Generate stacking-axis plots for each sub-slab.
+        Generate stacking-axis plots for each sub-slab (default ``False``).
     verbose : bool or None
         Print detailed cut information.
     bond_threshold : tuple of float
@@ -111,6 +114,10 @@ def cutslab(
     L = float(atoms.cell.lengths()[axis])
     if L <= 0.0:
         raise ValueError("Invalid cell length on selected axis.")
+
+    # Position-matching tolerance for reconstruction masks (clustering uses
+    # adaptive logic when plane_tol is None).
+    pos_tol = 0.05 if plane_tol is None else float(plane_tol)
 
     coords = atoms.positions[:, axis]
     atoms_z_matrix = np.array(
@@ -220,20 +227,27 @@ def cutslab(
     if cut_at == "termination":
         valid_boundary_names = {plane_names[0], plane_names[-1]}
     elif isinstance(cut_at, str):
-        if cut_at not in set(plane_names):
+        matched = {n for n in plane_names if plane_name_matches(cut_at, n)}
+        if not matched:
             raise ValueError(
                 f"Plane name {cut_at!r} not found. "
                 f"Available: {sorted(set(plane_names))}"
             )
-        valid_boundary_names = {cut_at}
+        valid_boundary_names = matched
     elif isinstance(cut_at, list):
-        unknown = set(cut_at) - set(plane_names)
+        valid_boundary_names = set()
+        unknown = []
+        for q in cut_at:
+            matched = {n for n in plane_names if plane_name_matches(q, n)}
+            if not matched:
+                unknown.append(q)
+            else:
+                valid_boundary_names |= matched
         if unknown:
             raise ValueError(
                 f"Unknown plane names: {unknown}. "
                 f"Available: {sorted(set(plane_names))}"
             )
-        valid_boundary_names = set(cut_at)
     else:
         raise ValueError(
             f"Invalid cut_at={cut_at!r}. Must be 'all', 'termination', "
@@ -399,7 +413,7 @@ def cutslab(
                 plane_z = planes_sorted[pidx]["z_center"]
                 surface_indices = [
                     j for j in range(len(slab))
-                    if abs(slab.positions[j, axis] - plane_z) < plane_tol
+                    if abs(slab.positions[j, axis] - plane_z) < pos_tol
                 ]
                 surface_counts = {}
                 for j in surface_indices:
@@ -526,7 +540,9 @@ def _build_slabs_from_sequences(
                 plane_z = planes_sorted[pidx]["z_center"]
                 surface_indices = [
                     j for j in range(len(slab))
-                    if abs(slab.positions[j, axis] - plane_z) < plane_tol
+                    if abs(slab.positions[j, axis] - plane_z) < (
+                        0.05 if plane_tol is None else float(plane_tol)
+                    )
                 ]
                 surface_counts = {}
                 for j in surface_indices:
@@ -588,10 +604,11 @@ def _tasker3_fallback(
     plot_unitcell_atoms, miller_str="",
 ):
     """Tasker III independent discovery fallback for ``cut_at='all'``."""
-    print(
-        f"No Tasker I/II cut found for axis={axis}. "
-        f"Reconstructing Tasker III slab."
-    )
+    if verbose:
+        print(
+            f"No Tasker I/II cut found for axis={axis}. "
+            f"Reconstructing Tasker III slab."
+        )
 
     from .tasker3 import (
         build_adjacency_matrix,

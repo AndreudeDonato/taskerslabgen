@@ -63,22 +63,7 @@ def compute_projection(bulk, surf_bulk, charges, miller, verbose=None):
         Lattice-plane spacing (angstrom) for this Miller index.
     """
     if isinstance(charges, dict):
-        charge_map = {}
-        for key, val in charges.items():
-            if isinstance(key, str):
-                if key not in atomic_numbers:
-                    raise ValueError(f"Unknown element symbol: {key}")
-                charge_map[atomic_numbers[key]] = float(val)
-            elif isinstance(key, int):
-                charge_map[key] = float(val)
-            else:
-                raise ValueError(f"Unsupported charge key type: {type(key)}")
-        charges_list = []
-        for Z in surf_bulk.numbers:
-            if Z not in charge_map:
-                raise ValueError(f"Missing charge for atomic number: {Z}")
-            charges_list.append(charge_map[Z])
-        charges = charges_list
+        charges = _charges_to_list(surf_bulk, charges)
     if len(charges) != len(surf_bulk):
         raise ValueError(
             f"Charges length ({len(charges)}) does not match atoms ({len(surf_bulk)})."
@@ -121,13 +106,53 @@ def _charges_to_list(atoms, charges):
     return list(charges)
 
 
-def identify_planes(atoms_z, L, plane_tol=0.05, charge_tol=1e-3):
+def _infer_plane_tol(z_mod, L, min_tol=0.02, max_tol=None):
+    """
+    Infer a plane-merge tolerance from the z-gap distribution.
+
+    Strong bimodality (small intra-plane gaps vs large inter-plane gaps)
+    yields a tolerance between the two clusters so coplanar atoms merge.
+    Weak / uniform gaps (staggered silicates) keep fine cuts via the
+    25th percentile of gaps.
+    """
+    if max_tol is None:
+        max_tol = 0.25 * float(L)
+
+    z = np.sort(np.asarray(z_mod, dtype=float) % float(L))
+    if len(z) < 2:
+        return float(min_tol)
+
+    gaps = np.diff(z)
+    wrap = (z[0] + float(L)) - z[-1]
+    gaps = np.concatenate([gaps, [wrap]])
+    g = np.sort(gaps)
+
+    if len(g) < 2:
+        return float(np.clip(0.5 * g[0], min_tol, max_tol))
+
+    dg = np.diff(g)
+    k = int(np.argmax(dg))
+    g_lo = float(g[k])
+    g_hi = float(g[k + 1])
+    jump = float(dg[k])
+    ratio = g_hi / max(g_lo, 1e-12)
+    strong = ratio >= 2.0 or jump >= 0.05
+
+    if strong:
+        tol = 0.5 * (g_lo + g_hi)
+    else:
+        tol = max(min_tol, float(np.percentile(g, 25)))
+
+    return float(np.clip(tol, min_tol, max_tol))
+
+
+def identify_planes(atoms_z, L, plane_tol=None, charge_tol=1e-3):
     """
     Cluster atoms into atomic planes along the stacking direction.
 
-    Atoms whose z-coordinates (mod *L*) differ by less than *plane_tol*
-    are grouped into the same plane.  Planes that wrap across the
-    periodic boundary are merged.
+    Atoms whose z-coordinates (mod *L*) differ by less than the effective
+    tolerance are grouped into the same plane.  Planes that wrap across
+    the periodic boundary are merged.
 
     Parameters
     ----------
@@ -135,9 +160,11 @@ def identify_planes(atoms_z, L, plane_tol=0.05, charge_tol=1e-3):
         ``[atomic_number, z_position, charge]`` matrix.
     L : float
         Lattice-plane spacing (angstrom).
-    plane_tol : float
+    plane_tol : float or None
         Maximum distance (angstrom) for two atoms to belong to the same
-        plane.
+        plane.  ``None`` (default) infers the tolerance from the z-gap
+        distribution (adaptive clustering).  A float forces a fixed
+        override.
     charge_tol : float
         Charges with ``abs(q) < charge_tol`` are set to exactly 0.
 
@@ -151,6 +178,11 @@ def identify_planes(atoms_z, L, plane_tol=0.05, charge_tol=1e-3):
         return []
 
     z_mod = atoms_z[:, 1] % L
+    if plane_tol is None:
+        effective_tol = _infer_plane_tol(z_mod, L)
+    else:
+        effective_tol = float(plane_tol)
+
     sort_idx = np.argsort(z_mod)
     planes = []
     current_indices = [sort_idx[0]]
@@ -158,7 +190,7 @@ def identify_planes(atoms_z, L, plane_tol=0.05, charge_tol=1e-3):
 
     for idx in sort_idx[1:]:
         z = float(z_mod[idx])
-        if abs(z - current_center) <= plane_tol:
+        if abs(z - current_center) <= effective_tol:
             current_indices.append(idx)
             current_center = float(np.mean(z_mod[current_indices]))
         else:
@@ -193,7 +225,7 @@ def identify_planes(atoms_z, L, plane_tol=0.05, charge_tol=1e-3):
         first = planes[0]
         last = planes[-1]
         wrap_dist = (first["z_center"] + L) - last["z_center"]
-        if abs(wrap_dist) <= plane_tol:
+        if abs(wrap_dist) <= effective_tol:
             merged_indices = last["indices"] + first["indices"]
             angles = (z_mod[merged_indices] / L) * 2.0 * np.pi
             sin_mean = np.mean(np.sin(angles))
@@ -457,15 +489,19 @@ def apply_vacuum_to_slab(atoms, vacuum=15.0, axis=2):
 
 def assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.1):
     """
-    Assign a type name to each plane based on its elemental composition
-    and, when *atoms* is provided, its in-plane spatial arrangement.
+    Assign hierarchical plane labels ``P{n}{letter}`` (e.g. ``P0a``, ``P0b``).
+
+    - **Type** ``P{n}``: same composition and in-plane geometry congruent under
+      the square dihedral group D4 (rotations 0/90/180/270 and axis/diagonal
+      mirrors) applied to the centroid-centered fingerprint.
+    - **Variant letter**: exact fingerprint match reuses the same full name;
+      D4-congruent but not identical gets the next letter (``a``, ``b``, …)
+      in order of first appearance along the stacking axis.
 
     The spatial fingerprint uses each atom's displacement from the
-    PBC-aware centroid of the reference species (lowest Z).  This is
-    translation-invariant so that equivalent planes at different
-    absolute positions in a supercell receive the same name, while
-    genuinely different stacking arrangements (e.g. ABAB in fluorite
-    110) are correctly distinguished.
+    PBC-aware centroid of the reference species (lowest Z), so labels are
+    translation-invariant.  Reconstruction suffixes such as ``P0a-recon``
+    are added by callers, not here.
 
     Fingerprints are compared within *xy_tol* (fractional-coordinate
     tolerance) to handle small displacements from relaxation.
@@ -473,15 +509,17 @@ def assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.1):
     Returns ``(names, name_map)`` where ``names[i]`` is the name of
     ``planes_sorted[i]`` and ``name_map`` is ``{name: counts_dict}``.
     """
+    import string
+
     frac_all = None
     ab_axes = None
     if atoms is not None:
         frac_all = atoms.get_scaled_positions()
         ab_axes = [i for i in range(3) if i != axis]
 
-    seen_fps = []
-    seen_names = []
-    counter = 0
+    # Per type index: list of (fingerprint, full_name)
+    type_variants = []
+    next_letter = []
     names = []
     name_map = {}
 
@@ -489,22 +527,94 @@ def assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.1):
         fp = _plane_fingerprint(plane, atoms, frac_all, ab_axes)
 
         matched_name = None
-        for i, sfp in enumerate(seen_fps):
-            if _fingerprints_match(fp, sfp, xy_tol):
-                matched_name = seen_names[i]
+        matched_type = None
+
+        for t_idx, variants in enumerate(type_variants):
+            exact = None
+            for sfp, sname in variants:
+                if _fingerprints_match(fp, sfp, xy_tol):
+                    exact = sname
+                    break
+            if exact is not None:
+                matched_name = exact
+                matched_type = t_idx
+                break
+
+            congruent = False
+            for sfp, _sname in variants:
+                if _fingerprints_d4_congruent(fp, sfp, xy_tol):
+                    congruent = True
+                    break
+            if congruent:
+                matched_type = t_idx
                 break
 
         if matched_name is not None:
             names.append(matched_name)
-        else:
-            name = f"P{counter}"
-            seen_fps.append(fp)
-            seen_names.append(name)
+            continue
+
+        if matched_type is not None:
+            letter_i = next_letter[matched_type]
+            if letter_i >= len(string.ascii_lowercase):
+                raise ValueError(
+                    f"Too many plane variants for type P{matched_type} "
+                    f"(exceeded 26 letters)."
+                )
+            letter = string.ascii_lowercase[letter_i]
+            next_letter[matched_type] = letter_i + 1
+            name = f"P{matched_type}{letter}"
+            type_variants[matched_type].append((fp, name))
             name_map[name] = dict(plane["counts"])
-            counter += 1
             names.append(name)
+            continue
+
+        # New type
+        t_idx = len(type_variants)
+        name = f"P{t_idx}a"
+        type_variants.append([(fp, name)])
+        next_letter.append(1)
+        name_map[name] = dict(plane["counts"])
+        names.append(name)
 
     return names, name_map
+
+
+def plane_name_base(name):
+    """
+    Return the type base of a plane label.
+
+    Examples: ``P0a`` → ``P0``, ``P0a-recon`` → ``P0``, ``P12b`` → ``P12``.
+    """
+    if not name:
+        return name
+    core = name[:-6] if name.endswith("-recon") else name
+    if len(core) >= 2 and core[0] == "P":
+        # Strip trailing variant letter if present (P0a, P12b, …)
+        if core[-1].isalpha() and core[-1].islower():
+            digits = core[1:-1]
+            if digits.isdigit():
+                return f"P{digits}"
+        # Bare type like P0 (no letter)
+        if core[1:].isdigit():
+            return core
+    return core
+
+
+def plane_name_matches(query, name):
+    """
+    Whether *query* selects plane label *name*.
+
+    Matching rules:
+
+    - exact equality (``P0a-recon`` ↔ ``P0a-recon``)
+    - query equals name without ``-recon`` (``P0a`` ↔ ``P0a-recon``)
+    - query equals the type base (``P0`` ↔ ``P0a``, ``P0b``, ``P0a-recon``)
+    """
+    if query == name:
+        return True
+    if name.endswith("-recon") and query == name[:-6]:
+        return True
+    return query == plane_name_base(name)
 
 
 def _pbc_mean_1d(values):
@@ -557,6 +667,44 @@ def _plane_fingerprint(plane, atoms, frac_all, ab_axes):
     return (comp_key, tuple(xy_parts))
 
 
+def _wrap01(v):
+    v = v % 1.0
+    if v > 1.0 - 1e-9:
+        return 0.0
+    return v
+
+
+def _d4_point_transforms():
+    """Return D4 maps ``(x, y) -> (x', y')`` on the unit square torus."""
+    return (
+        lambda x, y: (x, y),                          # identity
+        lambda x, y: (_wrap01(-y), x),                # rot90
+        lambda x, y: (_wrap01(-x), _wrap01(-y)),      # rot180
+        lambda x, y: (y, _wrap01(-x)),                # rot270
+        lambda x, y: (_wrap01(-x), y),                # mirror vertical
+        lambda x, y: (x, _wrap01(-y)),                # mirror horizontal
+        lambda x, y: (y, x),                          # mirror diagonal
+        lambda x, y: (_wrap01(-y), _wrap01(-x)),      # mirror antidiag
+    )
+
+
+def _transform_xy_fingerprint(fp, transform):
+    """Apply a point transform to the spatial part of a fingerprint."""
+    comp_key, xy_parts = fp
+    if xy_parts is None:
+        return fp
+    new_parts = []
+    for Z, positions in xy_parts:
+        mapped = tuple(
+            sorted(
+                (transform(x, y) for x, y in positions),
+                key=lambda p: (p[0], p[1]),
+            )
+        )
+        new_parts.append((Z, mapped))
+    return (comp_key, tuple(new_parts))
+
+
 def _fingerprints_match(fp1, fp2, tol):
     """
     Check if two plane fingerprints match within *tol*.
@@ -585,6 +733,20 @@ def _fingerprints_match(fp1, fp2, tol):
     return True
 
 
+def _fingerprints_d4_congruent(fp1, fp2, tol):
+    """True if *fp2* matches *fp1* under any D4 transform (incl. identity)."""
+    if fp1[0] != fp2[0]:
+        return False
+    if fp1[1] is None and fp2[1] is None:
+        return True
+    if fp1[1] is None or fp2[1] is None:
+        return False
+    for transform in _d4_point_transforms():
+        if _fingerprints_match(fp1, _transform_xy_fingerprint(fp2, transform), tol):
+            return True
+    return False
+
+
 def compute_delete_info(cut_plane, deletion_mask, atoms_z_matrix, surf_bulk):
     """
     Compute the reconstruction deletion pattern as a list of
@@ -605,7 +767,7 @@ def compute_delete_info(cut_plane, deletion_mask, atoms_z_matrix, surf_bulk):
     return delete_info
 
 
-def extract_termination(reference, charges, axis=2, plane_tol=0.05, charge_tol=1e-3):
+def extract_termination(reference, charges, axis=2, plane_tol=None, charge_tol=1e-3):
     """
     Extract termination fingerprints from a reference slab.
 

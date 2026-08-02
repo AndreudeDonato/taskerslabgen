@@ -5,21 +5,25 @@ Andreu A. de Donato
 Constructing slab models for density functional theory (DFT) surface
 calculations requires careful attention to stoichiometry, charge neutrality,
 and dipole cancellation — particularly for polar (Tasker III) surfaces where
-surface reconstruction is necessary. While tools exist for slab generation,
-researchers often lack control over termination selection and must manually
-build thickness-convergence series with consistent surface chemistry.
+surface reconstruction is necessary. Existing tools (e.g. pymatgen cleavage
+and Tasker-2 half-ion moves, Surfaxe zero-dipole filters, and crystallographic
+nonpolar-slab algorithms) address parts of this problem, but researchers often
+still lack an ASE-native path that prefers stoichiometric nonpolar cuts, scores
+Tasker III reconstructions when needed, and builds thickness-convergence series
+with consistent surface chemistry.
 
 We present `taskerslabgen`, an open-source Python library built entirely on
-ASE `Atoms` objects that automates the generation of non-polar slab
-terminations for any Miller index. The library classifies surfaces according
-to Tasker's criteria using formal charges, enumerates all stoichiometric cut
-sequences, and for Tasker III surfaces performs systematic symmetric
-reconstruction by scoring deletion patterns based on broken bonds and
-pairwise distance metrics that penalize deviations from target bond lengths
-while maximizing separation between species that should not bond. All valid
-terminations are presented to the user with stacking-axis visualizations
-showing plane compositions, charges, and symbolic identifiers, enabling
-informed selection rather than black-box automation.
+ASE `Atoms` objects that automates generation of stoichiometric non-polar slab
+terminations for arbitrary Miller indices. The library classifies surfaces
+according to Tasker's criteria using formal or computed charges, enumerates
+stoichiometric cut sequences (Tasker I/II when possible), and for Tasker III
+surfaces performs systematic symmetric reconstruction by scoring deletion
+patterns based on broken bonds and pairwise distance metrics that penalize
+deviations from target bond lengths while maximizing separation between
+species that should not bond. All valid terminations are presented to the user
+with stacking-axis visualizations showing plane compositions, charges, and
+symbolic identifiers, enabling informed selection rather than black-box
+automation.
 
 A key feature is the tandem workflow for convergence testing: from a single
 bulk structure, the code first generates a thick reference slab with the

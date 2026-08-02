@@ -123,6 +123,7 @@ PREFER_PLANE = {
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
 WORKBULKFILES = REPO_ROOT / "workbulkfiles" / "unitcell"
+SHIPPED_BULKS = REPO_ROOT / "bulk_files"
 OUTPUT_DIR = REPO_ROOT / "X1output_slabs"
 PLANE_TOL_GENSLAB = 0.005
 PLANE_TOL_CUTSLAB = 0.05
@@ -196,6 +197,7 @@ def process_miller(
     thick: int,
     output_dir: Path,
     reduced_counts: dict,
+    plot: bool = False,
 ) -> tuple[int, str | None]:
     """
     Run genslab + cutslab for one bulk/Miller pair.
@@ -218,7 +220,7 @@ def process_miller(
         layer_thickness_list=[thick],
         bulk_name=stem,
         vacuum=VACUUM,
-        plot=True,
+        plot=plot,
         plot_out_dir=output_dir.as_posix(),
         verbose=VERBOSE,
         bond_distances=bond_distances,
@@ -246,7 +248,7 @@ def process_miller(
         charges=CHARGES,
         axis=2,
         dipole_tol=DIPOLE_TOL_CUTSLAB,
-        plot=True,
+        plot=plot,
         plot_out_dir=output_dir.as_posix(),
         cut_at="termination",
         reconstruction=term.get("reconstruction"),
@@ -274,36 +276,69 @@ def process_miller(
     return n_written, None
 
 
+def _discover_bulk_files(quick: bool = False) -> tuple[list[Path], Path]:
+    """
+    Prefer FHI-aims ``.out`` files in workbulkfiles/unitcell when present;
+    otherwise fall back to shipped CIF files in bulk_files/.
+    """
+    out_files = sorted(WORKBULKFILES.glob("*.out"))
+    if quick:
+        preferred = WORKBULKFILES / "CeO2_fluorite.out"
+        if preferred.exists():
+            return [preferred], WORKBULKFILES
+        cif = SHIPPED_BULKS / "CeO2_fluorite.cif"
+        if cif.exists():
+            return [cif], SHIPPED_BULKS
+        return [], WORKBULKFILES
+
+    if out_files:
+        return out_files, WORKBULKFILES
+
+    cif_files = sorted(SHIPPED_BULKS.glob("*.cif"))
+    # Prefer primitive unit-cell examples over supercells for batch demos.
+    cif_files = [p for p in cif_files if "supercell" not in p.stem.lower()]
+    return cif_files, SHIPPED_BULKS
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Batch slab generation for workbulkfiles/unitcell"
+        description=(
+            "Batch slab generation. Uses workbulkfiles/unitcell/*.out when "
+            "present, otherwise shipped bulk_files/*.cif."
+        )
     )
     parser.add_argument(
         "--quick",
         action="store_true",
         help="Quick test: only CeO2_fluorite, Miller (1,1,1)",
     )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Write stacking-axis PNG plots next to slab outputs.",
+    )
     args = parser.parse_args()
+    plot = bool(args.plot)
 
+    bulk_files, bulk_dir = _discover_bulk_files(quick=args.quick)
     if args.quick:
-        bulk_files = [WORKBULKFILES / "CeO2_fluorite.out"]
         miller_override = {"CeO2_fluorite": [(1, 1, 1)]}
         thick = 5
         print("Quick mode: CeO2_fluorite, (1,1,1), thick=5")
     else:
-        bulk_files = sorted(WORKBULKFILES.glob("*.out"))
         miller_override = None
         thick = THICK_LAYERS
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    if not bulk_files or not bulk_files[0].exists():
-        print(f"No .out files found in {WORKBULKFILES}")
-        print("Place relaxed FHI-aims bulk structures there before running.")
+    if not bulk_files:
+        print("No bulk inputs found.")
+        print(f"  Looked for *.out in {WORKBULKFILES}")
+        print(f"  Looked for *.cif in {SHIPPED_BULKS}")
         print("See example/BATCH_SLABS.md for setup instructions.")
-        return
+        return 1
 
-    print(f"Processing {len(bulk_files)} bulk file(s) from {WORKBULKFILES}")
+    print(f"Processing {len(bulk_files)} bulk file(s) from {bulk_dir}")
     print(f"Workflow: generate_slabs_for_miller (thick={thick}) -> cutslab")
     print(f"Output directory: {OUTPUT_DIR}")
     print()
@@ -335,7 +370,13 @@ def main():
         for miller in millers:
             try:
                 n_written, err = process_miller(
-                    bulk, stem, miller, thick, OUTPUT_DIR, reduced_counts
+                    bulk,
+                    stem,
+                    miller,
+                    thick,
+                    OUTPUT_DIR,
+                    reduced_counts,
+                    plot=plot,
                 )
                 total_slabs += n_written
                 if err:
@@ -348,7 +389,9 @@ def main():
         print(f"\nErrors ({len(errors)}):")
         for item, msg in errors:
             print(f"  {item}: {msg}")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

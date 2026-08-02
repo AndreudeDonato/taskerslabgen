@@ -21,7 +21,7 @@ def plot_unitcell_atoms(
     L,
     miller,
     out_png="atoms_z_unitcell.png",
-    plane_tol=0.05,
+    plane_tol=None,
     planes=None,
     zbot=None,
     ztop=None,
@@ -47,9 +47,9 @@ def plot_unitcell_atoms(
         Miller index, used in the default title.
     out_png : str
         Output image path.
-    plane_tol : float
+    plane_tol : float or None
         Tolerance for plane identification (only used if *planes* is
-        None).
+        None).  ``None`` uses adaptive z-gap clustering.
     planes : list of dict or None
         Pre-computed planes.  When None, :func:`identify_planes` is
         called internally.

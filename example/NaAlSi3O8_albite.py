@@ -1,7 +1,7 @@
 """
-Generate one Tasker I/II surface per Miller index for IrO2.
+Generate Tasker I/II slabs for albite (NaAlSi3O8) over common Miller indices.
 
-Writes structures and stacking-axis PNG plots under example/output_tasker2/.
+Writes structures and stacking-axis PNG plots under example/output_albite/.
 Pass --view to open ASE's GUI after generation.
 """
 from __future__ import annotations
@@ -22,25 +22,28 @@ def main(argv=None):
         help="Open ASE GUI after writing structures (interactive).",
     )
     parser.add_argument(
-        "--plot",
+        "--no-plot",
         action="store_true",
-        help="Write stacking-axis PNG plots next to the structures.",
+        help="Skip writing stacking-axis PNG plots.",
     )
     args = parser.parse_args(argv)
 
     here = Path(__file__).resolve().parent
-    bulk_path = here / ".." / "bulk_files" / "IrO2_rutile.cif"
-    charges = {"Ir": 4.0, "O": -2.0}
+    bulk_path = here / ".." / "bulk_files" / "NaAlSi3O8_albite.cif"
+    # Formal oxidation states for stoichiometric NaAlSi3O8
+    charges = {"Na": 1.0, "Al": 3.0, "Si": 4.0, "O": -2.0}
 
     millers = [
-        (1, 1, 1),
         (0, 0, 1),
         (1, 0, 0),
-        (1, 0, 1),
+        (0, 1, 0),
         (1, 1, 0),
+        (1, 0, 1),
+        (0, 1, 1),
+        (1, 1, 1),
     ]
 
-    output_dir = here / "output_tasker2"
+    output_dir = here / "output_albite"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     bulk = read(bulk_path.as_posix())
@@ -55,8 +58,8 @@ def main(argv=None):
         vacuum=15.0,
         plot_out_dir=output_dir.as_posix(),
         verbose=True,
-        plot=args.plot,
-        candidates="all",
+        plot=not args.no_plot,
+        candidates="best",
     )
 
     slabs = []

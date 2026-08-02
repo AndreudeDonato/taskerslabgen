@@ -12,6 +12,7 @@ from .core import (
     compute_cut_positions,
     assign_plane_names,
     compute_delete_info,
+    plane_name_matches,
 )
 
 
@@ -23,8 +24,10 @@ def _filter_by_prefer_plane(terminations, prefer_plane):
       - ``None``        → no filter (keep everything)
       - ``int``         → keep that single termination ID
       - ``list[int]``   → keep those termination IDs
-      - ``str``         → element symbol (e.g. ``"O"``) or plane type
-                           name (e.g. ``"P0"``).
+      - ``str``         → element symbol (e.g. ``"O"``) or plane type /
+                           variant name (e.g. ``"P0"`` matches ``P0a``/
+                           ``P0b``/``P0a-recon``; ``"P0a"`` matches
+                           ``P0a`` and ``P0a-recon``).
       - ``list[str]``   → match any of the listed strings
 
     Element matching is **exclusive**: ``"O"`` keeps only planes whose
@@ -72,8 +75,7 @@ def _filter_by_prefer_plane(terminations, prefer_plane):
 
         if plane_type_names:
             pt = term.get("plane_type", "")
-            base_pt = pt.replace("-recon", "")
-            if pt in plane_type_names or base_pt in plane_type_names:
+            if any(plane_name_matches(q, pt) for q in plane_type_names):
                 selected[tid] = term
                 continue
 
@@ -92,11 +94,11 @@ def generate_slabs_for_miller(
     millers,
     layer_thickness_list,
     bulk_name="slab",
-    plane_tol=0.05,
+    plane_tol=None,
     charge_tol=1e-3,
     dipole_tol=1e-6,
     vacuum=15.0,
-    plot=True,
+    plot=False,
     plot_out_dir=".",
     verbose=None,
     bond_threshold=(0.85, 1.15),
@@ -125,8 +127,10 @@ def generate_slabs_for_miller(
         Slab thicknesses in bulk repeat units.
     bulk_name : str
         Label used in plot and output filenames.
-    plane_tol : float
-        Tolerance (angstrom) for grouping atoms into planes.
+    plane_tol : float or None
+        Tolerance (angstrom) for grouping atoms into planes.  ``None``
+        (default) uses adaptive z-gap clustering; a float forces a fixed
+        override.
     charge_tol : float
         Tolerance for charge neutrality.
     dipole_tol : float
@@ -134,7 +138,7 @@ def generate_slabs_for_miller(
     vacuum : float
         Vacuum to add (angstrom, per side).
     plot : bool
-        Generate stacking-axis plots.
+        Generate stacking-axis plots (default ``False``).
     plot_out_dir : str
         Directory for output plots.
     verbose : bool or None
@@ -155,7 +159,8 @@ def generate_slabs_for_miller(
           whose cut plane is **exclusively** that element.  A mixed
           CeO plane would NOT match ``"O"``.
         - ``str`` (plane type name, e.g. ``"P0"``): keep terminations
-          whose plane type matches (``"P0-recon"`` also matches ``"P0"``).
+          whose plane type matches.  ``"P0"`` matches ``P0a``, ``P0b``,
+          and ``P0a-recon``; ``"P0a"`` matches ``P0a`` and ``P0a-recon``.
         - ``list[str]``: match any entry.  ``["O", "Ce"]`` keeps pure-O
           planes OR pure-Ce planes, but not mixed CeO planes.
     candidates : str
@@ -262,10 +267,11 @@ def _generate_for_one_miller(
         )
 
     # ---- Tasker III ----
-    print(
-        f"No Tasker I/II plane found for miller=({h},{k},{l}) "
-        f"on {bulk_name}. Reconstructing Tasker III slab."
-    )
+    if verbose:
+        print(
+            f"No Tasker I/II plane found for miller=({h},{k},{l}) "
+            f"on {bulk_name}. Reconstructing Tasker III slab."
+        )
 
     return _tasker3_path(
         bulk_atoms, charges, miller, layer_thickness_list, bulk_name,

@@ -1,8 +1,15 @@
 # taskerslabgen
 
-Utilities to generate non-polar (Tasker I/II/III) slab terminations from
-first-principles structures using ASE `Atoms` objects and formal or computed
-charges. The library:
+Utilities to generate stoichiometric non-polar (Tasker I/II/III) slab
+terminations from first-principles structures using ASE `Atoms` objects and
+formal or computed charges.
+
+Relative to pymatgen cleavage / Tasker-2 half-ion moves, Surfaxe zero-dipole
+filters, and Hinuma-style nonpolar slab algorithms, this library emphasises an
+ASE-native Tasker I/II→III workflow with scored reconstructions and a
+`genslab`→`cutslab` thickness series that preserves termination chemistry.
+
+The library:
 
 - projects atoms along the surface normal for any Miller index
 - clusters atoms into planes
@@ -23,43 +30,73 @@ See `docs/images/cutdiagram_IrO2rutile100.png` for a schematic overview.
 
 From the repo root:
 
-```
-pip install -e .
+```bash
+python3 -m pip install -U pip setuptools wheel
+python3 -m pip install -e ".[dev]"
 ```
 
 Requires Python >= 3.9, ASE, NumPy, Matplotlib, SciPy.
 
+If editable install fails on an older system `pip`, either upgrade pip or run:
+
+```bash
+python3 -m pip install --no-build-isolation -e ".[dev]"
+```
+
 ## Quick start
+
+Examples are headless by default (write structures; no GUI). Add `--view` or
+`--plot` when you want interactive viewing or PNG stacking plots.
 
 ### Tasker III reconstructions (CeO2 fluorite)
 
-```
+```bash
 python example/CeO2_fluorite.py
 ```
 
 ### Tasker I/II multiple Miller indices (IrO2 rutile)
 
-```
+```bash
 python example/IrO2_rutile.py
+```
+
+### Silicate example (albite NaAlSi₃O₈)
+
+```bash
+python example/NaAlSi3O8_albite.py
 ```
 
 ### Tandem genslab + cutslab (supercell)
 
-```
+```bash
 python example/x2supercell_CeO2_fluorite.py
 ```
 
-### Batch slab generation (many unit-cell bulks)
+### Batch slab generation
 
+```bash
+python example/batch_unitcell_slabs.py --quick
 ```
-python example/batch_unitcell_slabs.py
-```
 
-See `example/BATCH_SLABS.md` for setup (bulk inputs, expected filenames,
-and troubleshooting).
+See [`example/TUTORIAL.md`](example/TUTORIAL.md) for a short narrative walkthrough
+and [`example/BATCH_SLABS.md`](example/BATCH_SLABS.md) for batch setup.
 
-Example scripts use `Path(__file__)`-relative paths and can be run from any
-working directory.
+---
+
+## Primary API
+
+Start with these two functions:
+
+| Function | Role |
+|----------|------|
+| `generate_slabs_for_miller` | Classify Tasker I/II vs III and build slabs |
+| `cutslab` | Peel a thick slab into a thickness series |
+
+Also commonly useful: `build_adjacency_matrix`, `assign_plane_names`,
+`reconstruct_tasker_iii`. Lower-level helpers are re-exported for power users
+but are not required for the standard workflow.
+
+Library defaults are quiet: `plot=False` and prints only when `verbose=True`.
 
 ---
 
@@ -81,6 +118,12 @@ Plane identification uses stacking-aware fingerprints (composition +
 fractional xy positions relative to the in-plane centroid) so that
 ABAB stacking patterns are correctly distinguished.
 
+### Tasker III limitation
+
+When a reconstruction pattern is provided, requesting `cut_at="all"` is
+forced to `"termination"`. Prefer `cut_at="termination"` explicitly for
+reconstructed surfaces so newly exposed planes keep the same deletion mask.
+
 ---
 
 ## API Reference
@@ -96,11 +139,11 @@ result = generate_slabs_for_miller(
     millers,
     layer_thickness_list,
     bulk_name="slab",
-    plane_tol=0.05,
+    plane_tol=None,
     charge_tol=1e-3,
     dipole_tol=1e-6,
     vacuum=15.0,
-    plot=True,
+    plot=False,
     plot_out_dir=".",
     verbose=None,
     bond_threshold=(0.85, 1.15),
@@ -124,11 +167,11 @@ classifies each surface as Tasker I/II (zero dipole) or Tasker III
 | `millers` | `tuple` or `list[tuple]` | *required* | Single Miller index `(h, k, l)` or list of Miller indices. |
 | `layer_thickness_list` | `list[int]` | *required* | Slab thicknesses in bulk repeat units (e.g. `[2, 4, 6]`). |
 | `bulk_name` | `str` | `"slab"` | Label used in plot and output filenames. |
-| `plane_tol` | `float` | `0.05` | Tolerance (Å) for grouping atoms into the same plane. |
+| `plane_tol` | `float` or `None` | `None` | Tolerance (Å) for grouping atoms into planes. `None` = adaptive z-gap clustering; a float forces a fixed override. |
 | `charge_tol` | `float` | `1e-3` | Tolerance for charge neutrality of a cut sequence. |
 | `dipole_tol` | `float` | `1e-6` | Dipole threshold — below this the surface is considered Tasker I/II. |
 | `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of the slab. |
-| `plot` | `bool` | `True` | Generate stacking-axis plots showing planes and cuts. |
+| `plot` | `bool` | `False` | Generate stacking-axis plots showing planes and cuts. |
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
 | `verbose` | `bool` or `None` | `None` | Print detailed information (plane sequences, candidates, etc.). |
 | `bond_threshold` | `tuple[float, float]` | `(0.85, 1.15)` | `(lo, hi)` scaling factors applied to the bond reference distance for the adjacency matrix. Only affects Tasker III. |
@@ -156,7 +199,7 @@ bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
 | `int` (e.g. `0`) | Keep only the termination with that numeric ID. |
 | `list[int]` (e.g. `[0, 2]`) | Keep terminations with those IDs. |
 | `str` element (e.g. `"O"`) | Keep terminations whose cut plane consists **exclusively** of that element. `"O"` matches pure-O planes but NOT mixed CeO planes. |
-| `str` plane type (e.g. `"P0"`) | Keep terminations whose plane type name matches. `"P0-recon"` also matches `"P0"`. |
+| `str` plane type (e.g. `"P0"`) | Keep terminations whose plane type matches. `"P0"` matches `P0a` / `P0b` / `P0a-recon`; `"P0a"` matches `P0a` and `P0a-recon`. |
 | `list[str]` (e.g. `["O", "Ce"]`) | Keep terminations matching **any** entry. Each element match is exclusive — `["O", "Ce"]` keeps pure-O OR pure-Ce planes but not mixed CeO. |
 
 **`candidates` options**
@@ -173,7 +216,7 @@ Nested dict: `{miller_tuple: {plane_id: info_dict}}`.
 Each `info_dict` contains:
 - `"atoms"` — list of `Atoms` objects (one per thickness)
 - `"tasker_type"` — `"I/II"` or `"III"`
-- `"plane_type"` — symbolic plane name (e.g. `"P0"`, `"P0-recon"`)
+- `"plane_type"` — symbolic plane name (e.g. `"P0a"`, `"P0a-recon"`)
 - `"plane_counts"` — `{atomic_number: count}` composition of the cut plane
 - `"reconstruction"` — reconstruction metadata dict (Tasker III) or `None`
 - `"candidate"` — raw scoring dict with dipole, bond score, etc.
@@ -193,11 +236,11 @@ sub_slabs = cutslab(
     input_structure,
     charges,
     axis=2,
-    plane_tol=0.05,
+    plane_tol=None,
     charge_tol=1e-3,
     dipole_tol=1e-6,
     plot_out_dir=".",
-    plot=True,
+    plot=False,
     verbose=None,
     bond_threshold=(0.85, 1.15),
     bond_distances=None,
@@ -218,11 +261,11 @@ termination.
 | `input_structure` | `Atoms` or path | *required* | Thick slab to cut. |
 | `charges` | `dict` or `list` | *required* | Formal charges (same format as `generate_slabs_for_miller`). |
 | `axis` | `int` | `2` | Cartesian axis perpendicular to the surface (0=x, 1=y, 2=z). |
-| `plane_tol` | `float` | `0.05` | Tolerance (Å) for grouping atoms into planes. |
+| `plane_tol` | `float` or `None` | `None` | Tolerance (Å) for grouping atoms into planes. `None` = adaptive z-gap clustering; a float forces a fixed override. |
 | `charge_tol` | `float` | `1e-3` | Tolerance for charge neutrality. |
 | `dipole_tol` | `float` | `1e-6` | Dipole threshold for zero-dipole cuts. |
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
-| `plot` | `bool` | `True` | Generate a stacking-axis plot for each sub-slab. |
+| `plot` | `bool` | `False` | Generate a stacking-axis plot for each sub-slab. |
 | `verbose` | `bool` or `None` | `None` | Print plane stacking and cut details. |
 | `bond_threshold` | `tuple[float, float]` | `(0.85, 1.15)` | Scaling factors for the adjacency matrix (Tasker III fallback only). |
 | `bond_distances` | `dict` or `None` | `None` | Per-pair bond reference distances. |
@@ -237,8 +280,8 @@ termination.
 |---|---|
 | `"termination"` | Cut only at planes matching the thick slab's top/bottom plane types. |
 | `"all"` | Cut at any boundary that gives a stoichiometric, charge-neutral, zero-dipole sub-slab. Automatically forced to `"termination"` when `reconstruction` is provided. |
-| `str` (e.g. `"P0"`) | Cut only at boundaries where that plane type is exposed. |
-| `list[str]` (e.g. `["P0", "P1"]`) | Cut at boundaries matching any of the listed plane types. |
+| `str` (e.g. `"P0"`) | Cut at boundaries whose plane label matches. `"P0"` selects every `P0*` variant; `"P0a"` selects that variant (and `P0a-recon` if present). |
+| `list[str]` (e.g. `["P0", "P1"]`) | Cut at boundaries matching any of the listed plane types/variants. |
 
 **`cuts` options**
 
@@ -297,9 +340,17 @@ from taskerslabgen import assign_plane_names
 names, name_map = assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.1)
 ```
 
-Assign symbolic type names (`P0`, `P1`, ...) to each plane based on
-elemental composition and in-plane spatial arrangement.  Stacking-aware:
-correctly distinguishes ABAB patterns in e.g. fluorite (110).
+Assign hierarchical labels ``P{n}{letter}`` (e.g. ``P0a``, ``P0b``):
+
+- **Type** ``P{n}`` — same composition and in-plane geometry congruent under
+  D4 (90° rotations and mirrors).  Example: IrO₂ (001) diagonal vs
+  anti-diagonal IrO₂ planes share type ``P0`` as ``P0a`` / ``P0b``.
+- **Variant letter** — exact fingerprint match reuses the same full name;
+  D4-congruent but not identical gets the next letter along the stack.
+
+Helpers: `plane_name_base("P0a-recon") == "P0"`;
+`plane_name_matches("P0", "P0a")` is True.  Use these semantics in
+`prefer_plane` / `cut_at="P0"`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -320,8 +371,8 @@ from taskerslabgen import reconstruct_tasker_iii
 
 result = reconstruct_tasker_iii(
     bulk_atoms, charges, miller, layer_thickness_list, bulk_name,
-    plane_tol=0.05, charge_tol=1e-3, dipole_tol=1e-6,
-    vacuum=15.0, plot=True, plot_out_dir=".",
+    plane_tol=None, charge_tol=1e-3, dipole_tol=1e-6,
+    vacuum=15.0, plot=False, plot_out_dir=".",
     verbose=None, bond_threshold=(0.85, 1.15),
     bond_distances=None, prefer_plane=None,
 )
@@ -335,13 +386,13 @@ Returns a dict with `"slab_atoms"`, `"best_candidate"`,
 
 ---
 
-### Core helpers
+### Advanced helpers
 
 | Function | Description |
 |---|---|
 | `build_surface(bulk_atoms, miller, layers, vacuum, verbose)` | Build an ASE surface slab from a bulk structure. |
 | `compute_projection(bulk, surf_bulk, charges, miller, verbose)` | Compute `[Z, z, q]` matrix and lattice-plane spacing *L*. |
-| `identify_planes(atoms_z, L, plane_tol, charge_tol)` | Cluster atoms into atomic planes along the stacking direction. |
+| `identify_planes(atoms_z, L, plane_tol, charge_tol)` | Cluster atoms into atomic planes (`plane_tol=None` = adaptive z-gap clustering). |
 | `compute_reduced_counts(atoms_z)` | Compute reduced (primitive) stoichiometry. |
 | `is_stoichiometric_sequence(sequence_counts, reduced_counts)` | Check if a sequence is a whole-number multiple of bulk formula. |
 | `enumerate_cut_pairs(planes, L, reduced_counts, charge_tol)` | Enumerate all contiguous plane sequences with charge/dipole info. |
@@ -373,7 +424,7 @@ Returns a dict with `"slab_atoms"`, `"best_candidate"`,
 - `src/taskerslabgen/builder.py` — Tasker I/II slab builder.
 - `src/taskerslabgen/chargeparsers.py` — charge parsing (FHI-aims
   Hirshfeld).
-- `example/` — runnable example scripts.
+- `example/` — runnable example scripts and tutorial.
 - `bulk_files/` — example bulk input files.
 - `tests/` — smoke tests (`pytest tests/`).
 
@@ -382,16 +433,20 @@ Returns a dict with `"slab_atoms"`, `"best_candidate"`,
 The example scripts write into `example/output*/`:
 
 - `*_hkl_{miller}_cut_{idx}_{bot}_{top}.png` — per-cut plot of atoms
-  along z with plane IDs, compositions, charges, and cut boundary lines.
-- `*_hkl_{miller}_between_{bot}_{top}_cut_{idx}.{ext}` — slab structure
-  files for each sub-slab.
+  along z with plane IDs, compositions, charges, and cut boundary lines
+  (only when `--plot` is passed).
+- Structure files for each slab / sub-slab (CIF by default in demos).
 
 ## Running tests
 
-```
-pip install pytest
+```bash
+python3 -m pip install -e ".[dev]"
 pytest tests/
 ```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

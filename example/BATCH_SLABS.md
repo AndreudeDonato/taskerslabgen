@@ -1,9 +1,8 @@
 # Batch slab generation (unit-cell bulks)
 
-Generate Tasker I/II/III slabs for many relaxed bulk structures in one run.
+Generate Tasker I/II/III slabs for many bulk structures in one run.
 
 **Script:** `example/batch_unitcell_slabs.py`  
-**Inputs:** FHI-aims `.out` files in `workbulkfiles/unitcell/`  
 **Outputs:** slab `.in` files in `X1output_slabs/` at the repo root
 
 ## 1. Clone and install
@@ -11,23 +10,20 @@ Generate Tasker I/II/III slabs for many relaxed bulk structures in one run.
 ```bash
 git clone https://github.com/AndreudeDonato/taskerslabgen.git
 cd taskerslabgen
-pip install -e .
+python3 -m pip install -U pip setuptools wheel
+python3 -m pip install -e ".[dev]"
 ```
 
 Requires Python >= 3.9. Dependencies: ASE, NumPy, Matplotlib, SciPy.
 
-## 2. Add bulk structures
+## 2. Bulk inputs
 
-Place relaxed unit-cell bulk files here:
+The script looks for inputs in this order:
 
-```
-workbulkfiles/unitcell/
-```
+1. `workbulkfiles/unitcell/*.out` — relaxed FHI-aims bulks (preferred for production batches)
+2. `bulk_files/*.cif` — shipped demo structures (used automatically when no `.out` files are present)
 
-Each file must be readable by ASE (FHI-aims `.out` format). The filename stem
-is used in output names, e.g. `CeO2_fluorite.out` -> `CeO2_fluorite_hkl_111_cut_32.in`.
-
-Expected stems (16 materials):
+Expected stems for a full FHI-aims batch (16 materials):
 
 - `CeO2_fluorite.out`
 - `IrO2_rutile.out`
@@ -46,7 +42,7 @@ Expected stems (16 materials):
 - `VO2_P2c.out`
 - `VO2_rutile.out`
 
-If you already have these locally from a previous run, copy them in:
+If you already have these locally:
 
 ```bash
 cp /path/to/workbulkfiles/unitcell/*.out workbulkfiles/unitcell/
@@ -57,11 +53,14 @@ cp /path/to/workbulkfiles/unitcell/*.out workbulkfiles/unitcell/
 From the repo root:
 
 ```bash
-# Full batch (~16 bulks, all Miller indices per crystal type)
+# Uses shipped CIFs when workbulkfiles are empty
+python example/batch_unitcell_slabs.py --quick
+
+# Full batch (all discovered bulks / Miller indices)
 python example/batch_unitcell_slabs.py
 
-# Quick smoke test (CeO2 only, one Miller index)
-python example/batch_unitcell_slabs.py --quick
+# Optional stacking plots
+python example/batch_unitcell_slabs.py --quick --plot
 ```
 
 ## 4. What the script does
@@ -78,29 +77,11 @@ For each bulk file:
 Output files follow:
 
 ```
-{bulk_stem}_hkl_{h}{k}{l}_cut_{stoich_k}.in
+{stem}_hkl_{h}{k}{l}_cut_{stoich_k}.in
 ```
 
-Diagnostic plots are written alongside the slabs in `X1output_slabs/`.
+## Troubleshooting
 
-## 5. Customisation
-
-Edit the config block at the top of `example/batch_unitcell_slabs.py`:
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `OUTPUT_DIR` | `X1output_slabs/` | Where slab files are written |
-| `WORKBULKFILES` | `workbulkfiles/unitcell/` | Bulk input directory |
-| `THICK_LAYERS` | `6` | Reference slab thickness before cutting |
-| `MILLER_BY_CRYSTAL` | per-structure table | Miller indices per polymorph |
-| `CHARGES` | metal +4, O -2 | Formal charges for Tasker classification |
-| `PREFER_PLANE` | CeO2 (0,0,1) -> O | Force specific plane termination |
-
-## 6. Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| `No .out files found` | Add bulk files to `workbulkfiles/unitcell/` |
-| `Charges dict missing entries` | Add the element to `CHARGES` in the script |
-| `Unknown crystal type for stem` | Add the stem to `STEM_TO_CRYSTAL` and Miller list to `MILLER_BY_CRYSTAL` |
-| `No termination found` | Try relaxing `DIPOLE_TOL` or adjusting `prefer_plane` for that surface |
+- **No bulk inputs found** — add `.out` files under `workbulkfiles/unitcell/`, or rely on shipped `bulk_files/*.cif`.
+- **Missing charges** — extend the `CHARGES` dict in `batch_unitcell_slabs.py`.
+- **Tasker III cut_at="all"** — the library forces `"termination"` when a reconstruction is active; the batch script already uses `"termination"`.

@@ -1,16 +1,34 @@
 """
 Generate all dipole-zero Tasker III reconstructions for CeO2 (001)
-using generate_slabs_for_miller with candidates="all" and plot=True.
+using generate_slabs_for_miller with candidates="all".
+
+Headless by default: writes structures under example/output_tasker3/.
+Pass --view to open ASE's GUI after generation.
 """
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
 
-from ase.io import read
-from ase.visualize import view
+from ase.io import read, write
 
 from taskerslabgen import generate_slabs_for_miller
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--view",
+        action="store_true",
+        help="Open ASE GUI after writing structures (interactive).",
+    )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Write stacking-axis PNG plots next to the structures.",
+    )
+    args = parser.parse_args(argv)
+
     here = Path(__file__).resolve().parent
     bulk_path = here / ".." / "bulk_files" / "CeO2_fluorite.cif"
     charges = {"Ce": 4.0, "O": -2.0}
@@ -29,7 +47,7 @@ def main():
         bulk_name="CeO2",
         plane_tol=0.05,
         vacuum=15.0,
-        plot=True,
+        plot=args.plot,
         plot_out_dir=output_dir.as_posix(),
         verbose=True,
         bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35},
@@ -43,16 +61,24 @@ def main():
         for tid, info in terminations.items():
             slab = info["atoms"][0]
             slabs.append(slab)
+            fname = f"CeO2_hkl_001_term_{tid}_{info['plane_type']}.cif"
+            out_path = output_dir / fname
+            write(out_path.as_posix(), slab)
             print(
                 f"  ID {tid}: type={info['tasker_type']}  "
-                f"plane={info['plane_type']}  atoms={len(slab)}"
+                f"plane={info['plane_type']}  atoms={len(slab)}  -> {fname}"
             )
 
-    if slabs:
-        view(slabs)
-    else:
+    if not slabs:
         print("No slabs generated.")
+        return 1
+
+    if args.view:
+        from ase.visualize import view
+
+        view(slabs)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

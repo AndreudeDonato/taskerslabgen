@@ -12,6 +12,7 @@ from .core import (
     compute_reduced_counts,
     assign_plane_names,
     apply_vacuum_to_slab,
+    plane_name_matches,
 )
 
 
@@ -396,7 +397,7 @@ def find_tasker3_candidates(
             n_combos *= math_comb(available, n_del)
         total_raw_combos += n_combos
 
-    if total_raw_combos > 10000:
+    if total_raw_combos > 10000 and verbose:
         print(
             f"WARNING: ~{total_raw_combos} Tasker III deletion combinations "
             f"to evaluate. This may take a while."
@@ -479,8 +480,12 @@ def find_tasker3_candidates(
                     Z for Z, c in recon_counts.items() if c > 0
                 }
                 if isinstance(prefer_plane, str):
-                    if plane_names is not None and prefer_plane in set(plane_names):
-                        matches_prefer = plane_names[i] == prefer_plane
+                    if plane_names is not None and any(
+                        plane_name_matches(prefer_plane, n) for n in plane_names
+                    ):
+                        matches_prefer = plane_name_matches(
+                            prefer_plane, plane_names[i]
+                        )
                     else:
                         z = atomic_numbers.get(prefer_plane)
                         if z is not None:
@@ -488,10 +493,17 @@ def find_tasker3_candidates(
                 else:
                     try:
                         for e in prefer_plane:
-                            z = atomic_numbers[e] if isinstance(e, str) else int(e)
-                            if present_Zs == {z}:
-                                matches_prefer = True
-                                break
+                            if isinstance(e, str) and plane_names is not None and any(
+                                plane_name_matches(e, n) for n in set(plane_names)
+                            ):
+                                if plane_name_matches(e, plane_names[i]):
+                                    matches_prefer = True
+                                    break
+                            else:
+                                z = atomic_numbers[e] if isinstance(e, str) else int(e)
+                                if present_Zs == {z}:
+                                    matches_prefer = True
+                                    break
                     except (TypeError, AttributeError, KeyError):
                         pass
 
@@ -565,7 +577,7 @@ def build_tasker3_slabs(
     atoms_z_matrix,
     L,
     vacuum=15.0,
-    plane_tol=0.05,
+    plane_tol=None,
 ):
     """
     Build Tasker III slabs with symmetric surface reconstruction.
@@ -594,8 +606,10 @@ def build_tasker3_slabs(
         Lattice-plane spacing (angstrom).
     vacuum : float
         Vacuum to add (angstrom, applied to each side).
-    plane_tol : float
+    plane_tol : float or None
         Tolerance for identifying surface planes by z-coordinate.
+        ``None`` uses ``0.05`` Å for position matching (clustering itself
+        is done upstream by :func:`identify_planes`).
 
     Returns
     -------
@@ -646,8 +660,9 @@ def build_tasker3_slabs(
             bottom_z += L * np.ceil((zmin - bottom_z) / L)
         top_z = bottom_z + lt * L
 
-        bottom_plane_mask = np.abs(z_positions - bottom_z) < plane_tol
-        top_plane_mask = np.abs(z_positions - top_z) < plane_tol
+        pos_tol = 0.05 if plane_tol is None else float(plane_tol)
+        bottom_plane_mask = np.abs(z_positions - bottom_z) < pos_tol
+        top_plane_mask = np.abs(z_positions - top_z) < pos_tol
 
         bottom_indices = np.where(bottom_plane_mask)[0]
         top_indices = np.where(top_plane_mask)[0]
@@ -689,11 +704,11 @@ def reconstruct_tasker_iii(
     miller,
     layer_thickness_list,
     bulk_name,
-    plane_tol=0.05,
+    plane_tol=None,
     charge_tol=1e-3,
     dipole_tol=1e-6,
     vacuum=15.0,
-    plot=True,
+    plot=False,
     plot_out_dir=".",
     verbose=None,
     bond_threshold=(0.85, 1.15),
@@ -718,8 +733,9 @@ def reconstruct_tasker_iii(
         Slab thicknesses in bulk repeat units.
     bulk_name : str
         Label used in filenames.
-    plane_tol : float
-        Tolerance for plane identification (angstrom).
+    plane_tol : float or None
+        Tolerance for plane identification (angstrom).  ``None`` (default)
+        uses adaptive z-gap clustering.
     charge_tol : float
         Tolerance for charge neutrality.
     dipole_tol : float
@@ -727,7 +743,7 @@ def reconstruct_tasker_iii(
     vacuum : float
         Vacuum to add (angstrom, per side).
     plot : bool
-        Generate a stacking-axis plot.
+        Generate a stacking-axis plot (default ``False``).
     plot_out_dir : str
         Directory for plot files.
     verbose : bool or None
