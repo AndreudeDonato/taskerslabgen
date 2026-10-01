@@ -1,5 +1,5 @@
 """
-Regression tests for the issues found in the 0.3.1 review (REVIEW_NOTES.md).
+Regression tests for the issues found in the reviews of 0.3.1 and of the fix branch.
 
 Each test names the review item it covers.  Structures are unit cells (at
 most 2x2 in plane) so the Tasker III enumeration stays small.
