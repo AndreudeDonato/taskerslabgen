@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import numpy as np
 from ase import Atoms
 from ase.data import atomic_numbers, chemical_symbols
@@ -242,31 +244,75 @@ def generate_slabs_for_miller(
     if isinstance(millers, tuple) and len(millers) == 3 and all(isinstance(x, (int, float)) for x in millers):
         millers = [millers]
 
-    result = {}
-    for miller in millers:
-        result[tuple(miller)] = _generate_for_one_miller(
-            bulk_atoms, charges, tuple(miller), layer_thickness_list, bulk_name,
-            plane_tol, charge_tol, dipole_tol, vacuum,
-            plot, plot_out_dir, verbose,
-            bond_threshold, bond_distances,
-            prefer_plane, candidates, savecandidates, surface_supercell, max_masks,
+    opts = _Options(
+        layers=tuple(layer_thickness_list), bulk_name=bulk_name, plane_tol=plane_tol,
+        charge_tol=charge_tol, dipole_tol=dipole_tol, vacuum=vacuum, plot=plot,
+        plot_out_dir=plot_out_dir, verbose=verbose, bond_threshold=bond_threshold,
+        bond_distances=bond_distances, max_masks=max_masks,
+    )
+    return {
+        tuple(miller): _generate_for_one_miller(
+            bulk_atoms, charges, tuple(miller), opts, prefer_plane, candidates,
+            savecandidates, surface_supercell,
         )
+        for miller in millers
+    }
 
-    return result
+
+@dataclass(frozen=True)
+class _Options:
+    """User options shared by every step of slab generation."""
+
+    layers: tuple
+    bulk_name: str = "slab"
+    plane_tol: object = None
+    charge_tol: float = 1e-3
+    dipole_tol: float = 0.05
+    vacuum: float = 15.0
+    plot: bool = False
+    plot_out_dir: str = "."
+    verbose: object = None
+    bond_threshold: tuple = (0.85, 1.15)
+    bond_distances: object = None
+    max_masks: int = 200000
 
 
-def _generate_for_one_miller(
-    bulk_atoms, charges, miller, layer_thickness_list, bulk_name,
-    plane_tol, charge_tol, dipole_tol, vacuum,
-    plot, plot_out_dir, verbose,
-    bond_threshold, bond_distances,
-    prefer_plane, candidates, savecandidates, surface_supercell=None, max_masks=200000,
-):
-    h, k, l = miller
+@dataclass
+class _Facet:
+    """One orientation of the bulk, analysed: its planes, labels and charges."""
 
-    if verbose:
-        print(f"\nGenerating Tasker slab for {bulk_name} with Miller index ({h}, {k}, {l})\n")
+    bulk: Atoms          # index-tagged bulk (oriented when surface_supercell is used)
+    miller: tuple        # Miller index of `bulk` used to build slabs
+    out_miller: tuple    # Miller index reported to the user
+    surf_bulk: Atoms     # one-layer cell from build_surface
+    atoms_z: np.ndarray  # [Z, z, q] of surf_bulk
+    L: float             # repeat-unit height along the normal
+    planes: list         # planes sorted by z (identify_planes)
+    names: list          # plane labels, aligned with `planes`
+    name_map: dict
+    reduced_counts: dict
+    charges_list: list   # charge of every atom of the input bulk
 
+    def validation(self, opts):
+        """Keyword arguments of :func:`_finalize_slab`."""
+        return {
+            "charges_list": self.charges_list,
+            "reduced_counts": self.reduced_counts,
+            "charge_tol": opts.charge_tol,
+            "dipole_tol": opts.dipole_tol,
+        }
+
+    def finalize(self, slabs, opts):
+        """Validate slabs, drop the index tag, add ``bulk_name``/``miller`` info."""
+        for slab in slabs:
+            _finalize_slab(slab, **self.validation(opts))
+            slab.info["bulk_name"] = opts.bulk_name
+            slab.info["miller"] = self.out_miller
+        return slabs
+
+
+def _analyse_facet(bulk_atoms, charges, miller, opts, surface_supercell=None):
+    """Planes, labels and charges of the *miller* surface of *bulk_atoms*."""
     # Slabs are cut from an index-tagged copy of the bulk so every slab atom
     # can be traced back to its bulk atom (charges, validation).
     charges_list = _charges_to_list(bulk_atoms, charges)
@@ -275,40 +321,49 @@ def _generate_for_one_miller(
             f"Charges length ({len(charges_list)}) does not match atoms ({len(bulk_atoms)})."
         )
     bulk = _tag_atom_indices(bulk_atoms)
-    out_miller = miller
+    out_miller = tuple(miller)
     if surface_supercell is not None:
         bulk = _oriented_bulk(bulk, miller, surface_supercell)
         miller = (0, 0, 1)
 
-    surf_bulk = build_surface(bulk, miller, layers=1, verbose=verbose)
-    atoms_z_matrix, L = compute_projection(
+    surf_bulk = build_surface(bulk, miller, layers=1, verbose=opts.verbose)
+    atoms_z, L = compute_projection(
         bulk, surf_bulk, [charges_list[i] for i in surf_bulk.arrays[_INDEX_KEY]], miller,
-        verbose=verbose,
+        verbose=opts.verbose,
     )
-    planes = identify_planes(atoms_z_matrix, L, plane_tol=plane_tol, charge_tol=charge_tol)
-    reduced_counts = compute_reduced_counts(atoms_z_matrix)
-    sequences = enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=charge_tol)
-    best_seq = select_best_sequence(sequences, dipole_tol=dipole_tol)
+    planes = sorted(
+        identify_planes(atoms_z, L, plane_tol=opts.plane_tol, charge_tol=opts.charge_tol),
+        key=lambda p: p["z_center"] % L,
+    )
+    names, name_map = assign_plane_names(planes, atoms=surf_bulk)
+    return _Facet(
+        bulk=bulk, miller=tuple(miller), out_miller=out_miller, surf_bulk=surf_bulk,
+        atoms_z=atoms_z, L=L, planes=planes, names=names, name_map=name_map,
+        reduced_counts=compute_reduced_counts(atoms_z), charges_list=charges_list,
+    )
 
+
+def _generate_for_one_miller(bulk_atoms, charges, miller, opts, prefer_plane, candidates,
+                             savecandidates, surface_supercell=None):
+    h, k, l = miller
+    if opts.verbose:
+        print(f"\nGenerating Tasker slab for {opts.bulk_name} with Miller index ({h}, {k}, {l})\n")
+
+    facet = _analyse_facet(bulk_atoms, charges, miller, opts, surface_supercell)
+    sequences = enumerate_cut_pairs(facet.planes, facet.L, facet.reduced_counts,
+                                    charge_tol=opts.charge_tol)
+    best_seq = select_best_sequence(sequences, dipole_tol=opts.dipole_tol)
     if best_seq is None:
         raise ValueError("No valid stoichiometry sequences found.")
 
-    planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
-    plane_names, plane_name_map = assign_plane_names(planes_sorted, atoms=surf_bulk)
-    validation = {
-        "charges_list": charges_list,
-        "reduced_counts": reduced_counts,
-        "charge_tol": charge_tol,
-        "dipole_tol": dipole_tol,
-    }
-
-    if verbose:
+    if opts.verbose:
+        n = len(facet.planes)
         valid_sequences = [s for s in sequences if s["is_neutral"] and s["is_stoich"]]
         print("\nValid stoichiometry sequences (charge-neutral, reduced formula):")
         for i, seq in enumerate(valid_sequences):
-            tasker_tag = "Tasker II" if seq["dipole_per_fu"] <= dipole_tol else "Tasker III"
-            bottom_edge = f"{seq['bottom_cut']}-{(seq['bottom_cut'] + 1) % len(planes)}"
-            top_edge = f"{seq['top_cut']}-{(seq['top_cut'] + 1) % len(planes)}"
+            tasker_tag = "Tasker II" if seq["dipole_per_fu"] <= opts.dipole_tol else "Tasker III"
+            bottom_edge = f"{seq['bottom_cut']}-{(seq['bottom_cut'] + 1) % n}"
+            top_edge = f"{seq['top_cut']}-{(seq['top_cut'] + 1) % n}"
             print(
                 f"{i:3d}  dir={seq['direction']}  "
                 f"bottom_cut={bottom_edge} top_cut={top_edge}  "
@@ -317,51 +372,52 @@ def _generate_for_one_miller(
                 f"z_center={seq['z_center']:.3f} {tasker_tag}"
             )
 
-    # ---- Tasker I/II ----
     if best_seq["is_tasker_ii"]:
-        return _tasker12_path(
-            bulk, charges, miller, out_miller, layer_thickness_list, bulk_name,
-            planes, planes_sorted, plane_names, plane_name_map,
-            sequences, reduced_counts, atoms_z_matrix, L, surf_bulk,
-            dipole_tol, vacuum, plane_tol,
-            plot, plot_out_dir, verbose,
-            bond_threshold, bond_distances,
-            prefer_plane, candidates, savecandidates, validation,
-        )
+        return _tasker12_path(facet, sequences, opts, prefer_plane, candidates, savecandidates)
 
-    # ---- Tasker III ----
-    if verbose:
+    if opts.verbose:
         print(
             f"No Tasker I/II plane found for miller=({h},{k},{l}) "
-            f"on {bulk_name}. Reconstructing Tasker III slab."
+            f"on {opts.bulk_name}. Reconstructing Tasker III slab."
         )
-
-    return _tasker3_path(
-        bulk, charges, miller, out_miller, layer_thickness_list, bulk_name,
-        planes, planes_sorted, plane_names, plane_name_map,
-        reduced_counts, atoms_z_matrix, L, surf_bulk,
-        vacuum, plane_tol, charge_tol,
-        plot, plot_out_dir, verbose,
-        bond_threshold, bond_distances,
-        prefer_plane, candidates, savecandidates, validation, max_masks,
-    )
+    return _tasker3_path(facet, opts, prefer_plane, candidates, savecandidates)
 
 
-def _tasker12_path(
-    bulk_atoms, charges, miller, out_miller, layer_thickness_list, bulk_name,
-    planes, planes_sorted, plane_names, plane_name_map,
-    sequences, reduced_counts, atoms_z_matrix, L, surf_bulk,
-    dipole_tol, vacuum, plane_tol,
-    plot, plot_out_dir, verbose,
-    bond_threshold, bond_distances,
-    prefer_plane, candidates_mode, savecandidates, validation,
-):
+def _select(terminations, prefer_plane, candidates_mode):
+    """Apply prefer_plane, then keep the best (lowest ID) if asked."""
+    filtered = _filter_by_prefer_plane(terminations, prefer_plane)
+    if candidates_mode == "best" and filtered:
+        best_tid = min(filtered)  # IDs are in rank order
+        return {best_tid: filtered[best_tid]}
+    return filtered
+
+
+def _save_candidates(slabs, facet, opts, kind):
+    """Write one slab per candidate to an extxyz file in plot_out_dir."""
+    from pathlib import Path
+
+    out_dir = Path(opts.plot_out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    frames = []
+    for tid, slab in enumerate(slabs):
+        frame = Atoms(numbers=slab.numbers, positions=slab.positions, cell=slab.cell, pbc=slab.pbc)
+        frame.info = {"candidate_id": tid}
+        frames.append(frame)
+    h, k, l = facet.out_miller
+    path = out_dir / f"{opts.bulk_name}_hkl_{h}{k}{l}_candidates.xyz"
+    write(path.as_posix(), frames, format="extxyz")
+    if opts.verbose:
+        print(f"Saved {len(frames)} Tasker {kind} candidates to {path}\n")
+
+
+def _tasker12_path(facet, sequences, opts, prefer_plane, candidates_mode, savecandidates):
     from .plotting import plot_unitcell_atoms
     from .builder import build_cut_slabs
-    from .tasker3 import _bonds_across_plane
+    from .tasker3 import _bond_pairs, _bonds_across_plane
 
-    h, k, l = out_miller
-    n_pl = len(planes_sorted)
+    planes, names, L = facet.planes, facet.names, facet.L
+    n_pl = len(planes)
+    h, k, l = facet.out_miller
 
     # One entry per zero-dipole bulk repeat unit (full period); each gives
     # slabs of exactly `lt` repeat units.  Ranked by bulk bonds broken at the
@@ -369,266 +425,183 @@ def _tasker12_path(
     # label, so the order does not depend on the bulk origin.  IDs follow
     # the ranking (ID 0 = best).
     periodic = Atoms(
-        numbers=surf_bulk.numbers, positions=surf_bulk.positions,
-        cell=surface_bulk_cell(bulk_atoms, miller), pbc=True,
+        numbers=facet.surf_bulk.numbers, positions=facet.surf_bulk.positions,
+        cell=surface_bulk_cell(facet.bulk, facet.miller), pbc=True,
     )
-    area = float(np.linalg.norm(np.cross(surf_bulk.cell[0], surf_bulk.cell[1])))
+    bonds = _bond_pairs(periodic, opts.bond_threshold, opts.bond_distances)
+    area = float(np.linalg.norm(np.cross(facet.surf_bulk.cell[0], facet.surf_bulk.cell[1])))
     ranked = []
     for s in sequences:
         if not (s["is_neutral"] and s["is_stoich"] and s["is_full_period"]
-                and s["dipole_per_fu"] <= dipole_tol):
+                and s["dipole_per_fu"] <= opts.dipole_tol):
             continue
         cut = s["bottom_cut"]
         bot, top = (cut + 1) % n_pl, cut
         z_cut, _ = compute_cut_positions(planes, L, cut, cut)
         seq = dict(s)
-        seq["broken_bonds_by_pair"] = _bonds_across_plane(
-            periodic, z_cut, L, bond_threshold, bond_distances
-        )
+        seq["broken_bonds_by_pair"] = _bonds_across_plane(periodic, z_cut, L, bonds=bonds)
         seq["broken_bonds"] = sum(seq["broken_bonds_by_pair"].values())
         seq["surface_density"] = (
-            len(planes_sorted[bot]["indices"]) + len(planes_sorted[top]["indices"])
+            len(planes[bot]["indices"]) + len(planes[top]["indices"])
         ) / (2.0 * area)
-        key = (seq["broken_bonds"], -round(seq["surface_density"], 6),
-               plane_names[bot], plane_names[top], cut)
+        key = (seq["broken_bonds"], -round(seq["surface_density"], 6), names[bot], names[top], cut)
         ranked.append((key, seq, bot))
     ranked.sort(key=lambda r: r[0])
-    zero_dipole = [seq for _, seq, _ in ranked]
 
-    all_terminations = {}
-    for tid, (_, seq, bot_plane_idx) in enumerate(ranked):
-        all_terminations[tid] = {
+    terminations = {
+        tid: {
             "sequence": seq,
-            "plane_type": plane_names[bot_plane_idx],
-            "plane_counts": dict(planes_sorted[bot_plane_idx]["counts"]),
+            "plane_type": names[bot],
+            "plane_counts": dict(planes[bot]["counts"]),
         }
+        for tid, (_, seq, bot) in enumerate(ranked)
+    }
+    selected = _select(terminations, prefer_plane, candidates_mode)
 
-    filtered = _filter_by_prefer_plane(all_terminations, prefer_plane)
+    def build(seq, layers):
+        zbot, ztop = compute_cut_positions(planes, L, seq["bottom_cut"], seq["top_cut"])
+        return build_cut_slabs(facet.bulk, facet.miller, layers, zbot, ztop, L, opts.vacuum)
 
-    if candidates_mode == "best" and filtered:
-        # IDs are in rank order: fewest broken bonds, then densest surface.
-        best_tid = min(filtered)
-        selected = {best_tid: filtered[best_tid]}
-    else:
-        selected = filtered
-
-    if savecandidates and zero_dipole:
-        from pathlib import Path
-        out_p = Path(plot_out_dir)
-        out_p.mkdir(parents=True, exist_ok=True)
-        all_slabs_for_xyz = []
-        for tid, seq in enumerate(zero_dipole):
-            zbot_i, ztop_i = compute_cut_positions(planes, L, seq["bottom_cut"], seq["top_cut"])
-            slabs_i = build_cut_slabs(bulk_atoms, miller, [layer_thickness_list[0]], zbot_i, ztop_i, L, vacuum)
-            slab = slabs_i[0].copy()
-            for key in list(slab.arrays):
-                if key not in ("positions", "numbers"):
-                    del slab.arrays[key]
-            slab.info = {"candidate_id": tid}
-            all_slabs_for_xyz.append(slab)
-        cand_path = out_p / f"{bulk_name}_hkl_{h}{k}{l}_candidates.xyz"
-        write(cand_path.as_posix(), all_slabs_for_xyz, format="extxyz")
-        if verbose:
-            print(f"Saved {len(all_slabs_for_xyz)} Tasker I/II candidates to {cand_path}\n")
+    if savecandidates and ranked:
+        _save_candidates([build(seq, [opts.layers[0]])[0] for _, seq, _ in ranked], facet, opts, "I/II")
 
     output = {}
-    for tid, term_info in selected.items():
-        seq = term_info["sequence"]
-        zbot, ztop = compute_cut_positions(planes, L, seq["bottom_cut"], seq["top_cut"])
-        slabs = build_cut_slabs(bulk_atoms, miller, layer_thickness_list, zbot, ztop, L, vacuum)
-
-        if plot:
-            n_pl = len(planes_sorted)
-            bp = plane_names[(seq["bottom_cut"] + 1) % n_pl]
-            tp = plane_names[seq["top_cut"]]
-            plot_path = (
-                f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}"
-                f"_{bp}_{tp}_{tid}.png"
-            )
+    for tid, term in selected.items():
+        seq = term["sequence"]
+        slabs = facet.finalize(build(seq, opts.layers), opts)
+        if opts.plot:
+            zbot, ztop = compute_cut_positions(planes, L, seq["bottom_cut"], seq["top_cut"])
+            bp, tp = names[(seq["bottom_cut"] + 1) % n_pl], names[seq["top_cut"]]
             plot_unitcell_atoms(
-                atoms_z_matrix, L, out_miller,
-                out_png=plot_path, plane_tol=plane_tol, planes=planes,
-                zbot=zbot, ztop=ztop, dipole=seq["net_dipole"],
-                plane_names=plane_names,
+                facet.atoms_z, L, facet.out_miller,
+                out_png=f"{opts.plot_out_dir}/{opts.bulk_name}_hkl_{h}{k}{l}_{bp}_{tp}_{tid}.png",
+                plane_tol=opts.plane_tol, planes=planes,
+                zbot=zbot, ztop=ztop, dipole=seq["net_dipole"], plane_names=names,
             )
-
-        for slab in slabs:
-            _finalize_slab(slab, **validation)
-            slab.info["bulk_name"] = bulk_name
-            slab.info["miller"] = out_miller
-
         output[tid] = {
             "atoms": slabs,
             "tasker_type": "I/II",
-            "plane_type": term_info["plane_type"],
-            "top_plane_type": plane_names[seq["top_cut"]],
-            "plane_counts": term_info["plane_counts"],
+            "plane_type": term["plane_type"],
+            "top_plane_type": names[seq["top_cut"]],
+            "plane_counts": term["plane_counts"],
             "reconstruction": None,
             "candidate": seq,
         }
-
     return output
 
 
-def _tasker3_path(
-    bulk_atoms, charges, miller, out_miller, layer_thickness_list, bulk_name,
-    planes, planes_sorted, plane_names, plane_name_map,
-    reduced_counts, atoms_z_matrix, L, surf_bulk,
-    vacuum, plane_tol, charge_tol,
-    plot, plot_out_dir, verbose,
-    bond_threshold, bond_distances,
-    prefer_plane, candidates_mode, savecandidates, validation, max_masks=200000,
-):
-    from .plotting import plot_unitcell_atoms
+def _tasker3_candidates(facet, opts, prefer_plane=None):
+    """All scored Tasker III candidates (ranked) and the valid ones; raises
+    ``ValueError`` if none is valid."""
     from .tasker3 import (
         build_adjacency_matrix,
         find_tasker3_candidates,
-        build_tasker3_slabs,
         print_adjacency_matrix,
-        _reconstruction_metadata,
         _select_tasker3_candidates,
     )
 
-    h, k, l = out_miller
-
-    if verbose:
+    if opts.verbose:
         adj = build_adjacency_matrix(
-            surf_bulk, bond_threshold=bond_threshold, bond_distances=bond_distances,
-            bulk_atoms=bulk_atoms, miller=miller,
+            facet.surf_bulk, bond_threshold=opts.bond_threshold,
+            bond_distances=opts.bond_distances, bulk_atoms=facet.bulk, miller=facet.miller,
         )
-        print(f"Adjacency: {int(np.sum(adj)) // 2} bonds (threshold {bond_threshold})")
-        print_adjacency_matrix(adj, surf_bulk)
+        print(f"Adjacency: {int(np.sum(adj)) // 2} bonds (threshold {opts.bond_threshold})")
+        print_adjacency_matrix(adj, facet.surf_bulk)
 
+    candidates = find_tasker3_candidates(
+        facet.planes, facet.atoms_z, facet.reduced_counts, None, facet.L,
+        surf_bulk=facet.surf_bulk, bond_distances=opts.bond_distances,
+        charge_tol=opts.charge_tol, verbose=opts.verbose, prefer_plane=prefer_plane,
+        plane_names=facet.names, dipole_tol=opts.dipole_tol,
+        bulk_atoms=facet.bulk, miller=facet.miller, bond_threshold=opts.bond_threshold,
+        min_layers=min(opts.layers), max_masks=opts.max_masks,
+    )
+    valid = _select_tasker3_candidates(candidates, facet.out_miller, opts.dipole_tol, opts.charge_tol)
+    return candidates, valid
+
+
+def _tasker3_slabs(facet, opts, cand, layers):
+    from .tasker3 import build_tasker3_slabs
+
+    return build_tasker3_slabs(
+        facet.bulk, facet.miller, layers,
+        cut_plane_idx=cand["cut_plane_idx"], deletion_mask=cand["deletion_mask"],
+        planes_sorted=facet.planes, atoms_z_matrix=facet.atoms_z, L=facet.L,
+        vacuum=opts.vacuum,
+    )
+
+
+def _tasker3_termination(facet, opts, cand, plot_path=None):
+    """Validated slabs, reconstruction metadata and plot of one candidate."""
+    from .plotting import plot_unitcell_atoms
+    from .tasker3 import _reconstruction_metadata
+
+    i = cand["cut_plane_idx"]
+    reconstruction = _reconstruction_metadata(
+        cand, facet.planes, facet.names, facet.name_map,
+        facet.atoms_z, facet.surf_bulk, facet.bulk, facet.miller, facet.L,
+    )
+    slabs = facet.finalize(_tasker3_slabs(facet, opts, cand, opts.layers), opts)
+    if opts.verbose:
+        def composition(counts):
+            return "+".join(
+                f"{v}{chemical_symbols[Z]}" if v > 1 else chemical_symbols[Z]
+                for Z, v in sorted(counts.items())
+            )
+
+        print(
+            f"  {facet.names[i]}={composition(facet.planes[i]['counts'])}  "
+            f"-> {cand['recon_label']}={composition(reconstruction['recon_counts'])}  "
+            f"mu={cand['net_dipole']:+.4e}  bonds_broken={cand['bond_score']}"
+        )
+    if opts.plot and plot_path is not None:
+        zbot, ztop = compute_cut_positions(facet.planes, facet.L, (i - 1) % len(facet.planes), i)
+        recon_names = list(facet.names)
+        recon_names[i] = cand["recon_label"]
+        plot_unitcell_atoms(
+            facet.atoms_z, facet.L, facet.out_miller,
+            out_png=plot_path, plane_tol=opts.plane_tol, planes=facet.planes,
+            zbot=zbot, ztop=ztop, dipole=cand["net_dipole"], plane_names=recon_names,
+        )
+    return slabs, reconstruction
+
+
+def _tasker3_path(facet, opts, prefer_plane, candidates_mode, savecandidates):
     # Ranked independently of prefer_plane, so IDs do not depend on it;
     # prefer_plane only filters.
-    t3_candidates = find_tasker3_candidates(
-        planes_sorted, atoms_z_matrix, reduced_counts, None, L,
-        surf_bulk=surf_bulk, bond_distances=bond_distances,
-        charge_tol=charge_tol, verbose=verbose,
-        plane_names=plane_names, dipole_tol=validation["dipole_tol"],
-        bulk_atoms=bulk_atoms, miller=miller, bond_threshold=bond_threshold,
-        min_layers=min(layer_thickness_list), max_masks=max_masks,
-    )
-    t3_candidates = _select_tasker3_candidates(
-        t3_candidates, out_miller, validation["dipole_tol"], charge_tol
-    )
-
-    all_terminations = {}
-    for tid, cand in enumerate(t3_candidates):
-        all_terminations[tid] = {
+    _, valid = _tasker3_candidates(facet, opts)
+    terminations = {
+        tid: {
             "candidate": cand,
             "plane_type": cand["recon_label"],
             "plane_counts": dict(cand["plane_counts"]),
         }
-
-    filtered = _filter_by_prefer_plane(all_terminations, prefer_plane)
-
-    if candidates_mode == "best" and filtered:
-        # IDs are in rank order: fewest broken bonds, then distribution.
-        best_tid = min(filtered)
-        selected = {best_tid: filtered[best_tid]}
-    else:
-        selected = filtered
+        for tid, cand in enumerate(valid)
+    }
+    selected = _select(terminations, prefer_plane, candidates_mode)
 
     if savecandidates:
-        from pathlib import Path
-        out_p = Path(plot_out_dir)
-        out_p.mkdir(parents=True, exist_ok=True)
-        all_slabs_for_xyz = []
-        for tid, cand in enumerate(t3_candidates):
-            slabs_i = build_tasker3_slabs(
-                bulk_atoms, miller, [layer_thickness_list[0]],
-                cut_plane_idx=cand["cut_plane_idx"],
-                deletion_mask=cand["deletion_mask"],
-                planes_sorted=planes_sorted,
-                atoms_z_matrix=atoms_z_matrix,
-                L=L, vacuum=vacuum, plane_tol=plane_tol,
-            )
-            slab = slabs_i[0].copy()
-            for key in list(slab.arrays):
-                if key not in ("positions", "numbers"):
-                    del slab.arrays[key]
-            slab.info = {"candidate_id": tid}
-            all_slabs_for_xyz.append(slab)
-        cand_path = out_p / f"{bulk_name}_hkl_{h}{k}{l}_candidates.xyz"
-        write(cand_path.as_posix(), all_slabs_for_xyz, format="extxyz")
-        if verbose:
-            print(f"Saved {len(all_slabs_for_xyz)} Tasker III candidates to {cand_path}\n")
+        _save_candidates([_tasker3_slabs(facet, opts, cand, [opts.layers[0]])[0] for cand in valid],
+                         facet, opts, "III")
 
+    h, k, l = facet.out_miller
     output = {}
-    for tid, term_info in selected.items():
-        cand = term_info["candidate"]
-        cut_plane = planes_sorted[cand["cut_plane_idx"]]
-        cut_plane_name = plane_names[cand["cut_plane_idx"]]
-
-        reconstruction = _reconstruction_metadata(
-            cand, planes_sorted, plane_names, plane_name_map,
-            atoms_z_matrix, surf_bulk, bulk_atoms, miller, L,
+    for tid, term in selected.items():
+        cand = term["candidate"]
+        label = cand["recon_label"]
+        if opts.verbose:
+            print(f"  Termination {tid}:", end="")
+        slabs, reconstruction = _tasker3_termination(
+            facet, opts, cand,
+            plot_path=f"{opts.plot_out_dir}/{opts.bulk_name}_hkl_{h}{k}{l}_{label}_{label}_{tid}.png",
         )
-        delete_info = reconstruction["delete_info"]
-
-        slabs = build_tasker3_slabs(
-            bulk_atoms, miller, layer_thickness_list,
-            cut_plane_idx=cand["cut_plane_idx"],
-            deletion_mask=cand["deletion_mask"],
-            planes_sorted=planes_sorted,
-            atoms_z_matrix=atoms_z_matrix,
-            L=L, vacuum=vacuum,
-        )
-
-        if verbose:
-            recon_comp = dict(cut_plane["counts"])
-            for sp, _, _ in delete_info:
-                recon_comp[sp] = recon_comp.get(sp, 0) - 1
-            recon_comp = {k: v for k, v in recon_comp.items() if v > 0}
-
-            def _cl(c):
-                return "+".join(
-                    f"{v}{chemical_symbols[k]}" if v > 1 else chemical_symbols[k]
-                    for k, v in sorted(c.items())
-                )
-
-            print(
-                f"  Termination {tid}: {cut_plane_name}={_cl(cut_plane['counts'])}  "
-                f"-> {cut_plane_name}-recon={_cl(recon_comp)}  "
-                f"mu={cand['net_dipole']:+.4e}  bonds_broken={cand['bond_score']}"
-            )
-
-        if plot:
-            zbot, ztop = compute_cut_positions(
-                planes_sorted, L, (cand["cut_plane_idx"] - 1) % len(planes_sorted),
-                cand["cut_plane_idx"],
-            )
-
-            recon_names = list(plane_names)
-            recon_names[cand["cut_plane_idx"]] = f"{plane_names[cand['cut_plane_idx']]}-recon"
-
-            bp = f"{plane_names[cand['cut_plane_idx']]}-recon"
-            tp = bp
-            plot_path = (
-                f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}"
-                f"_{bp}_{tp}_{tid}.png"
-            )
-            plot_unitcell_atoms(
-                atoms_z_matrix, L, out_miller,
-                out_png=plot_path, plane_tol=plane_tol, planes=planes,
-                zbot=zbot, ztop=ztop, dipole=cand["net_dipole"],
-                plane_names=recon_names,
-            )
-
-        for slab in slabs:
-            _finalize_slab(slab, **validation)
-            slab.info["bulk_name"] = bulk_name
-            slab.info["miller"] = out_miller
-
         output[tid] = {
             "atoms": slabs,
             "tasker_type": "III",
-            "plane_type": cand["recon_label"],
-            "top_plane_type": cand["recon_label"],
-            "plane_counts": dict(cut_plane["counts"]),
+            "plane_type": label,
+            "top_plane_type": label,
+            "plane_counts": dict(cand["plane_counts"]),
             "reconstruction": reconstruction,
             "candidate": cand,
         }
-
     return output

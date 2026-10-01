@@ -355,6 +355,10 @@ def cutslab(
             })
 
     valid_cuts.sort(key=lambda c: c["n_planes"])
+    # Exposed copies of the reconstructed plane carry its label.
+    plot_names = list(plane_names)
+    for i in recon_eligible:
+        plot_names[i] = recon_label
 
     if valid_cuts and cuts == "right":
         fixed_bot = min(c["bottom_plane"] for c in valid_cuts)
@@ -374,8 +378,8 @@ def cutslab(
             print(f"Reconstruction-eligible planes: {sorted(recon_eligible)}")
         print(f"\nValid cuts (mode={cuts!r}): {len(valid_cuts)}")
         for i, cut in enumerate(valid_cuts):
-            bn = plane_names[cut["bottom_plane"]]
-            tn = plane_names[cut["top_plane"]]
+            bn = plot_names[cut["bottom_plane"]]
+            tn = plot_names[cut["top_plane"]]
             print(
                 f"  {i:3d}  {bn}[{cut['bottom_plane']}]"
                 f"-{tn}[{cut['top_plane']}]  "
@@ -413,9 +417,6 @@ def cutslab(
 
     # ---- Prepare plot names ----
     highlight_set = set(boundary_indices) | recon_eligible
-    plot_names = list(plane_names)
-    for i in recon_eligible:
-        plot_names[i] = recon_label
 
     z_s = np.array([p["z_center"] % L for p in planes_sorted])
 

@@ -872,30 +872,50 @@ def _plane_translations(ref, tgt, cell2d, tol):
     same species.  Several are found when a plane maps onto itself under a
     shift that is not a lattice vector.
     """
-    if len(ref) != len(tgt):
-        return []
-    ref_Z = np.array([a[0] for a in ref], dtype=int)
-    tgt_Z = np.array([a[0] for a in tgt], dtype=int)
-    species, counts = np.unique(ref_Z, return_counts=True)
-    tgt_species, tgt_counts = np.unique(tgt_Z, return_counts=True)
-    if not (np.array_equal(species, tgt_species) and np.array_equal(counts, tgt_counts)):
+    pairing = _plane_pairing(ref, tgt)
+    if pairing is None:
         return []
     if len(ref) == 0:
         return [np.zeros(2)]
-
-    ref_f = np.array([[a[1], a[2]] for a in ref], dtype=float)
-    tgt_f = np.array([[a[1], a[2]] for a in tgt], dtype=float)
-    cell2d = np.asarray(cell2d, dtype=float)
-    anchor_Z = species[np.argmin(counts)]
-    anchor = int(np.flatnonzero(ref_Z == anchor_Z)[0])
     found = []
-    for b in np.flatnonzero(tgt_Z == anchor_Z):
-        t = (tgt_f[b] - ref_f[anchor]) % 1.0
+    for t in pairing["shifts"]:
+        t = t % 1.0
         if _shift_matches(ref, tgt, t, cell2d, tol) and not any(
             _frac_distance(t, u, cell2d) < 1e-3 for u in found
         ):
             found.append(t)
     return found
+
+
+def _plane_pairing(ref, tgt):
+    """
+    Common set-up for matching plane *ref* onto plane *tgt* (atoms
+    ``(Z, fx, fy, ...)``): ``None`` if their compositions differ, else the
+    fractional positions, the atom indices of each species in both planes,
+    and the candidate shifts that put one atom of the rarest species of
+    *ref* onto each atom of that species in *tgt*.
+    """
+    if len(ref) != len(tgt):
+        return None
+    ref_Z = np.array([a[0] for a in ref], dtype=int)
+    tgt_Z = np.array([a[0] for a in tgt], dtype=int)
+    species, counts = np.unique(ref_Z, return_counts=True)
+    tgt_species, tgt_counts = np.unique(tgt_Z, return_counts=True)
+    if not (np.array_equal(species, tgt_species) and np.array_equal(counts, tgt_counts)):
+        return None
+    ref_f = np.array([[a[1], a[2]] for a in ref], dtype=float).reshape(-1, 2)
+    tgt_f = np.array([[a[1], a[2]] for a in tgt], dtype=float).reshape(-1, 2)
+    shifts = []
+    if len(ref):
+        anchor_Z = species[np.argmin(counts)]
+        anchor = int(np.flatnonzero(ref_Z == anchor_Z)[0])
+        shifts = [tgt_f[b] - ref_f[anchor] for b in np.flatnonzero(tgt_Z == anchor_Z)]
+    return {
+        "ref_f": ref_f,
+        "tgt_f": tgt_f,
+        "groups": [(np.flatnonzero(ref_Z == Z), np.flatnonzero(tgt_Z == Z)) for Z in species],
+        "shifts": shifts,
+    }
 
 
 def _frac_distance(a, b, cell2d):
@@ -1020,22 +1040,14 @@ def _plane_rmsd(ref, tgt, cell2d):
     rigid in-plane shift (and removal of the mean height); ``inf`` if the
     compositions differ.
     """
-    ref_Z = np.array([a[0] for a in ref], dtype=int)
-    tgt_Z = np.array([a[0] for a in tgt], dtype=int)
-    species, counts = np.unique(ref_Z, return_counts=True)
-    tgt_species, tgt_counts = np.unique(tgt_Z, return_counts=True)
-    if len(ref) != len(tgt) or not (
-        np.array_equal(species, tgt_species) and np.array_equal(counts, tgt_counts)
-    ):
+    pairing = _plane_pairing(ref, tgt)
+    if pairing is None:
         return float("inf")
-    ref_f = np.array([[a[1], a[2]] for a in ref], dtype=float)
-    tgt_f = np.array([[a[1], a[2]] for a in tgt], dtype=float)
+    ref_f, tgt_f, groups = pairing["ref_f"], pairing["tgt_f"], pairing["groups"]
     ref_dz = np.array([a[3] for a in ref], dtype=float)
     tgt_dz = np.array([a[3] for a in tgt], dtype=float)
     ref_dz, tgt_dz = ref_dz - ref_dz.mean(), tgt_dz - tgt_dz.mean()
     cell2d = np.asarray(cell2d, dtype=float)
-    groups = [(np.flatnonzero(ref_Z == Z), np.flatnonzero(tgt_Z == Z)) for Z in species]
-    anchor = int(np.flatnonzero(ref_Z == species[np.argmin(counts)])[0])
 
     def residuals(t):
         res = []
@@ -1049,8 +1061,7 @@ def _plane_rmsd(ref, tgt, cell2d):
         return res
 
     best = float("inf")
-    for b in np.flatnonzero(tgt_Z == species[np.argmin(counts)]):
-        t = tgt_f[b] - ref_f[anchor]
+    for t in pairing["shifts"]:
         for _ in range(2):  # refine the shift by the mean residual
             res = residuals(t)
             t = t + np.mean([d for d, _ in res], axis=0)
@@ -1186,11 +1197,19 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
 
     slab_geoms = [geometry(p["indices"], p["z_center"]) for p in slab_planes]
 
+    rmsd_cache = {}
+
+    def rmsd(k, c):
+        """RMSD of slab plane k against catalog plane c (independent of the offset)."""
+        if (k, c) not in rmsd_cache:
+            rmsd_cache[(k, c)] = _plane_rmsd(catalog[c]["atoms"], slab_geoms[k], cell2d)
+        return rmsd_cache[(k, c)]
+
     def matched(offset):
         """(slab plane, bulk plane, rmsd) pairs aligned by this offset."""
         return [
-            (k, b, _plane_rmsd(b["atoms"], slab_geoms[k], cell2d))
-            for k, p in enumerate(slab_planes) for b in catalog
+            (k, b, rmsd(k, c))
+            for k, p in enumerate(slab_planes) for c, b in enumerate(catalog)
             if b["counts"] == p["counts"] and abs(wrap(p["z_center"] - b["z"] - offset)) < 0.3
         ]
 
@@ -1247,9 +1266,9 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
     planes_sorted, labels = [], []
     for (k, _), idx in keyed:
         plane = _make_plane(idx, z[idx], atoms_z, charge_tol)
-        rmsd = _plane_rmsd(catalog[k]["atoms"], geometry(idx, plane["z_center"]), cell2d)
+        deviation = _plane_rmsd(catalog[k]["atoms"], geometry(idx, plane["z_center"]), cell2d)
         planes_sorted.append(plane)
-        labels.append(catalog[k]["label"] + ("" if rmsd <= deform_tol else "'"))
+        labels.append(catalog[k]["label"] + ("" if deviation <= deform_tol else "'"))
 
     bulk_numbers = np.asarray(bulk_atoms.numbers, dtype=float)
     reduced = compute_reduced_counts(np.column_stack([bulk_numbers, bulk_numbers * 0, bulk_numbers * 0]))

@@ -7,18 +7,9 @@ from ase.data import atomic_numbers, covalent_radii, chemical_symbols
 from ase.neighborlist import neighbor_list
 
 from .core import (
-    _INDEX_KEY,
-    _charges_to_list,
-    _finalize_slab,
     _formula_label,
-    _oriented_bulk,
-    _tag_atom_indices,
-    build_surface,
-    compute_projection,
-    identify_planes,
-    compute_reduced_counts,
-    assign_plane_names,
     apply_vacuum_to_slab,
+    build_surface,
     compute_cut_positions,
     compute_delete_info,
     plane_name_matches,
@@ -115,16 +106,19 @@ def _bond_pairs(atoms, bond_threshold=(0.85, 1.15), bond_distances=None):
 
 
 def _bonds_across_plane(atoms, z_cut, period, bond_threshold=(0.85, 1.15),
-                        bond_distances=None):
+                        bond_distances=None, bonds=None):
     """
     Bonds per cell crossing the planes ``z = z_cut + m * period``, by pair.
 
     *atoms* must be periodic with its true lattice (e.g. the 1-layer cell
     with :func:`surface_bulk_cell`); *period* is the layer spacing L.
+    *bonds* is :func:`_bond_pairs` of *atoms*, if already computed.
     Returns ``{"Ce-O": 8, "Ce-Ce": 12, ...}``; the sum is the number of
     bonds a cut at *z_cut* breaks per surface cell.
     """
-    i_idx, j_idx, vec = _bond_pairs(atoms, bond_threshold, bond_distances)
+    if bonds is None:
+        bonds = _bond_pairs(atoms, bond_threshold, bond_distances)
+    i_idx, j_idx, vec = bonds
     z0 = atoms.positions[i_idx, 2]
     z1 = z0 + vec[:, 2]
     lower, upper = np.minimum(z0, z1), np.maximum(z0, z1)
@@ -992,6 +986,7 @@ def reconstruct_tasker_iii(
     dict
         Contains ``"slab_atoms"``, ``"best_candidate"``,
         ``"all_candidates"`` (including rejected polar ones),
+        ``"reconstruction"`` (for ``cutslab(reconstruction=...)``),
         ``"tasker_type"``, and ``"plot"`` path.
 
     Raises
@@ -999,86 +994,30 @@ def reconstruct_tasker_iii(
     ValueError
         If no candidate gives a neutral, non-polar slab.
     """
-    from .plotting import plot_unitcell_atoms
+    from .genslab import _Options, _analyse_facet, _tasker3_candidates, _tasker3_termination
 
     h, k, l = miller
     if verbose:
         print(f"\nTasker III reconstruction for {bulk_name} ({h},{k},{l})\n")
-
-    charges_list = _charges_to_list(bulk_atoms, charges)
-    bulk = _tag_atom_indices(bulk_atoms)
-    out_miller = tuple(miller)
-    if surface_supercell is not None:
-        bulk = _oriented_bulk(bulk, miller, surface_supercell)
-        miller = (0, 0, 1)
-    surf_bulk = build_surface(bulk, miller, layers=1, verbose=verbose)
-    atoms_z_matrix, L = compute_projection(
-        bulk, surf_bulk, [charges_list[i] for i in surf_bulk.arrays[_INDEX_KEY]], miller,
-        verbose=verbose,
+    opts = _Options(
+        layers=tuple(layer_thickness_list), bulk_name=bulk_name, plane_tol=plane_tol,
+        charge_tol=charge_tol, dipole_tol=dipole_tol, vacuum=vacuum, plot=plot,
+        plot_out_dir=plot_out_dir, verbose=verbose, bond_threshold=bond_threshold,
+        bond_distances=bond_distances, max_masks=max_masks,
     )
-    planes = identify_planes(
-        atoms_z_matrix, L, plane_tol=plane_tol, charge_tol=charge_tol
-    )
-    reduced_counts = compute_reduced_counts(atoms_z_matrix)
-    planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
-
+    facet = _analyse_facet(bulk_atoms, charges, miller, opts, surface_supercell)
+    candidates, valid = _tasker3_candidates(facet, opts, prefer_plane=prefer_plane)
+    best = valid[0]
     if verbose:
-        adj = build_adjacency_matrix(
-            surf_bulk, bond_threshold=bond_threshold, bond_distances=bond_distances,
-            bulk_atoms=bulk, miller=miller,
-        )
-        print(f"Planes: {len(planes_sorted)}, reduced: {reduced_counts}, "
-              f"bonds: {int(np.sum(adj)) // 2}\n")
-        print_adjacency_matrix(adj, surf_bulk)
-
-    plane_names, _ = assign_plane_names(planes_sorted, atoms=surf_bulk)
-    candidates = find_tasker3_candidates(
-        planes_sorted, atoms_z_matrix, reduced_counts, None, L,
-        surf_bulk=surf_bulk, bond_distances=bond_distances,
-        charge_tol=charge_tol, verbose=verbose,
-        prefer_plane=prefer_plane,
-        plane_names=plane_names, dipole_tol=dipole_tol,
-        bulk_atoms=bulk, miller=miller, bond_threshold=bond_threshold,
-        min_layers=min(layer_thickness_list), max_masks=max_masks,
-    )
-    best = _select_tasker3_candidates(candidates, out_miller, dipole_tol, charge_tol)[0]
-    if verbose:
-        print(
-            f"\n→ Best: {best['recon_label']}  "
-            f"mu={best['net_dipole']:+.4e}  bonds_broken={best['bond_score']}\n"
-        )
-
-    zbot, ztop = compute_cut_positions(
-        planes_sorted, L, (best["cut_plane_idx"] - 1) % len(planes_sorted),
-        best["cut_plane_idx"],
-    )
-
-    plot_path = None
-    if plot:
-        plot_path = f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}_tasker3.png"
-        plot_unitcell_atoms(
-            atoms_z_matrix, L, out_miller,
-            out_png=plot_path, plane_tol=plane_tol, planes=planes,
-            zbot=zbot, ztop=ztop, dipole=best["net_dipole"],
-        )
-
-    slabs = build_tasker3_slabs(
-        bulk, miller, layer_thickness_list,
-        cut_plane_idx=best["cut_plane_idx"],
-        deletion_mask=best["deletion_mask"],
-        planes_sorted=planes_sorted,
-        atoms_z_matrix=atoms_z_matrix,
-        L=L, vacuum=vacuum,
-    )
-    for slab in slabs:
-        _finalize_slab(slab, charges_list, reduced_counts, charge_tol, dipole_tol)
-        slab.info["bulk_name"] = bulk_name
-        slab.info["miller"] = out_miller
-
+        print(f"\n→ Best: {best['recon_label']}  "
+              f"mu={best['net_dipole']:+.4e}  bonds_broken={best['bond_score']}\n")
+    plot_path = f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}_tasker3.png" if plot else None
+    slabs, reconstruction = _tasker3_termination(facet, opts, best, plot_path=plot_path)
     return {
         "plot": plot_path,
         "slab_atoms": slabs,
         "best_candidate": best,
         "all_candidates": candidates,
+        "reconstruction": reconstruction,
         "tasker_type": "III",
     }
