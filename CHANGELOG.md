@@ -92,6 +92,16 @@ raise.
   dipole are computed from the actual (possibly relaxed) atoms of the
   sub-slab after reconstruction deletions, instead of plane centres and
   bookkeeping of deleted charges.
+- **Tasker III distribution score (M3):** pairs not listed in
+  ``bond_distances`` now contribute their Coulomb energy ``q_i q_j / d_ij``
+  (with the given charges) instead of ``|d - d_covalent|``, which favoured
+  clustered rows: a half-occupied CeO₂ (001) O plane now gets the
+  checkerboard by default, as it already did with ``{"O-O": None}``.
+- **Broken bonds by pair:** Tasker I/II candidates report
+  ``broken_bonds_by_pair`` (e.g. ``{"Ce-O": 8, "Ce-Ce": 12}``).  The default
+  covalent-radius rule is kept because some oxides have genuine metal–metal
+  bonds (rutile IrO₂), but it also counts non-bonded cation contacts (Ce–Ce
+  in CeO₂); the breakdown shows when to set ``bond_distances``.
 - **Errors (C9):** ``cutslab`` validates ``cuts`` up front; an empty result
   no longer reports "Unknown cuts mode".
 - Single-plane cells: cut midpoints no longer coincide with the plane.

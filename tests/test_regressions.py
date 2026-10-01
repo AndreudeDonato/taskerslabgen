@@ -537,6 +537,35 @@ def test_primed_label_matching():
     assert not plane_name_matches("O4'", "O4")
 
 
+# ------------------------------------------------------------------
+# Step 5 (M3): default distribution score is the Coulomb energy
+# ------------------------------------------------------------------
+def test_default_pattern_spreads_like_charges():
+    """Half-occupied O plane of CeO2(001): checkerboard, not rows, by default."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    res = generate_slabs_for_miller(CEO2, Q_CEO2, (0, 0, 1), [2], prefer_plane="O")
+    deleted = next(iter(res[(0, 0, 1)].values()))["reconstruction"]["delete_info"]
+    assert len(deleted) == 2
+    (_, x1, y1), (_, x2, y2) = deleted
+    d = np.abs((np.array([x1 - x2, y1 - y2]) + 0.5) % 1.0 - 0.5)
+    np.testing.assert_allclose(d, [0.5, 0.5], atol=1e-6)
+
+
+def test_broken_bonds_reported_by_pair():
+    from taskerslabgen import generate_slabs_for_miller
+
+    q = {"Sr": 2.0, "Ti": 4.0, "O": -2.0}
+    cand = next(iter(generate_slabs_for_miller(_srtio3(), q, (1, 0, 0), [2])[(1, 0, 0)].values()))["candidate"]
+    assert sum(cand["broken_bonds_by_pair"].values()) == cand["broken_bonds"]
+    assert {"O-Sr", "O-Ti"} <= set(cand["broken_bonds_by_pair"])
+    # Cation-cation contacts can be excluded explicitly.
+    no_cc = {"Sr-Sr": None, "Sr-Ti": None, "Ti-Ti": None}
+    cand = next(iter(generate_slabs_for_miller(
+        _srtio3(), q, (1, 0, 0), [2], bond_distances=no_cc)[(1, 0, 0)].values()))["candidate"]
+    assert cand["broken_bonds_by_pair"] == {"O-Sr": 4, "O-Ti": 1}
+
+
 def test_no_ase_future_warnings():
     from taskerslabgen import generate_slabs_for_miller
 

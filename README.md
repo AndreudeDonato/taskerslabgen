@@ -15,7 +15,7 @@ The library:
 - clusters atoms into planes (single-linkage on z, fixed 0.1 Å tolerance, as in pymatgen)
 - enumerates Tasker cut pairs with stoichiometry + charge neutrality + dipole checks
 - performs Tasker III surface reconstruction (symmetric deletion, bond scoring,
-  Coulomb-like distribution scoring that favours checkerboard arrangements)
+  Coulomb-energy distribution scoring that spreads like charges apart)
 - plane labels from composition (`O4`, `Ce2O4`, `IrO2-a`) that are identical in the bulk,
   in cut slabs and for any bulk origin
 - cuts thick slabs into thinner sub-slabs preserving termination
@@ -202,6 +202,18 @@ Keys are `"X-Y"` strings (order irrelevant), e.g. `"Ce-O"`.  Values are either:
 - `float` — reference distance (Å), scaled by `bond_threshold` to determine bonding
 - `None` — forbid that pair entirely (no bond is created between those elements)
 
+Pairs not listed use the default rule: bonded within `bond_threshold` ×
+the sum of covalent radii.  That rule also counts metal–metal contacts —
+real bonds in e.g. rutile IrO₂ (Ir–Ir chains), but not in CeO₂, where Ce–Ce
+at 3.87 Å would otherwise make up 12 of the 20 bonds cut at (110).  Check
+`candidate["broken_bonds_by_pair"]` and set such pairs to `None` when they are
+not bonds in your material.
+
+In the Tasker III distribution score, unlisted pairs contribute their Coulomb
+energy `q_i q_j / d_ij` (your charges), so like charges spread apart (a
+half-occupied O plane prefers a checkerboard); listed pairs keep the rules
+above (`None`: repulsive `1/d`, float: `|d - d_ref|`).
+
 Example:
 ```python
 bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
@@ -222,7 +234,7 @@ bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
 
 | Value | Behaviour |
 |---|---|
-| `"best"` | Return only the single best candidate per Miller index. Tasker I/II: fewest bulk bonds broken at the cut, then densest surface planes (`candidate["broken_bonds"]`, `candidate["surface_density"]`); IDs follow this ranking. Tasker III: lowest dipole, then `bond_score`, then `distribution_score`. |
+| `"best"` | Return only the single best candidate per Miller index. Tasker I/II: fewest bulk bonds broken at the cut, then densest surface planes (`candidate["broken_bonds"]`, `candidate["broken_bonds_by_pair"]`, `candidate["surface_density"]`); IDs follow this ranking. Tasker III: lowest dipole, then `bond_score`, then `distribution_score`. |
 | `"all"` | Return every valid candidate, generating a separate plot for each. |
 
 **Returns**

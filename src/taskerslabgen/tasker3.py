@@ -113,18 +113,25 @@ def _bond_pairs(atoms, bond_threshold=(0.85, 1.15), bond_distances=None):
 def _bonds_across_plane(atoms, z_cut, period, bond_threshold=(0.85, 1.15),
                         bond_distances=None):
     """
-    Number of bonds per cell crossing the planes ``z = z_cut + m * period``.
+    Bonds per cell crossing the planes ``z = z_cut + m * period``, by pair.
 
     *atoms* must be periodic with its true lattice (e.g. the 1-layer cell
-    with :func:`surface_bulk_cell`); *period* is the layer spacing L.  This
-    is the number of bonds a cut at *z_cut* breaks per surface cell.
+    with :func:`surface_bulk_cell`); *period* is the layer spacing L.
+    Returns ``{"Ce-O": 8, "Ce-Ce": 12, ...}``; the sum is the number of
+    bonds a cut at *z_cut* breaks per surface cell.
     """
-    i_idx, _, vec = _bond_pairs(atoms, bond_threshold, bond_distances)
+    i_idx, j_idx, vec = _bond_pairs(atoms, bond_threshold, bond_distances)
     z0 = atoms.positions[i_idx, 2]
     z1 = z0 + vec[:, 2]
     lower, upper = np.minimum(z0, z1), np.maximum(z0, z1)
     crossings = np.floor((upper - z_cut) / period) - np.floor((lower - z_cut) / period)
-    return int(round(float(np.sum(crossings)) / 2.0))  # each bond is listed twice
+    by_pair = {}
+    for a, b, c in zip(i_idx, j_idx, crossings):
+        if c:
+            key = "-".join(sorted((chemical_symbols[atoms.numbers[a]],
+                                   chemical_symbols[atoms.numbers[b]])))
+            by_pair[key] = by_pair.get(key, 0.0) + c
+    return {k: int(round(v / 2.0)) for k, v in sorted(by_pair.items())}  # each bond listed twice
 
 
 def print_adjacency_matrix(adj, atoms):
@@ -285,58 +292,48 @@ def _compute_distribution_score(
     Score how well-distributed the remaining atoms are on the
     reconstructed surface plane (lower is better).
 
-    Forbidden pairs (None in bond_distances): use a Coulomb-like
-    repulsive penalty  1/d_ij  so that short distances are strongly
-    penalised.  This favours checkerboard-like arrangements over
-    stripes.
+    Pairs not listed in *bond_distances* contribute their Coulomb energy
+    ``q_i * q_j / d_ij`` (charges from *atoms_z_matrix*, minimum-image
+    distances): like charges are pushed apart, so a half-occupied anion
+    plane prefers a checkerboard over rows, and opposite charges stay close.
 
-    Allowed pairs (float in bond_distances or covalent-radii fallback):
-    penalty = |d_ij - d_ref|.
+    Pairs listed in *bond_distances* keep their explicit rule: ``None``
+    (forbidden) adds a repulsive ``1/d_ij``; a float adds
+    ``|d_ij - d_ref|``.
 
-    Both terms are normalised by their pair count.
+    Each kind of term is averaged over its pairs and the averages are
+    summed.
     """
     if len(kept_indices) < 2:
         return 0.0
 
     bd_map = _parse_bond_distances_map(bond_distances)
 
-    sub = surf_bulk[list(kept_indices)]
+    kept = list(kept_indices)
+    sub = surf_bulk[kept]
     sub.set_pbc((True, True, True))
     dists = sub.get_all_distances(mic=True)
     numbers = sub.numbers
+    charges = atoms_z_matrix[kept, 2]
     n = len(sub)
 
-    forbidden_sum = 0.0
-    forbidden_count = 0
-    allowed_sum = 0.0
-    allowed_count = 0
-
+    sums = {"forbidden": 0.0, "target": 0.0, "coulomb": 0.0}
+    counts = {"forbidden": 0, "target": 0, "coulomb": 0}
     for ii in range(n):
         for jj in range(ii + 1, n):
             zi, zj = int(numbers[ii]), int(numbers[jj])
             pair = (min(zi, zj), max(zi, zj))
-            d_ij = dists[ii, jj]
-
-            if pair in bd_map:
-                ref = bd_map[pair]
-                if ref is None:
-                    if d_ij > 1e-12:
-                        forbidden_sum += 1.0 / d_ij
-                    forbidden_count += 1
-                else:
-                    allowed_sum += abs(d_ij - ref)
-                    allowed_count += 1
+            d_ij = max(float(dists[ii, jj]), 1e-12)
+            if pair in bd_map and bd_map[pair] is None:
+                kind, value = "forbidden", 1.0 / d_ij
+            elif pair in bd_map:
+                kind, value = "target", abs(d_ij - bd_map[pair])
             else:
-                ref = covalent_radii[zi] + covalent_radii[zj]
-                allowed_sum += abs(d_ij - ref)
-                allowed_count += 1
+                kind, value = "coulomb", charges[ii] * charges[jj] / d_ij
+            sums[kind] += value
+            counts[kind] += 1
 
-    score = 0.0
-    if forbidden_count > 0:
-        score += forbidden_sum / forbidden_count
-    if allowed_count > 0:
-        score += allowed_sum / allowed_count
-    return score
+    return float(sum(sums[k] / counts[k] for k in sums if counts[k]))
 
 
 def find_tasker3_candidates(

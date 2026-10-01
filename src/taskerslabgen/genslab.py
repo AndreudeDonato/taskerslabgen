@@ -195,7 +195,8 @@ def generate_slabs_for_miller(
         - ``"plane_counts"`` -- element composition of the cut plane
         - ``"reconstruction"`` -- reconstruction metadata (or None)
         - ``"candidate"`` -- raw scoring dict (Tasker I/II: includes
-          ``broken_bonds`` per surface cell and ``surface_density`` in
+          ``broken_bonds`` per surface cell, ``broken_bonds_by_pair``
+          (e.g. ``{"Ce-O": 8, "Ce-Ce": 12}``) and ``surface_density`` in
           atoms/Å²; IDs are in rank order, ID 0 = best)
 
         Every slab is checked to be stoichiometric, neutral, non-polar
@@ -345,9 +346,10 @@ def _tasker12_path(
         bot, top = (cut + 1) % n_pl, cut
         z_cut, _ = compute_cut_positions(planes, L, cut, cut)
         seq = dict(s)
-        seq["broken_bonds"] = _bonds_across_plane(
+        seq["broken_bonds_by_pair"] = _bonds_across_plane(
             periodic, z_cut, L, bond_threshold, bond_distances
         )
+        seq["broken_bonds"] = sum(seq["broken_bonds_by_pair"].values())
         seq["surface_density"] = (
             len(planes_sorted[bot]["indices"]) + len(planes_sorted[top]["indices"])
         ) / (2.0 * area)
