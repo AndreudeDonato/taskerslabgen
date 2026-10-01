@@ -1,12 +1,21 @@
+import warnings
+from collections import Counter
+
 import numpy as np
 from ase.io import read
+from scipy.optimize import linear_sum_assignment
 
 from .core import (
     _INDEX_KEY,
     _charges_to_list,
     _finalize_slab,
-    _find_plane_translation,
+    _frac_distance,
+    _make_plane,
+    _plane_translations,
     _planes_from_bulk,
+    _shift_matches,
+    _supercell_matrix,
+    _tile_plane,
     identify_planes,
     compute_reduced_counts,
     apply_vacuum_to_slab,
@@ -78,10 +87,15 @@ def cutslab(
         Unused; kept for backward compatibility.
     reconstruction : dict or None
         Tasker III reconstruction pattern (the ``term["reconstruction"]``
-        dict from :func:`generate_slabs_for_miller`).  When provided,
-        newly exposed planes matching the reconstruction pattern get the
-        same atomic deletion applied.  Forces ``cut_at="termination"``
-        if ``cut_at`` was ``"all"``.
+        dict from :func:`generate_slabs_for_miller`, also after a JSON round
+        trip).  Every interior copy of the reconstructed bulk plane gets the
+        same deletions when a cut exposes it, placed as genslab places them
+        (aligned on the plane and its neighbours, a whole number of repeat
+        units from the slab's reconstructed surface).  Works for in-plane
+        supercells of the slab genslab made.  Raises if no plane of the slab
+        matches.  Forces ``cut_at="termination"`` if ``cut_at`` was
+        ``"all"``; with an explicit ``cut_at``, copies are exposed only if
+        the reconstructed label (e.g. ``"O4-recon"``) is selected.
     cut_at : str or list[str]
         Controls where cuts are placed:
 
@@ -167,6 +181,12 @@ def cutslab(
     plot_miller = tuple(input_miller) if input_miller is not None else vec[axis]
     miller_str = "".join(str(i) for i in plot_miller)
 
+    recon = None
+    if reconstruction is not None:
+        ab_axes = [i for i in range(3) if i != axis]
+        cell2d = np.array(atoms.cell)[np.ix_(ab_axes, ab_axes)]
+        recon = _prepare_reconstruction(reconstruction, cell2d)
+
     # ---- Planes and their labels ----
     if bulk_atoms is not None:
         if axis != 2:
@@ -180,11 +200,19 @@ def cutslab(
             atoms, charges_list, bulk_atoms, tuple(input_miller),
             plane_tol=plane_tol, charge_tol=charge_tol, deform_tol=deform_tol,
         )
+        if recon is not None:
+            planes_sorted, plane_names = _merge_surface_planes(
+                planes_sorted, plane_names, recon["recon_counts"], atoms_z_matrix, charge_tol
+            )
     else:
         planes_sorted = sorted(
             identify_planes(atoms_z_matrix, L, plane_tol=plane_tol, charge_tol=charge_tol),
             key=lambda p: p["z_center"] % L,
         )
+        if recon is not None:
+            planes_sorted, _ = _merge_surface_planes(
+                planes_sorted, None, recon["recon_counts"], atoms_z_matrix, charge_tol
+            )
         plane_names, _ = assign_plane_names(planes_sorted, atoms=atoms, axis=axis)
         reduced_counts = compute_reduced_counts(atoms_z_matrix)
     planes = planes_sorted
@@ -203,25 +231,26 @@ def cutslab(
 
     # ---- Reconstruction metadata ----
     # Reconstructed surfaces carry genslab's label (e.g. "O4-recon"): the
-    # thick slab's outer planes if they are already reconstructed, and any
-    # plane that gets reconstructed when a cut exposes it.
-    delete_info = reconstruction["delete_info"] if reconstruction is not None else None
+    # thick slab's outer planes if they are already reconstructed, and every
+    # interior copy of the cut plane, which gets the pattern when a cut
+    # exposes it.
     recon_label = None
-    recon_eligible = set()
-    if reconstruction is not None:
-        cut_plane_counts = reconstruction["cut_plane_counts"]
-        recon_label = f"{reconstruction['cut_plane_name']}-recon"
-        recon_counts = dict(cut_plane_counts)
-        for species, _, _ in delete_info:
-            recon_counts[species] = recon_counts.get(species, 0) - 1
-        recon_counts = {Z: c for Z, c in recon_counts.items() if c > 0}
-        for i in {0, n - 1}:
-            if planes_sorted[i]["counts"] == recon_counts:
-                plane_names[i] = recon_label
-        recon_eligible = {
-            i for i, plane in enumerate(planes_sorted)
-            if plane["counts"] == cut_plane_counts and i not in (0, n - 1)
-        }
+    deletions = {}
+    if recon is not None:
+        recon_label = recon["recon_label"]
+        outer = [i for i in dict.fromkeys((0, n - 1))
+                 if planes_sorted[i]["counts"] == recon["recon_counts"]]
+        for i in outer:
+            plane_names[i] = recon_label
+        deletions = _reconstruction_deletions(atoms, planes_sorted, outer, recon, cell2d, ab_axes)
+        if not deletions and not outer:
+            raise ValueError(
+                f"The reconstruction ({recon_label}) matches no plane of the slab: no "
+                "plane has the composition and geometry of the reconstructed plane or "
+                "of its bulk plane.  Check that the slab and the reconstruction come "
+                "from the same bulk and Miller index."
+            )
+    recon_eligible = set(deletions)
 
     label_hint = "" if bulk_atoms is not None else (
         " Without bulk_atoms= labels count the atoms per cell of this slab, so an "
@@ -232,6 +261,7 @@ def cutslab(
     # ---- Planes allowed to become a surface ----
     # A sub-slab is a contiguous run of planes [bottom, top] of the input
     # slab; it never wraps through the vacuum.
+    known_names = set(plane_names) | ({recon_label} if recon_eligible else set())
     if cut_at == "all":
         valid_boundary_names = set(plane_names)
     elif cut_at == "termination":
@@ -239,7 +269,7 @@ def cutslab(
         ends = {plane_names[0].rstrip("'"), plane_names[-1].rstrip("'")}
         valid_boundary_names = {name for name in plane_names if name.rstrip("'") in ends}
     elif isinstance(cut_at, str):
-        matched = {name for name in plane_names if plane_name_matches(cut_at, name)}
+        matched = {name for name in known_names if plane_name_matches(cut_at, name)}
         if not matched:
             raise ValueError(
                 f"Plane name {cut_at!r} not found. "
@@ -250,7 +280,7 @@ def cutslab(
         valid_boundary_names = set()
         unknown = []
         for query in cut_at:
-            matched = {name for name in plane_names if plane_name_matches(query, name)}
+            matched = {name for name in known_names if plane_name_matches(query, name)}
             if not matched:
                 unknown.append(query)
             else:
@@ -265,19 +295,14 @@ def cutslab(
             f"Invalid cut_at={cut_at!r}. Must be 'all', 'termination', "
             f"a plane name, or list of plane names."
         )
+    # Copies of the cut plane become surfaces only if its reconstructed
+    # label is among the requested ones.
+    exposable = recon_eligible if recon_label in valid_boundary_names else set()
     boundary_indices = sorted(
-        {i for i in range(n) if plane_names[i] in valid_boundary_names} | recon_eligible
+        {i for i in range(n) if plane_names[i] in valid_boundary_names} | exposable
     )
 
     # ---- Evaluate every candidate cut on the actual atoms ----
-    reference_plane = reconstruction.get("cut_plane_frac") if reconstruction else None
-    deletions = {
-        p: set(_apply_reconstruction(
-            atoms, planes_sorted[p]["indices"], delete_info, axis=axis,
-            reference_plane=reference_plane,
-        ))
-        for p in recon_eligible
-    }
     q_all = np.asarray(charges_list, dtype=float)
     species = sorted({int(Z) for Z in atoms.numbers} | {int(Z) for Z in reduced_counts})
     column = {Z: k for k, Z in enumerate(species)}
@@ -356,6 +381,20 @@ def cutslab(
                 f"Q={cut['total_charge']:+.3f}  "
                 f"mu={cut['net_dipole']:+.4e}"
             )
+
+    if (
+        reconstruction is None and cut_at == "termination" and n > 2
+        and [(c["bottom_plane"], c["top_plane"]) for c in valid_cuts] == [(0, n - 1)]
+        and not {plane_names[0].rstrip("'"), plane_names[-1].rstrip("'")}
+        & {name.rstrip("'") for name in plane_names[1:-1]}
+    ):
+        warnings.warn(
+            f"cutslab returns only the input slab: its surface planes "
+            f"({plane_names[0]}, {plane_names[-1]}) occur nowhere inside it.  For a "
+            "reconstructed (Tasker III) slab pass reconstruction=term['reconstruction'] "
+            "from generate_slabs_for_miller.",
+            stacklevel=2,
+        )
 
     if not valid_cuts:
         polar_hint = "" if reconstruction is not None else (
@@ -453,50 +492,214 @@ def _put_vacuum_at_boundary(atoms, axis):
     atoms.set_scaled_positions(frac)
 
 
-def _apply_reconstruction(slab, plane_indices, delete_info, axis=2,
-                          reference_plane=None, tol=0.5):
+def _merge_surface_planes(planes_sorted, names, recon_counts, atoms_z, charge_tol, max_planes=4):
     """
-    Pick the atoms of a surface plane to delete for a Tasker III pattern.
-
-    *delete_info* lists ``(Z, fx, fy)`` of the deleted atoms in the
-    reference plane.  With *reference_plane* (all atoms of that plane as
-    ``(Z, fx, fy)``) the reference is first aligned onto the target plane
-    by an in-plane translation, so the same pattern is reproduced wherever
-    the plane copy sits; otherwise the atoms nearest to the stored
-    positions are taken.
-
-    Returns list of atom indices (in *slab*) to delete.
+    Merge the outermost planes at each end of a slab when together they have
+    the composition of a reconstructed plane: once atoms are deleted, the
+    rest of a rumpled plane may no longer cluster into one plane.  Returns
+    the planes and, if given, the matching list of *names*.
     """
-    frac = slab.get_scaled_positions()
-    ab_axes = [i for i in range(3) if i != axis]
-    shift = np.zeros(2)
-    if reference_plane is not None:
-        target = [
-            (int(slab.numbers[j]), frac[j, ab_axes[0]], frac[j, ab_axes[1]])
-            for j in plane_indices
+    planes = list(planes_sorted)
+    names = list(names) if names is not None else None
+    for top in (False, True):
+        for k in range(2, min(max_planes, len(planes) - 1) + 1):
+            group = planes[-k:] if top else planes[:k]
+            total = Counter()
+            for plane in group:
+                total.update(plane["counts"])
+            if dict(total) != recon_counts:
+                continue
+            idx = [i for plane in group for i in plane["indices"]]
+            merged = _make_plane(idx, atoms_z[idx, 1], atoms_z, charge_tol)
+            if top:
+                planes[-k:] = [merged]
+                if names is not None:
+                    names[-k:] = [names[-1]]
+            else:
+                planes[:k] = [merged]
+                if names is not None:
+                    names[:k] = [names[0]]
+            break
+    return planes, names
+
+
+def _prepare_reconstruction(reconstruction, cell2d):
+    """
+    Normalise a reconstruction dict from :func:`generate_slabs_for_miller`
+    (also after a JSON round trip: string keys, lists) and express it in the
+    in-plane cell *cell2d* of the slab, an integer supercell of the cell the
+    pattern was made in.
+    """
+    if not reconstruction.get("cut_plane_frac"):
+        raise ValueError(
+            "The reconstruction dict has no 'cut_plane_frac' (made by an older "
+            "taskerslabgen); regenerate it with generate_slabs_for_miller."
+        )
+
+    def plane(atoms):
+        return [(int(a[0]), float(a[1]) % 1.0, float(a[2]) % 1.0) for a in atoms]
+
+    def counts(d):
+        return {int(Z): int(c) for Z, c in d.items()}
+
+    ref = plane(reconstruction["cut_plane_frac"])
+    delete = plane(reconstruction["delete_info"])
+    cut_counts = counts(reconstruction["cut_plane_counts"])
+    if reconstruction.get("recon_counts") is not None:
+        recon_counts = counts(reconstruction["recon_counts"])
+    else:
+        recon_counts = Counter(cut_counts)
+        recon_counts.subtract(Counter(a[0] for a in delete))
+        recon_counts = {Z: c for Z, c in recon_counts.items() if c > 0}
+    neighbors = reconstruction.get("neighbor_planes")
+    below = plane(neighbors["below"]) if neighbors else None
+    above = plane(neighbors["above"]) if neighbors else None
+    a3 = reconstruction.get("a3_frac")
+    a3 = np.array(a3, dtype=float) if a3 is not None else None
+
+    ref_cell = reconstruction.get("cell2d")
+    if ref_cell is not None:
+        ref_cell = np.array(ref_cell, dtype=float)
+        try:
+            M, det = _supercell_matrix(ref_cell, cell2d)
+        except ValueError:
+            raise ValueError(
+                "The slab's in-plane cell is not an integer supercell of the cell the "
+                "reconstruction was made in; check that the slab and the reconstruction "
+                "come from the same bulk and Miller index."
+            ) from None
+        if not np.array_equal(M, np.eye(2, dtype=int)):
+            ref, delete = _tile_plane(ref, ref_cell, cell2d), _tile_plane(delete, ref_cell, cell2d)
+            if neighbors:
+                below, above = _tile_plane(below, ref_cell, cell2d), _tile_plane(above, ref_cell, cell2d)
+            cut_counts = {Z: c * abs(det) for Z, c in cut_counts.items()}
+            recon_counts = {Z: c * abs(det) for Z, c in recon_counts.items()}
+            if a3 is not None:
+                a3 = a3 @ np.linalg.inv(M)
+
+    remaining = list(delete)
+    kept = []
+    for atom in ref:
+        hit = next((d for d in remaining if d[0] == atom[0]
+                    and _frac_distance(d[1:], atom[1:], cell2d) < 1e-3), None)
+        if hit is None:
+            kept.append(atom)
+        else:
+            remaining.remove(hit)
+    return {
+        "recon_label": reconstruction.get("recon_label")
+        or f"{reconstruction['cut_plane_name']}-recon",
+        "cut_plane_frac": ref,
+        "delete_info": delete,
+        "kept_frac": kept,
+        "cut_plane_counts": cut_counts,
+        "recon_counts": recon_counts,
+        "below": below,
+        "above": above,
+        "a3_frac": a3,
+        "period": reconstruction.get("period"),
+    }
+
+
+def _reconstruction_deletions(atoms, planes_sorted, outer, recon, cell2d, ab_axes, tol=0.5):
+    """
+    ``{plane index: atom indices to delete}`` for every interior copy of the
+    reconstructed bulk plane.
+
+    A copy must match the bulk plane, and its neighbour planes the bulk
+    planes below and above it, after one in-plane translation.  When several
+    translations do (a plane that maps onto itself under a non-lattice
+    shift), the pattern is chosen as :func:`build_tasker3_slabs` places it:
+    the copy ``m`` repeat units away from an already reconstructed surface
+    plane (or from the lowest copy) carries the pattern shifted by
+    ``m * a3``.
+    """
+    n = len(planes_sorted)
+    frac = atoms.get_scaled_positions()
+
+    def plane_atoms(p):
+        return [(int(atoms.numbers[j]), frac[j, ab_axes[0]], frac[j, ab_axes[1]])
+                for j in planes_sorted[p]["indices"]]
+
+    def shifts(p, reference):
+        found = _plane_translations(reference, plane_atoms(p), cell2d, tol)
+        if recon["below"] is None:
+            return found
+        return [
+            t for t in found
+            if (p == 0 or _shift_matches(recon["below"], plane_atoms(p - 1), t, cell2d, tol))
+            and (p == n - 1 or _shift_matches(recon["above"], plane_atoms(p + 1), t, cell2d, tol))
         ]
-        cell2d = np.array(slab.cell)[np.ix_(ab_axes, ab_axes)]
-        t = _find_plane_translation(reference_plane, target, cell2d, tol)
-        if t is not None:
-            shift = t
-    to_delete = set()
-    for species, fx, fy in delete_info:
-        fx, fy = fx + shift[0], fy + shift[1]
-        best_j = None
-        best_d = np.inf
-        for j in plane_indices:
-            if j in to_delete:
-                continue
-            if slab.numbers[j] != species:
-                continue
-            dfx = abs((frac[j, ab_axes[0]] - fx) % 1.0)
-            dfy = abs((frac[j, ab_axes[1]] - fy) % 1.0)
-            dfx = min(dfx, 1.0 - dfx)
-            dfy = min(dfy, 1.0 - dfy)
-            d = np.sqrt(dfx**2 + dfy**2)
-            if d < best_d:
-                best_d = d
-                best_j = j
-        if best_j is not None:
-            to_delete.add(best_j)
-    return sorted(to_delete)
+
+    copies = {
+        p: shifts(p, recon["cut_plane_frac"]) for p in range(1, n - 1)
+        if planes_sorted[p]["counts"] == recon["cut_plane_counts"]
+    }
+    copies = {p: found for p, found in copies.items() if found}
+    if not copies:
+        return {}
+
+    anchor, anchor_shifts = None, []
+    for i in outer:
+        anchor_shifts = shifts(i, recon["kept_frac"])
+        if anchor_shifts:
+            anchor = i
+            break
+    if anchor is None:
+        anchor = min(copies)
+        anchor_shifts = copies[anchor]
+
+    z = [p["z_center"] for p in planes_sorted]
+    period, a3 = recon["period"], recon["a3_frac"]
+
+    def expected(T, p):
+        """Translation of copy p implied by anchor translation T, and whether
+        p is a whole number of repeat units from the anchor."""
+        if not period or a3 is None:
+            return T, True
+        m = (z[p] - z[anchor]) / period
+        return T + np.round(m) * a3, abs(m - np.round(m)) < 0.25
+
+    def closest(T, p):
+        target, whole = expected(T, p)
+        return min(copies[p], key=lambda t: _frac_distance(t, target, cell2d)), target, whole
+
+    def consistent(T):
+        hits = 0
+        for p in copies:
+            t, target, whole = closest(T, p)
+            hits += whole and _frac_distance(t, target, cell2d) <= tol
+        return hits
+
+    T = max(anchor_shifts, key=consistent)  # first of the best, deterministic
+    deletions = {}
+    for p in sorted(copies):
+        t, target, whole = closest(T, p)
+        if whole and _frac_distance(t, target, cell2d) > tol:
+            raise ValueError(
+                f"Plane {p} of the slab is a copy of the reconstructed plane, but its "
+                "position does not follow from the slab's reconstructed surface by "
+                "whole bulk repeat units; the slab may be too distorted to re-apply "
+                "the pattern."
+            )
+        deletions[p] = _pick_deleted_atoms(atoms, planes_sorted[p]["indices"], recon["delete_info"],
+                                           t, frac, ab_axes, cell2d, tol)
+    return deletions
+
+
+def _pick_deleted_atoms(atoms, plane_indices, delete_info, shift, frac, ab_axes, cell2d, tol):
+    """Atoms of a plane at the pattern positions *delete_info* + *shift*
+    (one-to-one per species, each within *tol* angstrom)."""
+    chosen = set()
+    plane_indices = np.asarray(plane_indices, dtype=int)
+    for Z in sorted({d[0] for d in delete_info}):
+        targets = np.array([[d[1], d[2]] for d in delete_info if d[0] == Z]) + shift
+        cands = plane_indices[atoms.numbers[plane_indices] == Z]
+        d = frac[cands][:, ab_axes][None, :, :] - targets[:, None, :]
+        d -= np.round(d)
+        dist = np.linalg.norm(d @ cell2d, axis=-1)
+        rows, cols = linear_sum_assignment(dist)
+        if len(rows) < len(targets) or dist[rows, cols].max() > tol:
+            raise ValueError("Could not place the reconstruction pattern on a plane of the slab.")
+        chosen.update(int(cands[c]) for c in cols)
+    return sorted(chosen)

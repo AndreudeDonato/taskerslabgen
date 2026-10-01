@@ -174,6 +174,30 @@ raise.
 - Tasker III ``plane_type`` (``O4-recon``) works as ``prefer_plane``; IDs do
   not depend on ``prefer_plane``.  Separate errors for charge and dipole
   failures.
+- **cutslab re-applies Tasker III patterns as genslab builds them:** a
+  copy of the reconstructed plane is aligned on the plane and on its
+  neighbour planes, and among equivalent alignments the one a whole number
+  of repeat units (``a3``) from the slab's reconstructed surface is used.
+  Before, the first translation found was used, so planes that map onto
+  themselves under a non-lattice shift (CeO₂ (001), MgO (111), SrTiO₃
+  (110)) got a pattern that depended on atom order and differed from
+  genslab's slab of the same thickness; failed alignments silently fell
+  back to no shift.  Sub-slabs now equal genslab's slabs, also for shuffled
+  atoms.  The metadata gains ``recon_label``, ``recon_counts``,
+  ``neighbor_planes``, ``cell2d``, ``a3_frac`` and ``period``; it is
+  JSON-serialisable and works for in-plane supercells of the slab (both
+  silently returned only the input slab).  A reconstruction that matches
+  no plane raises.  Reconstructed surface planes that no longer cluster
+  into one plane (corundum (111)) are merged.
+- **cutslab ``cut_at`` with ``reconstruction=``:** reconstructed copies are
+  cut only if their ``-recon`` label is selected; ``cut_at="Ce2"`` used to
+  return ``O4-recon`` slabs.
+- **``top_plane_type``** in genslab results: the label of the top surface,
+  which differs from ``plane_type`` for asymmetric terminations, so
+  ``cut_at=plane_type`` alone failed (albite (0,1,0), IrO₂ (111)).
+- cutslab warns when it returns only the input slab because its surface
+  planes occur nowhere inside it (a Tasker III slab without
+  ``reconstruction=``).
 - Anatase (101), reported against 0.3.1 (charged Ti₁₄O₂₆ slabs), gives
   stoichiometric, neutral slabs; regression test added
   (``bulk_files/TiO2_anatase.cif``).

@@ -861,46 +861,79 @@ def plane_name_matches(query, name):
     return query == plane_name_base(name)
 
 
-def _find_plane_translation(ref, tgt, cell2d, tol):
+def _plane_translations(ref, tgt, cell2d, tol):
     """
-    Find an in-plane translation mapping plane *ref* onto plane *tgt*.
+    All in-plane translations mapping plane *ref* onto plane *tgt*.
 
     *ref* and *tgt* are lists of ``(Z, fx, fy)`` in fractional coordinates
-    of the in-plane lattice with basis rows *cell2d*.  Returns the
-    fractional translation ``t`` such that every ref atom moved by ``t``
-    lies within *tol* angstrom of a distinct tgt atom of the same species,
-    or ``None``.
+    of the in-plane lattice with basis rows *cell2d*.  Returns the distinct
+    fractional translations ``t`` (in ``[0, 1)``) such that every ref atom
+    moved by ``t`` lies within *tol* angstrom of a distinct tgt atom of the
+    same species.  Several are found when a plane maps onto itself under a
+    shift that is not a lattice vector.
     """
     if len(ref) != len(tgt):
-        return None
+        return []
     ref_Z = np.array([a[0] for a in ref], dtype=int)
     tgt_Z = np.array([a[0] for a in tgt], dtype=int)
     species, counts = np.unique(ref_Z, return_counts=True)
     tgt_species, tgt_counts = np.unique(tgt_Z, return_counts=True)
     if not (np.array_equal(species, tgt_species) and np.array_equal(counts, tgt_counts)):
-        return None
+        return []
     if len(ref) == 0:
-        return np.zeros(2)
+        return [np.zeros(2)]
 
     ref_f = np.array([[a[1], a[2]] for a in ref], dtype=float)
     tgt_f = np.array([[a[1], a[2]] for a in tgt], dtype=float)
     cell2d = np.asarray(cell2d, dtype=float)
     anchor_Z = species[np.argmin(counts)]
     anchor = int(np.flatnonzero(ref_Z == anchor_Z)[0])
-    groups = [(np.flatnonzero(ref_Z == Z), np.flatnonzero(tgt_Z == Z)) for Z in species]
-
+    found = []
     for b in np.flatnonzero(tgt_Z == anchor_Z):
-        t = tgt_f[b] - ref_f[anchor]
-        for r_idx, t_idx in groups:
-            d = (ref_f[r_idx] + t)[:, None, :] - tgt_f[t_idx][None, :, :]
-            d -= np.round(d)
-            dist = np.linalg.norm(d @ cell2d, axis=-1)
-            rows, cols = linear_sum_assignment(dist)
-            if dist[rows, cols].max() > tol:
-                break
-        else:
-            return t % 1.0
-    return None
+        t = (tgt_f[b] - ref_f[anchor]) % 1.0
+        if _shift_matches(ref, tgt, t, cell2d, tol) and not any(
+            _frac_distance(t, u, cell2d) < 1e-3 for u in found
+        ):
+            found.append(t)
+    return found
+
+
+def _frac_distance(a, b, cell2d):
+    """Minimum-image distance (angstrom) between fractional in-plane points."""
+    d = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+    d -= np.round(d)
+    return float(np.linalg.norm(d @ np.asarray(cell2d, dtype=float)))
+
+
+def _shift_matches(ref, tgt, t, cell2d, tol):
+    """Whether every atom of *ref* moved by *t* lies within *tol* angstrom of
+    a distinct atom of *tgt* of the same species (one-to-one)."""
+    if len(ref) != len(tgt):
+        return False
+    ref_Z = np.array([a[0] for a in ref], dtype=int)
+    tgt_Z = np.array([a[0] for a in tgt], dtype=int)
+    ref_f = np.array([[a[1], a[2]] for a in ref], dtype=float).reshape(-1, 2)
+    tgt_f = np.array([[a[1], a[2]] for a in tgt], dtype=float).reshape(-1, 2)
+    for Z in np.unique(ref_Z):
+        r_idx, t_idx = np.flatnonzero(ref_Z == Z), np.flatnonzero(tgt_Z == Z)
+        if len(r_idx) != len(t_idx):
+            return False
+        d = (ref_f[r_idx] + t)[:, None, :] - tgt_f[t_idx][None, :, :]
+        d -= np.round(d)
+        dist = np.linalg.norm(d @ np.asarray(cell2d, dtype=float), axis=-1)
+        rows, cols = linear_sum_assignment(dist)
+        if dist[rows, cols].max() > tol:
+            return False
+    return True
+
+
+def _find_plane_translation(ref, tgt, cell2d, tol):
+    """
+    One in-plane translation mapping plane *ref* onto plane *tgt* (see
+    :func:`_plane_translations`), or ``None``.
+    """
+    found = _plane_translations(ref, tgt, cell2d, tol)
+    return found[0] if found else None
 
 
 def _bulk_plane_catalog(bulk_atoms, miller, plane_tol=None):

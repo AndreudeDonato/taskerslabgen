@@ -247,9 +247,10 @@ Nested dict: `{miller_tuple: {plane_id: info_dict}}`.
 Each `info_dict` contains:
 - `"atoms"` — list of `Atoms` objects (one per thickness)
 - `"tasker_type"` — `"I/II"` or `"III"`
-- `"plane_type"` — label of the cut plane (e.g. `"O4"`, `"O4-recon"`); `cutslab` uses the same labels, so it can be passed to `cut_at`
+- `"plane_type"` — label of the bottom surface plane (e.g. `"O4"`, `"O4-recon"`); `cutslab` uses the same labels
+- `"top_plane_type"` — label of the top surface plane; differs from `plane_type` for asymmetric terminations, so cut with `cutslab(cut_at=[plane_type, top_plane_type])` (or the default `cut_at="termination"`)
 - `"plane_counts"` — `{atomic_number: count}` composition of the cut plane
-- `"reconstruction"` — reconstruction metadata dict (Tasker III) or `None`
+- `"reconstruction"` — reconstruction metadata dict (Tasker III; JSON-serialisable, pass it to `cutslab(reconstruction=...)`) or `None`
 - `"candidate"` — raw scoring dict with dipole, bond score, etc.
 
 Each `Atoms` object carries metadata in `.info`:
@@ -303,7 +304,7 @@ termination.
 | `verbose` | `bool` or `None` | `None` | Print plane stacking and cut details. |
 | `bond_threshold` | `tuple[float, float]` | `(0.85, 1.15)` | Unused; kept for backward compatibility. |
 | `bond_distances` | `dict` or `None` | `None` | Unused; kept for backward compatibility. |
-| `reconstruction` | `dict` or `None` | `None` | Tasker III reconstruction dict from genslab output (`term["reconstruction"]`). When provided, newly exposed interior planes receive the same atomic deletion. Forces `cut_at="termination"` if `cut_at` was `"all"`. |
+| `reconstruction` | `dict` or `None` | `None` | Tasker III reconstruction dict from genslab output (`term["reconstruction"]`, JSON-serialisable). Newly exposed copies of the reconstructed plane receive the same deletions, placed as genslab places them; in-plane supercells of the slab work. Forces `cut_at="termination"` if `cut_at` was `"all"`; an explicit `cut_at` must select the `-recon` label to expose copies. |
 | `cut_at` | `str` or `list[str]` | `"termination"` | Where to place cuts (see below). |
 | `cuts` | `str` | `"right"` | Direction of cuts (see below). |
 | `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of every sub-slab. |

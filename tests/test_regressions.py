@@ -923,3 +923,105 @@ def test_tasker3_errors_name_the_failed_condition():
     polar = {"is_neutral": True, "charge_per_fu": 0.0, "dipole_per_fu": 1.0}
     with pytest.raises(ValueError, match="dipole"):
         _select_tasker3_candidates([polar], (0, 0, 1), 0.05, 1e-3)
+
+
+# ------------------------------------------------------------------
+# Second review pass: re-applying Tasker III reconstructions in cutslab
+# ------------------------------------------------------------------
+def _same_structure(a, b, tol=1e-3):
+    """Same atoms up to a rigid shift along z and in-plane lattice vectors."""
+    from scipy.optimize import linear_sum_assignment
+
+    if a.get_chemical_formula() != b.get_chemical_formula():
+        return False
+    pa, pb = a.positions.copy(), b.positions.copy()
+    pa[:, 2] -= pa[:, 2].min()
+    pb[:, 2] -= pb[:, 2].min()
+    cell = a.cell[:2, :2]
+    for z in set(a.numbers):
+        ia, ib = np.flatnonzero(a.numbers == z), np.flatnonzero(b.numbers == z)
+        d = pa[ia][:, None, :] - pb[ib][None, :, :]
+        f = d[..., :2] @ np.linalg.inv(cell)
+        d[..., :2] = (f - np.round(f)) @ cell
+        dist = np.linalg.norm(d, axis=-1)
+        rows, cols = linear_sum_assignment(dist)
+        if dist[rows, cols].max() > tol:
+            return False
+    return True
+
+
+@pytest.mark.parametrize(
+    "atoms, charges, hkl",
+    [(MGO, Q_MGO, (1, 1, 1)), (_srtio3(), {"Sr": 2.0, "Ti": 4.0, "O": -2.0}, (1, 1, 0)),
+     (CEO2, Q_CEO2, (0, 0, 1)), (_corundum(), {"Al": 3.0, "O": -2.0}, (1, 1, 1))],
+    ids=["MgO111", "SrTiO3110", "CeO2001", "corundum111"],
+)
+def test_cutslab_reconstruction_reproduces_genslab(atoms, charges, hkl):
+    """R4: planes that map onto themselves under a non-lattice shift made the
+    re-applied pattern depend on atom order; sub-slabs must equal genslab's."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    res = generate_slabs_for_miller(atoms, charges, hkl, [1, 2, 3], candidates="all")
+    for term in list(res[hkl].values())[:4]:
+        by_size = {len(s): s for s in term["atoms"]}
+        thick = term["atoms"][-1]
+        order = np.random.default_rng(0).permutation(len(thick))
+        for slab in (thick, thick[order]):
+            subs = cutslab(slab, charges, reconstruction=term["reconstruction"])
+            assert {len(s) for s in subs} >= set(by_size)
+            for s in subs:
+                if len(s) in by_size:
+                    assert _same_structure(s, by_size[len(s)])
+
+
+def test_cutslab_reconstruction_on_supercell_and_after_json():
+    """R1: an in-plane supercell or a JSON round trip silently lost the series."""
+    import json
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    res = generate_slabs_for_miller(CEO2, Q_CEO2, (0, 0, 1), [4], prefer_plane="O",
+                                    bond_distances=BOND_DISTS_CEO2)
+    term = next(iter(res[(0, 0, 1)].values()))
+    slab, recon = term["atoms"][0], term["reconstruction"]
+    subs = cutslab(slab * (2, 2, 1), Q_CEO2, reconstruction=recon)
+    assert [s.get_chemical_formula() for s in subs] == [f"Ce{8 * m}O{16 * m}" for m in range(1, 9)]
+    subs = cutslab(slab, Q_CEO2, reconstruction=json.loads(json.dumps(recon)))
+    assert [s.get_chemical_formula() for s in subs] == [f"Ce{2 * m}O{4 * m}" for m in range(1, 9)]
+    with pytest.raises(ValueError, match="same bulk and Miller index"):
+        cutslab(next(iter(generate_slabs_for_miller(CEO2, Q_CEO2, (1, 1, 1), [2])[(1, 1, 1)].values()))["atoms"][0],
+                Q_CEO2, reconstruction=recon)
+
+
+def test_cutslab_cut_at_is_not_overridden_by_reconstruction():
+    """R2: reconstructed copies were cut even when cut_at named another plane."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    res = generate_slabs_for_miller(CEO2, Q_CEO2, (0, 0, 1), [4], prefer_plane="O",
+                                    bond_distances=BOND_DISTS_CEO2)
+    term = next(iter(res[(0, 0, 1)].values()))
+    with pytest.raises(ValueError, match="No stoichiometric"):
+        cutslab(term["atoms"][0], Q_CEO2, reconstruction=term["reconstruction"],
+                cut_at="Ce2", cuts="all")
+
+
+def test_top_plane_type_for_asymmetric_terminations():
+    """R3: plane_type is the bottom plane only; cut_at needs both surfaces."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    res = generate_slabs_for_miller(ALBITE, Q_ALBITE, (0, 1, 0), [3], candidates="all")
+    asymmetric = [t for t in res[(0, 1, 0)].values() if t["plane_type"] != t["top_plane_type"]]
+    assert asymmetric
+    for term in asymmetric:
+        subs = cutslab(term["atoms"][0], Q_ALBITE, cut_at=[term["plane_type"], term["top_plane_type"]])
+        assert len(subs) == 3
+
+
+def test_cutslab_warns_when_surface_planes_never_occur_inside(recwarn):
+    """SW5: a Tasker III slab without reconstruction= silently gave only itself."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    res = generate_slabs_for_miller(CEO2, Q_CEO2, (0, 0, 1), [3], prefer_plane="O",
+                                    bond_distances=BOND_DISTS_CEO2)
+    slab = next(iter(res[(0, 0, 1)].values()))["atoms"][0]
+    with pytest.warns(UserWarning, match="reconstruction="):
+        assert len(cutslab(slab, Q_CEO2)) == 1

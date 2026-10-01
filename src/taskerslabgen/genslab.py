@@ -17,7 +17,6 @@ from .core import (
     select_best_sequence,
     compute_cut_positions,
     assign_plane_names,
-    compute_delete_info,
     plane_name_matches,
     surface_bulk_cell,
 )
@@ -210,8 +209,13 @@ def generate_slabs_for_miller(
 
         - ``"atoms"`` -- list of ``Atoms`` (one per thickness)
         - ``"tasker_type"`` -- ``"I/II"`` or ``"III"``
-        - ``"plane_type"`` -- label of the cut plane (e.g. ``"O4"``,
-          ``"O4-recon"``); pass it to ``cutslab(cut_at=...)``
+        - ``"plane_type"`` -- label of the bottom surface plane (e.g.
+          ``"O4"``, ``"O4-recon"``)
+        - ``"top_plane_type"`` -- label of the top surface plane; it
+          differs from ``plane_type`` for asymmetric terminations.  To cut
+          at the same terminations, pass
+          ``cutslab(cut_at=[plane_type, top_plane_type])`` (or the default
+          ``cut_at="termination"``)
         - ``"plane_counts"`` -- element composition of the cut plane
         - ``"reconstruction"`` -- reconstruction metadata (or None)
         - ``"candidate"`` -- raw scoring dict (Tasker I/II: includes
@@ -448,6 +452,7 @@ def _tasker12_path(
             "atoms": slabs,
             "tasker_type": "I/II",
             "plane_type": term_info["plane_type"],
+            "top_plane_type": plane_names[seq["top_cut"]],
             "plane_counts": term_info["plane_counts"],
             "reconstruction": None,
             "candidate": seq,
@@ -471,6 +476,7 @@ def _tasker3_path(
         find_tasker3_candidates,
         build_tasker3_slabs,
         print_adjacency_matrix,
+        _reconstruction_metadata,
         _select_tasker3_candidates,
     )
 
@@ -546,14 +552,11 @@ def _tasker3_path(
         cut_plane = planes_sorted[cand["cut_plane_idx"]]
         cut_plane_name = plane_names[cand["cut_plane_idx"]]
 
-        delete_info = compute_delete_info(
-            cut_plane, cand["deletion_mask"], atoms_z_matrix, surf_bulk,
+        reconstruction = _reconstruction_metadata(
+            cand, planes_sorted, plane_names, plane_name_map,
+            atoms_z_matrix, surf_bulk, bulk_atoms, miller, L,
         )
-        frac = surf_bulk.get_scaled_positions()
-        cut_plane_frac = [
-            (int(atoms_z_matrix[idx, 0]), float(frac[idx, 0]) % 1.0, float(frac[idx, 1]) % 1.0)
-            for idx in cut_plane["indices"]
-        ]
+        delete_info = reconstruction["delete_info"]
 
         slabs = build_tasker3_slabs(
             bulk_atoms, miller, layer_thickness_list,
@@ -612,16 +615,10 @@ def _tasker3_path(
         output[tid] = {
             "atoms": slabs,
             "tasker_type": "III",
-            "plane_type": f"{cut_plane_name}-recon",
+            "plane_type": cand["recon_label"],
+            "top_plane_type": cand["recon_label"],
             "plane_counts": dict(cut_plane["counts"]),
-            "reconstruction": {
-                "cut_plane_name": cut_plane_name,
-                "cut_plane_counts": dict(cut_plane["counts"]),
-                "cut_plane_frac": cut_plane_frac,
-                "delete_info": delete_info,
-                "plane_names": plane_names,
-                "plane_name_map": plane_name_map,
-            },
+            "reconstruction": reconstruction,
             "candidate": cand,
         }
 

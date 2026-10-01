@@ -19,6 +19,7 @@ from .core import (
     assign_plane_names,
     apply_vacuum_to_slab,
     compute_cut_positions,
+    compute_delete_info,
     plane_name_matches,
     surface_bulk_cell,
 )
@@ -649,6 +650,59 @@ def _select_tasker3_candidates(candidates, miller, dipole_tol, charge_tol):
         "This stacking needs different reconstructions on the two surfaces, "
         "which taskerslabgen does not build."
     )
+
+
+def _reconstruction_metadata(cand, planes_sorted, plane_names, plane_name_map,
+                             atoms_z_matrix, surf_bulk, bulk_atoms, miller, L):
+    """
+    Description of a Tasker III pattern that :func:`cutslab` can re-apply to
+    any copy of the cut plane (JSON-serialisable).
+
+    Fractional positions refer to the in-plane cell ``cell2d`` of
+    *surf_bulk*.  ``a3_frac`` is the in-plane part of the bulk vector that
+    stacks one repeat unit onto the next, so the pattern on copy ``m`` of
+    the plane is ``delete_info + m * a3_frac``, as in
+    :func:`build_tasker3_slabs`.  ``neighbor_planes`` are the bulk planes
+    directly below and above the cut plane, used to align the pattern.
+    """
+    n = len(planes_sorted)
+    i = cand["cut_plane_idx"]
+    cut_plane = planes_sorted[i]
+
+    cell2d = np.array(surf_bulk.cell[:2, :2], dtype=float)
+    a3 = surface_bulk_cell(bulk_atoms, miller)[2]
+    a3_frac = np.asarray(a3[:2]) @ np.linalg.inv(cell2d)
+
+    def plane_frac(plane, copy=0):
+        """Atoms of *plane* as [Z, fx, fy]; *copy* repeat units up (a3)."""
+        return [
+            [Z, (fx + copy * a3_frac[0]) % 1.0, (fy + copy * a3_frac[1]) % 1.0]
+            for Z, fx, fy in compute_delete_info(plane, plane["indices"], atoms_z_matrix, surf_bulk)
+        ]
+
+    delete_info = compute_delete_info(cut_plane, cand["deletion_mask"], atoms_z_matrix, surf_bulk)
+    recon_counts = dict(cut_plane["counts"])
+    for species, _, _ in delete_info:
+        recon_counts[species] -= 1
+    return {
+        "cut_plane_name": plane_names[i],
+        "recon_label": cand["recon_label"],
+        "cut_plane_counts": dict(cut_plane["counts"]),
+        "recon_counts": {Z: c for Z, c in recon_counts.items() if c > 0},
+        "cut_plane_frac": plane_frac(cut_plane),
+        "delete_info": [list(a) for a in delete_info],
+        # The planes physically adjacent to the cut plane: across the cell
+        # boundary they are the copies one repeat unit down / up.
+        "neighbor_planes": {
+            "below": plane_frac(planes_sorted[(i - 1) % n], -1 if i == 0 else 0),
+            "above": plane_frac(planes_sorted[(i + 1) % n], 1 if i == n - 1 else 0),
+        },
+        "cell2d": cell2d.tolist(),
+        "a3_frac": a3_frac.tolist(),
+        "period": float(L),
+        "plane_names": list(plane_names),
+        "plane_name_map": plane_name_map,
+    }
 
 
 def build_tasker3_slabs(
