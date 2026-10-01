@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 Bug-fix pass from the 0.3.1 review (see `REVIEW_NOTES.md`).  Several
 defaults produced wrong or invalid slabs without an error; results for the
