@@ -10,7 +10,9 @@ def parse_hirshfeld_fhi_aims(output_path):
     Returns
     -------
     list of float
-        Hirshfeld charges in atom order.
+        Hirshfeld charges in atom order, from the last Hirshfeld analysis in
+        the file (e.g. the final geometry of a relaxation).  To use them with
+        ``charges=None``: ``atoms.set_initial_charges(parse_hirshfeld_fhi_aims(path))``.
     """
     charges = []
     in_block = False
@@ -18,6 +20,7 @@ def parse_hirshfeld_fhi_aims(output_path):
         for line in handle:
             if "Performing Hirshfeld analysis of fragment charges and moments." in line:
                 in_block = True
+                charges = []  # keep only the last analysis
                 continue
             if not in_block:
                 continue

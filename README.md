@@ -20,7 +20,7 @@ The library:
   in cut slabs and for any bulk origin
 - cuts thick slabs into thinner sub-slabs preserving termination
 - per-cut plots with unique Miller-index-aware filenames
-- checks every returned slab: stoichiometric, neutral, non-polar, no internal gaps
+- checks every returned slab: stoichiometric, neutral, non-polar
   (raises `SlabValidationError` otherwise)
 
 ## Diagram
@@ -102,8 +102,8 @@ but are not required for the standard workflow.
 Library defaults are quiet: `plot=False` and prints only when `verbose=True`.
 
 Every slab returned by `generate_slabs_for_miller`, `cutslab` and
-`reconstruct_tasker_iii` is checked to be stoichiometric, charge-neutral,
-non-polar and free of internal gaps; a `SlabValidationError` is raised
+`reconstruct_tasker_iii` is checked to be stoichiometric, charge-neutral
+and non-polar (on the actual atoms); a `SlabValidationError` is raised
 otherwise.  When no slab can satisfy the conditions (for example a polar
 stacking that symmetric deletion cannot fix, or an odd excess that needs an
 in-plane supercell) a `ValueError` explains why instead of returning a polar
@@ -179,12 +179,12 @@ classifies each surface as Tasker I/II (zero dipole) or Tasker III
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `bulk_atoms` | `Atoms` | *required* | Bulk unit cell (ASE `Atoms` object). |
-| `charges` | `dict` or `list` | *required* | Formal charges.  Dict maps element symbols (e.g. `{"Ce": 4.0, "O": -2.0}`) or atomic numbers to values; list gives per-atom charges. |
+| `charges` | `dict`, `list` or `None` | *required* | Formal charges.  Dict maps element symbols (e.g. `{"Ce": 4.0, "O": -2.0}`) or atomic numbers to values; list gives per-atom charges; `None` uses the charges stored on the `Atoms` (calculator results `"charges"`, else `initial_charges`). |
 | `millers` | `tuple` or `list[tuple]` | *required* | Single Miller index `(h, k, l)` or list of Miller indices. |
 | `layer_thickness_list` | `list[int]` | *required* | Slab thicknesses in bulk repeat units (e.g. `[2, 4, 6]`); a Tasker I/II slab of thickness *n* contains exactly *n* bulk repeat units. |
 | `bulk_name` | `str` | `"slab"` | Label used in plot and output filenames. |
 | `plane_tol` | `float` or `None` | `None` | Largest z-gap (Å) between neighbouring atoms of one plane (single-linkage clustering). `None` = 0.1 Å. |
-| `charge_tol` | `float` | `1e-3` | Tolerance for charge neutrality of a cut sequence. |
+| `charge_tol` | `float` | `1e-3` | Largest net charge per formula unit (e) treated as neutral. |
 | `dipole_tol` | `float` | `0.05` | Largest \|dipole\| per formula unit (e·Å) treated as zero: below it the surface is Tasker I/II, and Tasker III reconstructions must also stay below it. Polar repeat units are ~1–6 e·Å per formula unit; relaxed bulks may need ~0.3. |
 | `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of the slab. |
 | `plot` | `bool` | `False` | Generate stacking-axis plots showing planes and cuts. |
@@ -290,10 +290,10 @@ termination.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `input_structure` | `Atoms` or path | *required* | Thick slab to cut. |
-| `charges` | `dict` or `list` | *required* | Formal charges (same format as `generate_slabs_for_miller`). |
+| `charges` | `dict`, `list` or `None` | *required* | Formal charges (same format as `generate_slabs_for_miller`; `None` reads them from the slab, e.g. computed charges of a relaxed slab). |
 | `axis` | `int` | `2` | Cartesian axis perpendicular to the surface (0=x, 1=y, 2=z). |
 | `plane_tol` | `float` or `None` | `None` | Largest z-gap (Å) between neighbouring atoms of one plane (single-linkage clustering). `None` = 0.1 Å. |
-| `charge_tol` | `float` | `1e-3` | Tolerance for charge neutrality. |
+| `charge_tol` | `float` | `1e-3` | Largest net charge per formula unit (e) treated as neutral. |
 | `dipole_tol` | `float` | `0.05` | Largest \|dipole\| per formula unit (e·Å) of a sub-slab treated as zero; relaxed slabs usually need ~0.3. |
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
 | `plot` | `bool` | `False` | Generate a stacking-axis plot for each sub-slab. |
@@ -328,7 +328,7 @@ termination.
 **Returns**
 
 `list[Atoms]` — sub-slabs sorted from smallest to largest by atom count,
-each checked to be stoichiometric, neutral, non-polar and free of internal gaps.
+each checked to be stoichiometric, neutral and non-polar.
 If no valid cut exists a `ValueError` says why; for a polar (Tasker III) slab,
 build it with `generate_slabs_for_miller` and pass `reconstruction=` instead.
 
@@ -441,7 +441,7 @@ Returns a dict with `"slab_atoms"`, `"best_candidate"`,
 | `compute_projection(bulk, surf_bulk, charges, miller, verbose)` | Compute `[Z, z, q]` matrix and lattice-plane spacing *L*. |
 | `identify_planes(atoms_z, L, plane_tol, charge_tol)` | Cluster atoms into atomic planes (single-linkage; `plane_tol=None` = 0.1 Å). |
 | `surface_bulk_cell(bulk_atoms, miller)` | True bulk lattice in the frame of `build_surface` (its third vector stacks one layer onto the next). |
-| `validate_slab(slab, charges, reduced_counts, ...)` | Check stoichiometry, neutrality, dipole and internal gaps; raises `SlabValidationError`. |
+| `validate_slab(slab, charges, reduced_counts, ...)` | Check stoichiometry, neutrality and dipole (optionally internal gaps); raises `SlabValidationError`. |
 | `compute_reduced_counts(atoms_z)` | Compute reduced (primitive) stoichiometry. |
 | `is_stoichiometric_sequence(sequence_counts, reduced_counts)` | Check if a sequence is a whole-number multiple of bulk formula. |
 | `enumerate_cut_pairs(planes, L, reduced_counts, charge_tol)` | Enumerate all contiguous plane sequences with charge/dipole info. |
@@ -453,7 +453,7 @@ Returns a dict with `"slab_atoms"`, `"best_candidate"`,
 | `plane_match_score(plane, ref_fingerprint, atoms, axis)` | Score how well a plane matches a reference fingerprint (Hungarian RMSD). |
 | `build_cut_slabs(bulk_atoms, miller, layer_thickness_list, zbot, ztop, L, vacuum)` | Build Tasker I/II slabs at various thicknesses. |
 | `plot_unitcell_atoms(atoms_z, L, miller, ...)` | Stacking-axis plot with plane annotations. |
-| `parse_hirshfeld_fhi_aims(output_path)` | Parse Hirshfeld charges from an FHI-aims output file. |
+| `parse_hirshfeld_fhi_aims(output_path)` | Parse the last Hirshfeld charges of an FHI-aims output file (`atoms.set_initial_charges(...)`, then `charges=None`). |
 | `print_adjacency_matrix(adj, atoms)` | Print adjacency matrix with element labels. |
 | `find_tasker3_candidates(planes_sorted, atoms_z_matrix, ...)` | Enumerate and score Tasker III reconstruction candidates. |
 | `build_tasker3_slabs(bulk_atoms, miller, ...)` | Build Tasker III slabs with symmetric reconstruction. |

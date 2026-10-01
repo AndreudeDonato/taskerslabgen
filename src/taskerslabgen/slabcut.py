@@ -6,7 +6,6 @@ from .core import (
     _charges_to_list,
     _finalize_slab,
     _find_plane_translation,
-    _max_z_gap,
     _planes_from_bulk,
     identify_planes,
     compute_reduced_counts,
@@ -49,15 +48,19 @@ def cutslab(
     input_structure : Atoms or str/Path
         The thick slab to cut.  An ASE ``Atoms`` object or a file path
         readable by ``ase.io.read``.
-    charges : dict or list
-        Formal charges (same format as :func:`compute_projection`).
+    charges : dict, list or None
+        Formal charges: a dict by element, one value per atom, or ``None``
+        to use the charges stored on the slab (calculator results
+        ``"charges"``, else ``initial_charges``), e.g. computed charges of a
+        relaxed slab.
     axis : int
         Cartesian axis perpendicular to the surface (0, 1, or 2).
     plane_tol : float or None
         Largest z-gap (angstrom) between neighbouring atoms of one plane
         (single-linkage clustering).  ``None`` (default) uses 0.1 Å.
     charge_tol : float
-        Tolerance for charge neutrality.
+        Largest |net charge| per formula unit (e) treated as neutral
+        (default 1e-3).
     dipole_tol : float
         Largest |dipole| per formula unit (e·Å) still treated as zero
         (default 0.05).  Genuinely polar repeat units are ~1-6 e·Å per
@@ -115,8 +118,8 @@ def cutslab(
     -------
     list of Atoms
         Sub-slabs sorted from smallest to largest by atom count.  Each one
-        is checked to be stoichiometric, neutral, non-polar and free of
-        internal gaps (:class:`SlabValidationError` otherwise).
+        is checked to be stoichiometric, neutral and non-polar
+        (:class:`SlabValidationError` otherwise).
         Each ``Atoms`` object has metadata in ``.info``:
         ``cut_bottom_plane``, ``cut_top_plane``, ``cut_bottom_idx``,
         ``cut_top_idx``, ``cut_n_planes``.
@@ -132,14 +135,16 @@ def cutslab(
     if hasattr(input_structure, "positions"):
         atoms = input_structure.copy()
         stem = input_structure.info.get("bulk_name", "structure")
+        # From the original: Atoms.copy() drops the calculator and its charges.
+        charges_list = _charges_to_list(input_structure, charges)
     else:
         atoms = read(str(input_structure))
         stem = (
             getattr(input_structure, "stem", None)
             or str(input_structure).split("/")[-1].split(".")[0]
         )
+        charges_list = _charges_to_list(atoms, charges)
 
-    charges_list = _charges_to_list(atoms, charges)
     if len(charges_list) != len(atoms):
         raise ValueError(
             f"Charges length ({len(charges_list)}) does not match atoms ({len(atoms)})."
@@ -189,7 +194,6 @@ def cutslab(
         "reduced_counts": reduced_counts,
         "charge_tol": charge_tol,
         "dipole_tol": dipole_tol,
-        "max_gap": _max_z_gap(coords),
         "axis": axis,
     }
 
@@ -219,6 +223,12 @@ def cutslab(
             if plane["counts"] == cut_plane_counts and i not in (0, n - 1)
         }
 
+    label_hint = "" if bulk_atoms is not None else (
+        " Without bulk_atoms= labels count the atoms per cell of this slab, so an "
+        "in-plane supercell of a genslab slab has e.g. 'O16' where genslab reports "
+        "'O4'; pass bulk_atoms= to label planes by the bulk."
+    )
+
     # ---- Planes allowed to become a surface ----
     # A sub-slab is a contiguous run of planes [bottom, top] of the input
     # slab; it never wraps through the vacuum.
@@ -233,7 +243,7 @@ def cutslab(
         if not matched:
             raise ValueError(
                 f"Plane name {cut_at!r} not found. "
-                f"Available: {sorted(set(plane_names))}"
+                f"Available: {sorted(set(plane_names))}.{label_hint}"
             )
         valid_boundary_names = matched
     elif isinstance(cut_at, list):
@@ -248,7 +258,7 @@ def cutslab(
         if unknown:
             raise ValueError(
                 f"Unknown plane names: {unknown}. "
-                f"Available: {sorted(set(plane_names))}"
+                f"Available: {sorted(set(plane_names))}.{label_hint}"
             )
     else:
         raise ValueError(
@@ -302,7 +312,7 @@ def cutslab(
             if not is_stoich or set(count_map) - set(reduced_counts):
                 continue
             n_atoms, total_q, sum_z, sum_qz = sums
-            if abs(total_q) > charge_tol:
+            if abs(total_q) > charge_tol * stoich_k:
                 continue
             mu = float(sum_qz - total_q * sum_z / n_atoms)  # about the mean height
             if abs(mu) > dipole_tol * stoich_k:
@@ -435,7 +445,10 @@ def _put_vacuum_at_boundary(atoms, axis):
     f = frac[:, axis] % 1.0
     ordered = np.sort(f)
     gaps = np.diff(np.append(ordered, ordered[0] + 1.0))
-    start = ordered[(int(np.argmax(gaps)) + 1) % len(ordered)]
+    widest = int(np.argmax(gaps))
+    if widest == len(ordered) - 1 and np.all((frac[:, axis] >= 0.0) & (frac[:, axis] < 1.0)):
+        return  # already contiguous inside the cell: keep the coordinates
+    start = ordered[(widest + 1) % len(ordered)]
     frac[:, axis] = (f - start) % 1.0
     atoms.set_scaled_positions(frac)
 

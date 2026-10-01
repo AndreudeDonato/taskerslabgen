@@ -96,9 +96,10 @@ def compute_projection(bulk, surf_bulk, charges, miller, verbose=None):
         Original bulk cell (used to compute the lattice-plane spacing *L*).
     surf_bulk : Atoms
         Reoriented 1-layer surface slab.
-    charges : dict or list
+    charges : dict, list or None
         Formal charges.  A dict maps element symbols or atomic numbers to
-        charge values; a list gives per-atom charges.
+        charge values; a list gives per-atom charges; ``None`` uses the
+        charges stored on *surf_bulk* (see :func:`generate_slabs_for_miller`).
     miller : tuple of int
         Miller index ``(h, k, l)``.
     verbose : bool or None
@@ -112,7 +113,7 @@ def compute_projection(bulk, surf_bulk, charges, miller, verbose=None):
         Lattice-plane spacing (angstrom) for this Miller index.
     """
     _check_miller(miller)
-    if isinstance(charges, dict):
+    if charges is None or isinstance(charges, dict):
         charges = _charges_to_list(surf_bulk, charges)
     if len(charges) != len(surf_bulk):
         raise ValueError(
@@ -158,7 +159,32 @@ def surface_bulk_cell(bulk_atoms, miller):
     return np.array([two.cell[0], two.cell[1], a3])
 
 
+def _charges_from_atoms(atoms):
+    """Per-atom charges stored on *atoms*: calculator results, then initial charges."""
+    calc = getattr(atoms, "calc", None)
+    results = getattr(calc, "results", None) or {}
+    if results.get("charges") is not None:
+        return [float(q) for q in results["charges"]]
+    if atoms.has("initial_charges") and np.any(atoms.get_initial_charges()):
+        return [float(q) for q in atoms.get_initial_charges()]
+    raise ValueError(
+        "charges=None needs per-atom charges on the Atoms object (calculator results "
+        "'charges' or atoms.set_initial_charges(...)).  For FHI-aims Hirshfeld charges "
+        "use atoms.set_initial_charges(parse_hirshfeld_fhi_aims(path)); otherwise pass "
+        "charges as a dict, e.g. {'Ce': 4.0, 'O': -2.0}."
+    )
+
+
 def _charges_to_list(atoms, charges):
+    """
+    Per-atom charges of *atoms*.
+
+    *charges* is a dict ``{symbol or Z: charge}``, a per-atom list, or
+    ``None`` to use the charges stored on *atoms* (calculator results
+    ``"charges"``, e.g. from an extxyz file, else ``initial_charges``).
+    """
+    if charges is None:
+        return _charges_from_atoms(atoms)
     if isinstance(charges, dict):
         charge_map = {}
         for key, val in charges.items():
@@ -179,16 +205,23 @@ def _charges_to_list(atoms, charges):
     return list(charges)
 
 
-def _make_plane(indices, z_center, atoms_z, charge_tol):
-    q_total = float(np.sum(atoms_z[indices, 2]))
+def _make_plane(indices, z_values, atoms_z, charge_tol, period=None):
+    """Plane dict of the atoms *indices* at heights *z_values* (unwrapped)."""
+    z_values = np.asarray(z_values, dtype=float)
+    z_mean = float(np.mean(z_values))
+    q = np.asarray(atoms_z[indices, 2], dtype=float)
+    q_total = float(np.sum(q))
     if abs(q_total) < charge_tol:
         q_total = 0.0
     counts = {}
     for Z in atoms_z[indices, 0].astype(int):
         counts[int(Z)] = counts.get(int(Z), 0) + 1
     return {
-        "z_center": float(z_center),
+        "z_center": z_mean % period if period else z_mean,
+        "z_lo": float(z_values.min()) - z_mean,
+        "z_hi": float(z_values.max()) - z_mean,
         "q_total": q_total,
+        "dipole": float(np.sum(q * (z_values - z_mean))),
         "indices": [int(i) for i in indices],
         "counts": counts,
     }
@@ -214,14 +247,16 @@ def identify_planes(atoms_z, L, plane_tol=None, charge_tol=1e-3):
         Largest z-gap (angstrom) between neighbouring atoms of one plane.
         ``None`` (default) uses ``DEFAULT_PLANE_TOL`` (0.1 Å).
     charge_tol : float
-        Charges with ``abs(q) < charge_tol`` are set to exactly 0.
+        Plane charges with ``abs(q) < charge_tol`` are set to exactly 0.
 
     Returns
     -------
     list of dict
         Planes sorted by ``z_center`` (in ``[0, L)``).  Each dict contains
-        ``z_center``, ``q_total``, ``indices``, and ``counts`` (element
-        composition ``{Z: count}``).
+        ``z_center``, ``z_lo`` / ``z_hi`` (lowest / highest atom relative to
+        ``z_center``), ``q_total``, ``dipole`` (``sum q (z - z_center)`` of
+        its atoms), ``indices``, and ``counts`` (element composition
+        ``{Z: count}``).
     """
     if len(atoms_z) == 0:
         return []
@@ -253,7 +288,7 @@ def identify_planes(atoms_z, L, plane_tol=None, charge_tol=1e-3):
         group.append(order[k])
         group_z.append(z_sorted[k] + (L if start + m >= n else 0.0))
         if k in break_set or m == n - 1:
-            planes.append(_make_plane(group, np.mean(group_z) % L, atoms_z, charge_tol))
+            planes.append(_make_plane(group, group_z, atoms_z, charge_tol, period=L))
             group, group_z = [], []
 
     planes.sort(key=lambda p: p["z_center"])
@@ -334,7 +369,7 @@ def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3):
     reduced_counts : dict
         Reduced bulk stoichiometry.
     charge_tol : float
-        Tolerance for charge neutrality.
+        Largest |net charge| per formula unit (e) treated as neutral.
 
     Returns
     -------
@@ -352,8 +387,12 @@ def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3):
     planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
     z_sorted = np.array([p["z_center"] % L for p in planes_sorted], dtype=float)
     q_sorted = np.array([p["q_total"] for p in planes_sorted], dtype=float)
+    # Dipole of each plane's own atoms about its centre: thick or rumpled
+    # planes are not point charges.
+    p_sorted = np.array([p.get("dipole", 0.0) for p in planes_sorted], dtype=float)
     counts_sorted = [p["counts"] for p in planes_sorted]
     n = len(planes_sorted)
+    atoms_per_fu = float(sum(reduced_counts.values()))
 
     sequences = []
     for bottom_cut in range(n):
@@ -388,7 +427,8 @@ def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3):
             is_stoich, stoich_k = is_stoichiometric_sequence(seq_counts, reduced_counts)
             total_q = float(np.sum(q_seq_btt))
             z_center_btt = 0.5 * (float(z_seq_btt[0]) + float(z_seq_btt[-1]))
-            mu_btt = float(np.sum(q_seq_btt * (z_seq_btt - z_center_btt)))
+            mu_btt = float(np.sum(q_seq_btt * (z_seq_btt - z_center_btt))
+                           + np.sum(p_sorted[seq_indices_btt]))
             sequences.append(
                 {
                     "bottom_cut": bottom_cut,
@@ -400,7 +440,8 @@ def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3):
                     "direction": "bottom-to-top",
                     "plane_z": [float(z % L) for z in z_seq_btt],
                     "plane_Q": [float(q) for q in q_seq_btt],
-                    "is_neutral": abs(total_q) <= charge_tol,
+                    "is_neutral": abs(total_q) <= charge_tol * max(
+                        1.0, sum(seq_counts.values()) / atoms_per_fu),
                     "is_stoich": is_stoich,
                     "stoich_k": stoich_k,
                     "dipole_per_fu": abs(mu_btt) / stoich_k if is_stoich else None,
@@ -455,8 +496,12 @@ def select_best_sequence(sequences, dipole_tol=0.05):
 
 def compute_cut_positions(planes, L, bottom_cut_index, top_cut_index):
     """
-    Compute z-coordinates for the bottom and top cuts (midpoints between
-    adjacent planes).
+    Compute z-coordinates for the bottom and top cuts.
+
+    Each cut lies in the middle of the empty gap between the highest atom of
+    one plane and the lowest atom of the next (``z_lo`` / ``z_hi`` from
+    :func:`identify_planes`; plane centres if absent), so no atom of a thick
+    plane is cut off.
 
     Parameters
     ----------
@@ -477,15 +522,14 @@ def compute_cut_positions(planes, L, bottom_cut_index, top_cut_index):
         z-coordinate of the top cut.
     """
     planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
-    z_sorted = np.array([p["z_center"] % L for p in planes_sorted], dtype=float)
-    n = len(z_sorted)
+    n = len(planes_sorted)
 
     def midpoint(i):
-        z0 = z_sorted[i]
-        z1 = z_sorted[(i + 1) % n]
+        p0, p1 = planes_sorted[i], planes_sorted[(i + 1) % n]
+        z0, z1 = p0["z_center"] % L, p1["z_center"] % L
         if z1 <= z0:  # wraps (or a single plane: next copy is one L above)
             z1 += L
-        return 0.5 * (z0 + z1)
+        return 0.5 * ((z0 + p0.get("z_hi", 0.0)) + (z1 + p1.get("z_lo", 0.0)))
 
     return midpoint(bottom_cut_index), midpoint(top_cut_index)
 
@@ -507,7 +551,8 @@ def apply_vacuum_to_slab(atoms, vacuum=15.0, axis=2):
     new_zmax = zmax + vacuum
     new_height = new_zmax - new_zmin
     positions[:, axis] -= new_zmin
-    atoms.set_positions(positions)
+    # A rigid shift of the whole slab; FixAtoms must not hold atoms back.
+    atoms.set_positions(positions, apply_constraint=False)
     cell = atoms.get_cell().copy()
     vec = np.zeros(3)
     vec[axis] = new_height
@@ -525,8 +570,9 @@ def validate_slab(slab, charges, reduced_counts, axis=2, charge_tol=1e-3,
     ----------
     slab : Atoms
         Slab to check.
-    charges : dict or list
-        Charges by element, or one charge per atom of *slab*.
+    charges : dict, list or None
+        Charges by element, one charge per atom of *slab*, or ``None`` for
+        the charges stored on *slab*.
     reduced_counts : dict
         Reduced bulk stoichiometry ``{Z: count}``.
     axis : int
@@ -536,7 +582,9 @@ def validate_slab(slab, charges, reduced_counts, axis=2, charge_tol=1e-3,
         (e·Å), both per formula unit of the slab.
     max_gap : float or None
         Largest allowed z-gap (angstrom) between neighbouring atoms; catches
-        slabs glued together across vacuum.  ``None`` skips the check.
+        slabs glued together across vacuum.  ``None`` (default) skips the
+        check.  Not used by the generators: deleting atoms from a rumpled
+        Tasker III surface plane legitimately widens a gap.
 
     Raises
     ------
@@ -585,19 +633,6 @@ def _finalize_slab(slab, charges_list, reduced_counts, charge_tol, dipole_tol,
     del slab.arrays[_INDEX_KEY]
     validate_slab(slab, q, reduced_counts, axis=axis, charge_tol=charge_tol,
                   dipole_tol=dipole_tol, max_gap=max_gap)
-
-
-def _max_z_gap(z, period=None):
-    """Largest gap between sorted z values (wrapping through *period* if given)."""
-    z = np.asarray(z, dtype=float)
-    if len(z) < 2:
-        return None
-    if period is None:
-        z = np.sort(z)
-    else:
-        z = np.sort(z % period)
-        z = np.append(z, z[0] + period)
-    return float(np.max(np.diff(z)))
 
 
 def assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.5):
@@ -825,30 +860,48 @@ def _bulk_plane_catalog(bulk_atoms, miller, plane_tol=None):
     return catalog, L, np.array(surf.cell[:2, :2])
 
 
-def _tile_plane(plane_atoms, bulk_cell2d, cell2d):
-    """Express plane atoms ``(Z, fx, fy, dz)`` of in-plane cell *bulk_cell2d*
-    in the integer in-plane supercell *cell2d*."""
+def _supercell_matrix(bulk_cell2d, cell2d):
+    """Integer matrix ``M`` with ``cell2d = M @ bulk_cell2d`` (in-plane rows)."""
     M = np.asarray(cell2d, dtype=float) @ np.linalg.inv(bulk_cell2d)
-    M_int = np.round(M)
-    n_img = abs(int(round(np.linalg.det(M_int))))
-    if not np.allclose(M, M_int, atol=1e-3) or n_img < 1:
+    M_int = np.round(M).astype(int)
+    det = int(round(np.linalg.det(M_int)))
+    if not np.allclose(M, M_int, atol=1e-3) or det == 0:
         raise ValueError(
             "The slab's in-plane cell is not an integer supercell of the bulk "
             "surface cell; check bulk_atoms and miller."
         )
-    if n_img == 1 and np.allclose(M_int, np.eye(2)):
+    return M_int, det
+
+
+def _supercell_translations(M_int, det):
+    """The ``|det|`` bulk lattice translations (integer pairs) inside the
+    supercell ``M_int``, found exactly with the adjugate of ``M_int``."""
+    adj = np.array([[M_int[1, 1], -M_int[0, 1]], [-M_int[1, 0], M_int[0, 0]]])
+    corners = np.array([[0, 0], M_int[0], M_int[1], M_int[0] + M_int[1]])
+    lo, hi = corners.min(axis=0), corners.max(axis=0)
+    out = []
+    for i in range(lo[0], hi[0] + 1):
+        for j in range(lo[1], hi[1] + 1):
+            v = np.array([i, j]) @ adj  # = det * (fractional position in the supercell)
+            if (det > 0 and np.all((v >= 0) & (v < det))) or (
+                det < 0 and np.all((v <= 0) & (v > det))
+            ):
+                out.append((i, j))
+    return out
+
+
+def _tile_plane(plane_atoms, bulk_cell2d, cell2d):
+    """Express plane atoms ``(Z, fx, fy, ...)`` of in-plane cell *bulk_cell2d*
+    in the integer in-plane supercell *cell2d*."""
+    M_int, det = _supercell_matrix(bulk_cell2d, cell2d)
+    if det == 1 and np.array_equal(M_int, np.eye(2, dtype=int)):
         return list(plane_atoms)
-    reach = int(np.abs(M_int).sum()) + 1
-    to_frac = np.linalg.inv(cell2d)
-    tiled, seen = [], set()
-    for Z, fx, fy, dz in plane_atoms:
-        for i in range(-reach, reach + 1):
-            for j in range(-reach, reach + 1):
-                f = ((np.array([fx + i, fy + j]) @ bulk_cell2d) @ to_frac) % 1.0
-                key = (Z, round(f[0], 5) % 1.0, round(f[1], 5) % 1.0)
-                if key not in seen:
-                    seen.add(key)
-                    tiled.append((Z, f[0], f[1], dz))
+    M_inv = np.linalg.inv(M_int)
+    tiled = []
+    for t in _supercell_translations(M_int, det):
+        for atom in plane_atoms:
+            f = ((np.array(atom[1:3]) + t) @ M_inv) % 1.0
+            tiled.append((atom[0], f[0], f[1]) + tuple(atom[3:]))
     return tiled
 
 
@@ -991,7 +1044,7 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
     keyed = sorted(groups.items(), key=lambda kv: catalog[kv[0][0]]["z"] + kv[0][1] * L)
     planes_sorted, labels = [], []
     for (k, _), idx in keyed:
-        plane = _make_plane(idx, float(np.mean(z[idx])), atoms_z, charge_tol)
+        plane = _make_plane(idx, z[idx], atoms_z, charge_tol)
         rmsd = _plane_rmsd(catalog[k]["atoms"], geometry(idx, plane["z_center"]), cell2d)
         planes_sorted.append(plane)
         labels.append(catalog[k]["label"] + ("" if rmsd <= deform_tol else "'"))

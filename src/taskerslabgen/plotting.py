@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import matplotlib.pyplot as plt
 from ase.data import chemical_symbols
@@ -49,7 +51,7 @@ def plot_unitcell_atoms(
         Output image path.
     plane_tol : float or None
         Tolerance for plane identification (only used if *planes* is
-        None).  ``None`` uses adaptive z-gap clustering.
+        None).  ``None`` uses the default 0.1 Å.
     planes : list of dict or None
         Pre-computed planes.  When None, :func:`identify_planes` is
         called internally.
@@ -179,5 +181,6 @@ def plot_unitcell_atoms(
     ax.set_title(title if title is not None else f"Atoms along z (Miller index {miller})")
 
     plt.tight_layout()
+    Path(out_png).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_png, dpi=200, bbox_inches="tight")
     plt.close(fig)

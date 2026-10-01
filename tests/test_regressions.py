@@ -588,3 +588,139 @@ def test_no_ase_future_warnings():
         generate_slabs_for_miller(
             CEO2, Q_CEO2, (0, 0, 1), [2], prefer_plane="O", bond_distances=BOND_DISTS_CEO2
         )
+
+
+# ------------------------------------------------------------------
+# Second review pass: validation, charges, cut positions
+# ------------------------------------------------------------------
+ANATASE = read((BULK_DIR / "TiO2_anatase.cif").as_posix())
+
+
+def test_anatase_101_slabs_are_neutral_and_stoichiometric():
+    """0.3.1 returned Ti14O26 (charge +4) slabs for anatase (101)."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    q = {"Ti": 4.0, "O": -2.0}
+    res = generate_slabs_for_miller(ANATASE, q, (1, 0, 1), [3, 4, 5])
+    info = next(iter(res[(1, 0, 1)].values()))
+    assert info["tasker_type"] == "I/II"
+    counts = [Counter(s.get_chemical_symbols()) for s in info["atoms"]]
+    assert [(c["Ti"], c["O"]) for c in counts] == [(12, 24), (16, 32), (20, 40)]
+    for slab in info["atoms"]:
+        _assert_valid_slab(slab, q, _reduced(ANATASE))
+
+
+def test_tasker3_slabs_of_noisy_bulk_are_accepted():
+    """G1: a rumpled reconstructed plane widens a gap; that is not a glued slab."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    for seed in range(5):
+        noisy = CEO2.copy()
+        noisy.positions += np.random.default_rng(seed).normal(0.0, 1e-5, noisy.positions.shape)
+        res = generate_slabs_for_miller(noisy, Q_CEO2, (0, 0, 1), [1, 2])
+        assert res[(0, 0, 1)]
+
+
+def test_cutslab_on_slab_with_fixed_atoms(ceo2_111_slab):
+    """B2: FixAtoms must not hold atoms back when the vacuum is moved."""
+    from ase.constraints import FixAtoms
+    from taskerslabgen import cutslab
+
+    slab = ceo2_111_slab.copy()
+    z = slab.positions[:, 2]
+    slab.set_constraint(FixAtoms(mask=z < z.min() + 2.0))
+    subs = cutslab(slab, Q_CEO2)
+    assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
+
+
+def test_cutslab_without_vacuum_keeps_parent_coordinates(ceo2_111_slab):
+    """B4: a slab already inside its cell is not shifted."""
+    from taskerslabgen import cutslab
+
+    full = cutslab(ceo2_111_slab, Q_CEO2, vacuum=0)[-1]
+    np.testing.assert_allclose(full.positions, ceo2_111_slab.positions)
+
+
+def test_charge_tol_is_per_formula_unit():
+    """G2: a 1e-4 e charge excess per Ce is noise in any cell size."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    supercell = read((BULK_DIR / "CeO2_fluorite_supercell2x2x2.cif").as_posix())
+    res = generate_slabs_for_miller(supercell, {"Ce": 4.0001, "O": -2.0}, (1, 1, 1), [1])
+    assert res[(1, 1, 1)]
+
+
+@pytest.mark.parametrize("hkl, plane_tol", [((-1, 1, -1), 0.2), ((-1, 0, 1), 0.3)])
+def test_cut_does_not_slice_a_thick_plane(hkl, plane_tol):
+    """SW1: cuts go in the gap between plane extents, not between plane centres."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    res = generate_slabs_for_miller(ALBITE, Q_ALBITE, hkl, [1, 2], plane_tol=plane_tol,
+                                    candidates="all")
+    for info in res[hkl].values():
+        for slab in info["atoms"]:
+            _assert_valid_slab(slab, Q_ALBITE, _reduced(ALBITE))
+
+
+def test_unknown_termination_id_raises():
+    """SW3: prefer_plane=<missing id> used to return an empty result."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    with pytest.raises(ValueError, match="available IDs"):
+        generate_slabs_for_miller(CEO2, Q_CEO2, (1, 1, 1), [1], prefer_plane=99)
+
+
+def test_plot_creates_output_directory(tmp_path):
+    """SW6"""
+    from taskerslabgen import generate_slabs_for_miller
+
+    out = tmp_path / "new" / "plots"
+    generate_slabs_for_miller(CEO2, Q_CEO2, (1, 1, 1), [1], plot=True, plot_out_dir=str(out))
+    assert list(out.glob("*.png"))
+
+
+def test_hirshfeld_parser_keeps_last_analysis(tmp_path):
+    """SW7: a relaxation prints one Hirshfeld block per geometry."""
+    from taskerslabgen import parse_hirshfeld_fhi_aims
+
+    block = "  Performing Hirshfeld analysis of fragment charges and moments.\n"
+    out = tmp_path / "aims.out"
+    out.write_text(
+        block + "  |   Hirshfeld charge        :      0.10\n"
+        "  |   Hirshfeld charge        :     -0.10\n"
+        + block + "  |   Hirshfeld charge        :      0.30\n"
+        "  |   Hirshfeld charge        :     -0.30\n"
+    )
+    assert parse_hirshfeld_fhi_aims(out) == [0.30, -0.30]
+
+
+def test_bulk_matching_oblique_supercell_with_cell_noise(ceo2_111_slab):
+    """L4: in-plane tiling must not depend on rounding of fractional positions."""
+    from ase.build import make_supercell
+    from taskerslabgen import cutslab
+
+    sc = make_supercell(ceo2_111_slab, [[2, 1, 0], [-1, 1, 0], [0, 0, 1]])
+    sc.set_cell(sc.cell * (1 + 1e-6), scale_atoms=True)
+    subs = cutslab(sc, Q_CEO2, bulk_atoms=CEO2, miller=(1, 1, 1))
+    assert [s.get_chemical_formula() for s in subs] == ["Ce12O24", "Ce24O48", "Ce36O72"]
+
+
+def test_charges_read_from_atoms(ceo2_111_slab):
+    """charges=None uses the charges ASE stores on the structure."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    bulk_q = CEO2.copy()
+    bulk_q.set_initial_charges([Q_CEO2[s] for s in bulk_q.get_chemical_symbols()])
+    res = generate_slabs_for_miller(bulk_q, None, (1, 1, 1), [2])
+    assert next(iter(res[(1, 1, 1)].values()))["atoms"][0].get_chemical_formula() == "Ce8O16"
+
+    slab = ceo2_111_slab.copy()
+    noise = np.random.default_rng(0).normal(0.0, 1e-4, len(slab))
+    slab.calc = SinglePointCalculator(
+        slab, charges=np.array([Q_CEO2[s] for s in slab.get_chemical_symbols()]) + noise
+    )
+    subs = cutslab(slab, None)
+    assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
+    with pytest.raises(ValueError, match="set_initial_charges"):
+        cutslab(ceo2_111_slab, None)

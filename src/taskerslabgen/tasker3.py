@@ -7,9 +7,9 @@ from ase.data import atomic_numbers, covalent_radii, chemical_symbols
 from ase.neighborlist import neighbor_list
 
 from .core import (
+    _INDEX_KEY,
     _charges_to_list,
     _finalize_slab,
-    _max_z_gap,
     _tag_atom_indices,
     build_surface,
     compute_projection,
@@ -17,6 +17,7 @@ from .core import (
     compute_reduced_counts,
     assign_plane_names,
     apply_vacuum_to_slab,
+    compute_cut_positions,
     plane_name_matches,
     surface_bulk_cell,
 )
@@ -586,15 +587,6 @@ def find_tasker3_candidates(
     return candidates
 
 
-def _midpoint(z_sorted, L, i):
-    n = len(z_sorted)
-    z0 = z_sorted[i]
-    z1 = z_sorted[(i + 1) % n]
-    if z1 <= z0:  # wraps (or a single plane: next copy is one L above)
-        z1 += L
-    return 0.5 * (z0 + z1)
-
-
 def _select_tasker3_candidates(candidates, miller, dipole_tol, charge_tol):
     """
     Keep the Tasker III candidates that give neutral, non-polar slabs.
@@ -677,12 +669,12 @@ def build_tasker3_slabs(
     """
     n_uc = len(atoms_z_matrix)
     n_planes = len(planes_sorted)
-    z_sorted = np.array([p["z_center"] % L for p in planes_sorted])
 
-    # The cut plane is the only plane between these two midpoints.
-    zbot = _midpoint(z_sorted, L, (cut_plane_idx - 1) % n_planes)
-    ztop = _midpoint(z_sorted, L, cut_plane_idx)
-    span = (ztop - zbot) % L
+    # The cut plane is the only plane between these two cuts.
+    zbot, ztop = compute_cut_positions(
+        planes_sorted, L, (cut_plane_idx - 1) % n_planes, cut_plane_idx
+    )
+    span = (ztop - zbot) % L or L
     deleted = np.array(sorted(int(i) for i in deletion_mask), dtype=int)
 
     slabs = []
@@ -789,7 +781,8 @@ def reconstruct_tasker_iii(
     bulk = _tag_atom_indices(bulk_atoms)
     surf_bulk = build_surface(bulk, miller, layers=1, verbose=verbose)
     atoms_z_matrix, L = compute_projection(
-        bulk, surf_bulk, charges, miller, verbose=verbose
+        bulk, surf_bulk, [charges_list[i] for i in surf_bulk.arrays[_INDEX_KEY]], miller,
+        verbose=verbose,
     )
     planes = identify_planes(
         atoms_z_matrix, L, plane_tol=plane_tol, charge_tol=charge_tol
@@ -821,11 +814,10 @@ def reconstruct_tasker_iii(
             f"mu={best['net_dipole']:+.4e}  bonds_broken={best['bond_score']}\n"
         )
 
-    z_s = np.array([p["z_center"] % L for p in planes_sorted])
-    bot_idx = (best["cut_plane_idx"] - 1) % len(planes_sorted)
-    top_idx = best["cut_plane_idx"]
-    zbot = _midpoint(z_s, L, bot_idx)
-    ztop = _midpoint(z_s, L, top_idx)
+    zbot, ztop = compute_cut_positions(
+        planes_sorted, L, (best["cut_plane_idx"] - 1) % len(planes_sorted),
+        best["cut_plane_idx"],
+    )
 
     plot_path = None
     if plot:
@@ -844,9 +836,8 @@ def reconstruct_tasker_iii(
         atoms_z_matrix=atoms_z_matrix,
         L=L, vacuum=vacuum,
     )
-    max_gap = _max_z_gap(atoms_z_matrix[:, 1], period=L)
     for slab in slabs:
-        _finalize_slab(slab, charges_list, reduced_counts, charge_tol, dipole_tol, max_gap)
+        _finalize_slab(slab, charges_list, reduced_counts, charge_tol, dipole_tol)
 
     return {
         "plot": plot_path,

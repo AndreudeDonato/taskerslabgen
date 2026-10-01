@@ -111,6 +111,35 @@ raise.
 - Single-plane cells: cut midpoints no longer coincide with the plane.
 - Miller indices are validated (integers, not (0, 0, 0), reduced).
 
+### Second review pass
+- **No internal-gap check in the generators:** deleting atoms from a rumpled
+  Tasker III surface plane legitimately widens a gap, so valid slabs were
+  rejected (CeO₂ (001) from a bulk with 1e-5 Å noise failed half the time;
+  ideal corundum (111)).  ``validate_slab(max_gap=...)`` keeps the option.
+- **``charge_tol`` per formula unit everywhere** (cut sequences, cutslab,
+  validation), like ``dipole_tol``; a supercell with 1e-4 e per atom of
+  charge noise was rejected while its unit cell was accepted.
+- **``charges=None``** reads per-atom charges stored on the ``Atoms``
+  (calculator results ``"charges"``, else ``initial_charges``).
+- **Cuts in the gap between planes:** cut positions lie in the middle of
+  the empty gap between the outermost atoms of neighbouring planes, not
+  between plane centres, which could slice a thick plane (albite (-1,1,-1)
+  with ``plane_tol=0.2`` gave a slab with a 2L dipole).  Sequence dipoles
+  include each plane's internal dipole (planes carry ``z_lo``, ``z_hi``,
+  ``dipole``).
+- **cutslab on slabs with ``FixAtoms``:** the vacuum shift ignored fixed
+  atoms and every cut failed; slabs already inside their cell keep their
+  coordinates (``vacuum=0`` returns parent coordinates again).
+- **Exact in-plane tiling** for bulk matching of oblique supercells (failed
+  with 1e-6 relative cell noise).
+- ``prefer_plane=<id>`` with an unknown ID raises instead of returning
+  nothing; ``plot=True`` creates ``plot_out_dir``; ``parse_hirshfeld_fhi_aims``
+  returns the last Hirshfeld analysis instead of concatenating all of them;
+  cutslab's unknown-label error explains supercell labels.
+- Anatase (101), reported against 0.3.1 (charged Ti₁₄O₂₆ slabs), gives
+  stoichiometric, neutral slabs; regression test added
+  (``bulk_files/TiO2_anatase.cif``).
+
 ### Compatibility
 - ``ase.build.surface`` is no longer called with ``vacuum=0`` (deprecated in
   ASE 3.29, slated to raise); ``build_surface`` without vacuum keeps atom

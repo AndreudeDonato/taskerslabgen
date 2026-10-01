@@ -4,9 +4,9 @@ from ase.data import atomic_numbers, chemical_symbols
 from ase.io import write
 
 from .core import (
+    _INDEX_KEY,
     _charges_to_list,
     _finalize_slab,
-    _max_z_gap,
     _tag_atom_indices,
     build_surface,
     compute_projection,
@@ -49,7 +49,13 @@ def _filter_by_prefer_plane(terminations, prefer_plane):
         prefer_plane = [prefer_plane]
 
     if isinstance(prefer_plane, (list, tuple)) and prefer_plane and all(isinstance(x, int) for x in prefer_plane):
-        return {tid: terminations[tid] for tid in prefer_plane if tid in terminations}
+        missing = [tid for tid in prefer_plane if tid not in terminations]
+        if missing:
+            raise ValueError(
+                f"No termination with ID {missing} (prefer_plane={prefer_plane!r}); "
+                f"available IDs: {sorted(terminations)}."
+            )
+        return {tid: terminations[tid] for tid in prefer_plane}
 
     if isinstance(prefer_plane, str):
         str_list = [prefer_plane]
@@ -124,9 +130,13 @@ def generate_slabs_for_miller(
     ----------
     bulk_atoms : Atoms
         Bulk unit cell.
-    charges : dict or list
+    charges : dict, list or None
         Formal charges.  A dict maps element symbols (or atomic numbers)
-        to charge values; a list gives per-atom charges.
+        to charge values; a list gives per-atom charges.  ``None`` uses the
+        charges stored on *bulk_atoms*: calculator results ``"charges"``
+        (e.g. read from an extxyz file), else ``bulk_atoms.get_initial_charges()``.
+        Computed charges (Hirshfeld, Bader) rarely sum exactly to zero, so
+        they may need a larger *charge_tol*.
     millers : tuple or list of tuples
         Single Miller index ``(h, k, l)`` or list of Miller indices.
     layer_thickness_list : list of int
@@ -137,7 +147,8 @@ def generate_slabs_for_miller(
         Largest z-gap (angstrom) between neighbouring atoms of one plane
         (single-linkage clustering).  ``None`` (default) uses 0.1 Å.
     charge_tol : float
-        Tolerance for charge neutrality.
+        Largest |net charge| per formula unit (e) treated as neutral
+        (default 1e-3).
     dipole_tol : float
         Largest |dipole| per formula unit (e·Å) still treated as zero
         (default 0.05).  Genuinely polar repeat units are ~1-6 e·Å per
@@ -199,10 +210,9 @@ def generate_slabs_for_miller(
           (e.g. ``{"Ce-O": 8, "Ce-Ce": 12}``) and ``surface_density`` in
           atoms/Å²; IDs are in rank order, ID 0 = best)
 
-        Every slab is checked to be stoichiometric, neutral, non-polar
-        and free of internal gaps; a :class:`SlabValidationError` is raised
-        otherwise.  A ``ValueError`` explains when no non-polar
-        reconstruction exists.
+        Every slab is checked to be stoichiometric, neutral and non-polar;
+        a :class:`SlabValidationError` is raised otherwise.  A ``ValueError``
+        explains when no non-polar reconstruction exists.
     """
     if candidates not in ("best", "all"):
         raise ValueError(f"candidates must be 'best' or 'all', got {candidates!r}")
@@ -246,7 +256,8 @@ def _generate_for_one_miller(
 
     surf_bulk = build_surface(bulk, miller, layers=1, verbose=verbose)
     atoms_z_matrix, L = compute_projection(
-        bulk, surf_bulk, charges, miller, verbose=verbose
+        bulk, surf_bulk, [charges_list[i] for i in surf_bulk.arrays[_INDEX_KEY]], miller,
+        verbose=verbose,
     )
     planes = identify_planes(atoms_z_matrix, L, plane_tol=plane_tol, charge_tol=charge_tol)
     reduced_counts = compute_reduced_counts(atoms_z_matrix)
@@ -263,7 +274,6 @@ def _generate_for_one_miller(
         "reduced_counts": reduced_counts,
         "charge_tol": charge_tol,
         "dipole_tol": dipole_tol,
-        "max_gap": _max_z_gap(atoms_z_matrix[:, 1], period=L),
     }
 
     if verbose:
@@ -448,7 +458,6 @@ def _tasker3_path(
         find_tasker3_candidates,
         build_tasker3_slabs,
         print_adjacency_matrix,
-        _midpoint,
         _select_tasker3_candidates,
     )
 
@@ -568,11 +577,10 @@ def _tasker3_path(
             )
 
         if plot:
-            z_s = np.array([p["z_center"] % L for p in planes_sorted])
-            bot_idx = (cand["cut_plane_idx"] - 1) % len(planes_sorted)
-            top_idx = cand["cut_plane_idx"]
-            zbot = _midpoint(z_s, L, bot_idx)
-            ztop = _midpoint(z_s, L, top_idx)
+            zbot, ztop = compute_cut_positions(
+                planes_sorted, L, (cand["cut_plane_idx"] - 1) % len(planes_sorted),
+                cand["cut_plane_idx"],
+            )
 
             recon_names = list(plane_names)
             recon_names[cand["cut_plane_idx"]] = f"{plane_names[cand['cut_plane_idx']]}-recon"
