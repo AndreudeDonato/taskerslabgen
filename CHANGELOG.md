@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0
+## 0.4.0 — 2026-10-02
 
 Bug-fix pass from a review of 0.3.1.  Several
 defaults produced wrong or invalid slabs without an error; results for the
