@@ -1,9 +1,9 @@
-from itertools import product
 from math import gcd
 
 import numpy as np
 from ase.build import surface
-from ase.data import atomic_numbers
+from ase.data import atomic_numbers, chemical_symbols
+from ase.formula import Formula
 from ase.io import read
 from scipy.optimize import linear_sum_assignment
 
@@ -597,26 +597,27 @@ def _max_z_gap(z, period=None):
 
 def assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.5):
     """
-    Assign hierarchical plane labels ``P{n}{letter}`` (e.g. ``P0a``, ``P0b``).
+    Label planes by their composition, e.g. ``O4``, ``Ce4``, ``Ir2O2``.
 
-    - **Type** ``P{n}``: same composition, and in-plane geometry that maps
-      onto each other under a point-group operation of the in-plane lattice
-      plus a translation (8 operations for a square lattice, 12 hexagonal,
-      4 rectangular, 2 oblique).
-    - **Variant letter**: planes related by a pure in-plane translation
-      share the full name; congruent planes that are not translation-related
-      get the next letter (``a``, ``b``, …) in order of first appearance
-      along the stacking axis.
+    A label depends only on the plane itself, so the same plane gets the
+    same label in the bulk cell (genslab), in a slab cut from it (cutslab),
+    and for any choice of bulk origin.  When one composition occurs in
+    several geometries that are not related by an in-plane translation
+    (e.g. the mirror-related IrO2 planes of rutile (001)), a variant letter
+    is appended: ``IrO2-a``, ``IrO2-b``.  Variants are ordered by a
+    translation-invariant key of their geometry, not by stacking order.
 
-    Reconstruction suffixes such as ``P0a-recon`` are added by callers, not
-    here.  Without *atoms*, planes are named by composition only.
+    Elements are written metals first, then non-metals, each alphabetically
+    (ASE's ``"metal"`` formula format).  Reconstruction suffixes such as
+    ``O4-recon`` are added by callers, not here.  Without *atoms*, planes are
+    labelled by composition only.
 
     Parameters
     ----------
     planes_sorted : list of dict
         Planes from :func:`identify_planes`, in stacking order.
     atoms : Atoms or None
-        Structure the plane indices refer to; enables geometric matching.
+        Structure the plane indices refer to; enables geometric variants.
     axis : int
         Stacking axis.
     xy_tol : float
@@ -626,105 +627,100 @@ def assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.5):
     Returns
     -------
     names : list of str
-        ``names[i]`` is the name of ``planes_sorted[i]``.
+        ``names[i]`` is the label of ``planes_sorted[i]``.
     name_map : dict
-        ``{name: counts_dict}``.
+        ``{label: counts_dict}``.
     """
     import string
 
-    identity = [np.eye(2, dtype=int)]
-    lattice_ops = identity
     if atoms is not None:
         ab_axes = [i for i in range(3) if i != axis]
         frac_all = atoms.get_scaled_positions()
         cell2d = np.array(atoms.cell)[np.ix_(ab_axes, ab_axes)]
-        lattice_ops = _lattice_point_ops(cell2d)
 
-    def geometry(plane):
+    # Translation classes per composition: formula -> [[geometry, counts], ...]
+    classes = {}
+    class_of = []
+    for plane in planes_sorted:
+        formula = _formula_label(plane["counts"])
+        groups = classes.setdefault(formula, [])
         if atoms is None:
-            return None
-        return [
+            if not groups:
+                groups.append([None, dict(plane["counts"])])
+            class_of.append((formula, 0))
+            continue
+        geom = [
             (int(atoms.numbers[i]), frac_all[i, ab_axes[0]], frac_all[i, ab_axes[1]])
             for i in plane["indices"]
         ]
-
-    def related(geom_a, geom_b, ops):
-        if geom_a is None:
-            return True
-        return _find_plane_alignment(geom_a, geom_b, cell2d, xy_tol, ops) is not None
-
-    # Per type index: list of (counts, geometry, full_name)
-    type_variants = []
-    next_letter = []
-    names = []
-    name_map = {}
-
-    for plane in planes_sorted:
-        counts = dict(plane["counts"])
-        geom = geometry(plane)
-
-        matched_name = None
-        matched_type = None
-        for t_idx, variants in enumerate(type_variants):
-            if variants[0][0] != counts:
-                continue
-            for _, vgeom, vname in variants:
-                if related(vgeom, geom, identity):
-                    matched_name = vname
-                    break
-            if matched_name is not None:
+        for k, (ref_geom, _) in enumerate(groups):
+            if _find_plane_translation(ref_geom, geom, cell2d, xy_tol) is not None:
+                class_of.append((formula, k))
                 break
-            if any(related(vgeom, geom, lattice_ops) for _, vgeom, _ in variants):
-                matched_type = t_idx
-                break
+        else:
+            groups.append([geom, dict(plane["counts"])])
+            class_of.append((formula, len(groups) - 1))
 
-        if matched_name is not None:
-            names.append(matched_name)
+    labels = {}
+    for formula, groups in classes.items():
+        if len(groups) == 1:
+            labels[(formula, 0)] = formula
             continue
+        if len(groups) > len(string.ascii_lowercase):
+            raise ValueError(f"Too many geometric variants of {formula} planes (more than 26).")
+        order = sorted(range(len(groups)), key=lambda k: _canonical_plane_key(groups[k][0]))
+        for letter, k in zip(string.ascii_lowercase, order):
+            labels[(formula, k)] = f"{formula}-{letter}"
 
-        if matched_type is not None:
-            letter_i = next_letter[matched_type]
-            if letter_i >= len(string.ascii_lowercase):
-                raise ValueError(
-                    f"Too many plane variants for type P{matched_type} "
-                    f"(exceeded 26 letters)."
-                )
-            name = f"P{matched_type}{string.ascii_lowercase[letter_i]}"
-            next_letter[matched_type] = letter_i + 1
-            type_variants[matched_type].append((counts, geom, name))
-            name_map[name] = counts
-            names.append(name)
-            continue
-
-        # New type
-        t_idx = len(type_variants)
-        name = f"P{t_idx}a"
-        type_variants.append([(counts, geom, name)])
-        next_letter.append(1)
-        name_map[name] = counts
-        names.append(name)
-
+    names = [labels[c] for c in class_of]
+    name_map = {
+        labels[(formula, k)]: counts
+        for formula, groups in classes.items()
+        for k, (_, counts) in enumerate(groups)
+    }
     return names, name_map
+
+
+def _formula_label(counts):
+    """Composition label of a plane, e.g. ``{8: 4} -> 'O4'``, ``{77: 1, 8: 2} -> 'IrO2'``."""
+    return Formula.from_dict(
+        {chemical_symbols[int(Z)]: int(c) for Z, c in counts.items() if c > 0}
+    ).format("metal")
+
+
+def _canonical_plane_key(geom, decimals=3):
+    """
+    Translation-invariant key of a plane geometry ``[(Z, fx, fy), ...]``.
+
+    The lexicographically smallest sorted list of rounded fractional
+    positions over all choices of origin atom (of the rarest species).
+    """
+    Zs = np.array([a[0] for a in geom], dtype=int)
+    frac = np.array([[a[1], a[2]] for a in geom], dtype=float)
+    species, counts = np.unique(Zs, return_counts=True)
+    anchor_Z = species[np.argmin(counts)]
+    best = None
+    for a in np.flatnonzero(Zs == anchor_Z):
+        shifted = np.round((frac - frac[a]) % 1.0, decimals) % 1.0
+        key = tuple(sorted((int(z), float(x), float(y)) for z, (x, y) in zip(Zs, shifted)))
+        if best is None or key < best:
+            best = key
+    return best
 
 
 def plane_name_base(name):
     """
-    Return the type base of a plane label.
+    Return the composition part of a plane label.
 
-    Examples: ``P0a`` → ``P0``, ``P0a-recon`` → ``P0``, ``P12b`` → ``P12``.
+    Examples: ``IrO2-a`` → ``IrO2``, ``O4-recon`` → ``O4``,
+    ``IrO2-b-recon`` → ``IrO2``.
     """
     if not name:
         return name
     core = name[:-6] if name.endswith("-recon") else name
-    if len(core) >= 2 and core[0] == "P":
-        # Strip trailing variant letter if present (P0a, P12b, …)
-        if core[-1].isalpha() and core[-1].islower():
-            digits = core[1:-1]
-            if digits.isdigit():
-                return f"P{digits}"
-        # Bare type like P0 (no letter)
-        if core[1:].isdigit():
-            return core
+    head, sep, tail = core.rpartition("-")
+    if sep and len(tail) == 1 and tail.isalpha() and tail.islower():
+        return head
     return core
 
 
@@ -734,9 +730,10 @@ def plane_name_matches(query, name):
 
     Matching rules:
 
-    - exact equality (``P0a-recon`` ↔ ``P0a-recon``)
-    - query equals name without ``-recon`` (``P0a`` ↔ ``P0a-recon``)
-    - query equals the type base (``P0`` ↔ ``P0a``, ``P0b``, ``P0a-recon``)
+    - exact equality (``O4-recon`` ↔ ``O4-recon``)
+    - query equals name without ``-recon`` (``O4`` ↔ ``O4-recon``)
+    - query equals the composition (``IrO2`` ↔ ``IrO2-a``, ``IrO2-b``,
+      ``IrO2-a-recon``)
     """
     if query == name:
         return True
@@ -745,54 +742,15 @@ def plane_name_matches(query, name):
     return query == plane_name_base(name)
 
 
-def _gauss_reduce_basis(cell2d):
-    """Integer unimodular ``P`` such that ``P @ cell2d`` is a Lagrange-Gauss reduced basis."""
-    P = np.eye(2, dtype=int)
-    B = np.array(cell2d, dtype=float)
-    for _ in range(100):
-        if np.dot(B[1], B[1]) < np.dot(B[0], B[0]):
-            B = B[::-1].copy()
-            P = P[::-1].copy()
-        mu = int(np.round(np.dot(B[0], B[1]) / np.dot(B[0], B[0])))
-        if mu == 0:
-            break
-        B[1] -= mu * B[0]
-        P[1] -= mu * P[0]
-    return P
-
-
-def _lattice_point_ops(cell2d, tol=1e-3):
+def _find_plane_translation(ref, tgt, cell2d, tol):
     """
-    Point-group operations of the 2D lattice with basis rows *cell2d*.
-
-    Returned as integer matrices ``W`` acting on fractional coordinates
-    (``f' = f @ W``): 8 for a square lattice, 12 hexagonal, 4 (centred)
-    rectangular, 2 oblique.
-    """
-    P = _gauss_reduce_basis(cell2d)
-    P_inv = np.round(np.linalg.inv(P)).astype(int)
-    reduced = P @ np.asarray(cell2d, dtype=float)
-    G = reduced @ reduced.T
-    atol = tol * float(np.max(np.abs(G)))
-    ops = []
-    for entries in product((-1, 0, 1), repeat=4):
-        W = np.array(entries, dtype=int).reshape(2, 2)
-        if abs(round(np.linalg.det(W))) != 1:
-            continue
-        if np.allclose(W @ G @ W.T, G, atol=atol):
-            ops.append(P_inv @ W @ P)
-    return ops
-
-
-def _find_plane_alignment(ref, tgt, cell2d, tol, ops=None):
-    """
-    Find an in-plane operation mapping plane *ref* onto plane *tgt*.
+    Find an in-plane translation mapping plane *ref* onto plane *tgt*.
 
     *ref* and *tgt* are lists of ``(Z, fx, fy)`` in fractional coordinates
-    of the in-plane lattice with basis rows *cell2d*.  Returns ``(W, t)``
-    such that every ref atom moved to ``f @ W + t`` lies within *tol*
-    angstrom of a distinct tgt atom of the same species, or ``None``.
-    *ops* defaults to the identity (pure translations).
+    of the in-plane lattice with basis rows *cell2d*.  Returns the
+    fractional translation ``t`` such that every ref atom moved by ``t``
+    lies within *tol* angstrom of a distinct tgt atom of the same species,
+    or ``None``.
     """
     if len(ref) != len(tgt):
         return None
@@ -803,7 +761,7 @@ def _find_plane_alignment(ref, tgt, cell2d, tol, ops=None):
     if not (np.array_equal(species, tgt_species) and np.array_equal(counts, tgt_counts)):
         return None
     if len(ref) == 0:
-        return np.eye(2, dtype=int), np.zeros(2)
+        return np.zeros(2)
 
     ref_f = np.array([[a[1], a[2]] for a in ref], dtype=float)
     tgt_f = np.array([[a[1], a[2]] for a in tgt], dtype=float)
@@ -812,19 +770,17 @@ def _find_plane_alignment(ref, tgt, cell2d, tol, ops=None):
     anchor = int(np.flatnonzero(ref_Z == anchor_Z)[0])
     groups = [(np.flatnonzero(ref_Z == Z), np.flatnonzero(tgt_Z == Z)) for Z in species]
 
-    for W in (ops if ops is not None else [np.eye(2, dtype=int)]):
-        moved = ref_f @ W
-        for b in np.flatnonzero(tgt_Z == anchor_Z):
-            t = tgt_f[b] - moved[anchor]
-            for r_idx, t_idx in groups:
-                d = (moved[r_idx] + t)[:, None, :] - tgt_f[t_idx][None, :, :]
-                d -= np.round(d)
-                dist = np.linalg.norm(d @ cell2d, axis=-1)
-                rows, cols = linear_sum_assignment(dist)
-                if dist[rows, cols].max() > tol:
-                    break
-            else:
-                return W, t % 1.0
+    for b in np.flatnonzero(tgt_Z == anchor_Z):
+        t = tgt_f[b] - ref_f[anchor]
+        for r_idx, t_idx in groups:
+            d = (ref_f[r_idx] + t)[:, None, :] - tgt_f[t_idx][None, :, :]
+            d -= np.round(d)
+            dist = np.linalg.norm(d @ cell2d, axis=-1)
+            rows, cols = linear_sum_assignment(dist)
+            if dist[rows, cols].max() > tol:
+                break
+        else:
+            return t % 1.0
     return None
 
 

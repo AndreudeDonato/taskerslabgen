@@ -63,7 +63,7 @@ def plot_unitcell_atoms(
         Plane indices that match a reference termination.  Matched
         planes are drawn in green, others in gray.
     plane_names : list of str or None
-        Per-plane symbolic names (e.g. ``"P0"``, ``"P1-recon"``).
+        Per-plane labels (e.g. ``"O4"``, ``"O4-recon"``).
     title : str or None
         Custom title.  When None the default Miller-index title is used.
     """

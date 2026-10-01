@@ -28,17 +28,17 @@ def _filter_by_prefer_plane(terminations, prefer_plane):
       - ``None``        → no filter (keep everything)
       - ``int``         → keep that single termination ID
       - ``list[int]``   → keep those termination IDs
-      - ``str``         → element symbol (e.g. ``"O"``) or plane type /
-                           variant name (e.g. ``"P0"`` matches ``P0a``/
-                           ``P0b``/``P0a-recon``; ``"P0a"`` matches
-                           ``P0a`` and ``P0a-recon``).
+      - ``str``         → element symbol (e.g. ``"O"``) or plane label
+                           (e.g. ``"IrO2"`` matches ``IrO2-a``/``IrO2-b``/
+                           ``IrO2-a-recon``; ``"IrO2-a"`` matches ``IrO2-a``
+                           and ``IrO2-a-recon``).
       - ``list[str]``   → match any of the listed strings
 
     Element matching is **exclusive**: ``"O"`` keeps only planes whose
     atoms are *all* oxygen.  A mixed CeO plane would NOT match ``"O"``.
     Use ``["O", "Ce"]`` to keep pure-O planes OR pure-Ce planes (but
     still not mixed CeO planes).  To select mixed planes use the plane
-    type name (e.g. ``"P0"``).
+    label (e.g. ``"Ce2O4"``).
     """
     if prefer_plane is None:
         return dict(terminations)
@@ -86,7 +86,7 @@ def _filter_by_prefer_plane(terminations, prefer_plane):
     if not selected:
         raise ValueError(
             f"No termination matches prefer_plane={prefer_plane!r}. "
-            f"Available plane types: "
+            f"Available plane labels: "
             f"{sorted(set(t.get('plane_type','') for t in terminations.values()))}"
         )
     return selected
@@ -162,9 +162,10 @@ def generate_slabs_for_miller(
         - ``str`` (element symbol, e.g. ``"O"``): keep terminations
           whose cut plane is **exclusively** that element.  A mixed
           CeO plane would NOT match ``"O"``.
-        - ``str`` (plane type name, e.g. ``"P0"``): keep terminations
-          whose plane type matches.  ``"P0"`` matches ``P0a``, ``P0b``,
-          and ``P0a-recon``; ``"P0a"`` matches ``P0a`` and ``P0a-recon``.
+        - ``str`` (plane label, e.g. ``"O4"``): keep terminations whose
+          plane label matches.  ``"IrO2"`` matches ``IrO2-a``, ``IrO2-b``
+          and ``IrO2-a-recon``; ``"IrO2-a"`` matches ``IrO2-a`` and
+          ``IrO2-a-recon``.
         - ``list[str]``: match any entry.  ``["O", "Ce"]`` keeps pure-O
           planes OR pure-Ce planes, but not mixed CeO planes.
     candidates : str
@@ -183,7 +184,8 @@ def generate_slabs_for_miller(
 
         - ``"atoms"`` -- list of ``Atoms`` (one per thickness)
         - ``"tasker_type"`` -- ``"I/II"`` or ``"III"``
-        - ``"plane_type"`` -- symbolic name (e.g. ``"P0-recon"``)
+        - ``"plane_type"`` -- label of the cut plane (e.g. ``"O4"``,
+          ``"O4-recon"``); pass it to ``cutslab(cut_at=...)``
         - ``"plane_counts"`` -- element composition of the cut plane
         - ``"reconstruction"`` -- reconstruction metadata (or None)
         - ``"candidate"`` -- raw scoring dict

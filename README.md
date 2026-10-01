@@ -16,8 +16,8 @@ The library:
 - enumerates Tasker cut pairs with stoichiometry + charge neutrality + dipole checks
 - performs Tasker III surface reconstruction (symmetric deletion, bond scoring,
   Coulomb-like distribution scoring that favours checkerboard arrangements)
-- stacking-aware plane naming (composition + in-plane geometry, up to translation and
-  in-plane lattice symmetry)
+- plane labels from composition (`O4`, `Ce2O4`, `IrO2-a`) that are identical in the bulk,
+  in cut slabs and for any bulk origin
 - cuts thick slabs into thinner sub-slabs preserving termination
 - per-cut plots with unique Miller-index-aware filenames
 - checks every returned slab: stoichiometric, neutral, non-polar, no internal gaps
@@ -211,7 +211,7 @@ bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
 | `int` (e.g. `0`) | Keep only the termination with that numeric ID. |
 | `list[int]` (e.g. `[0, 2]`) | Keep terminations with those IDs. |
 | `str` element (e.g. `"O"`) | Keep terminations whose cut plane consists **exclusively** of that element. `"O"` matches pure-O planes but NOT mixed CeO planes. |
-| `str` plane type (e.g. `"P0"`) | Keep terminations whose plane type matches. `"P0"` matches `P0a` / `P0b` / `P0a-recon`; `"P0a"` matches `P0a` and `P0a-recon`. |
+| `str` plane label (e.g. `"O4"`) | Keep terminations whose plane label matches. `"IrO2"` matches `IrO2-a` / `IrO2-b` / `IrO2-a-recon`; `"IrO2-a"` matches `IrO2-a` and `IrO2-a-recon`. |
 | `list[str]` (e.g. `["O", "Ce"]`) | Keep terminations matching **any** entry. Each element match is exclusive — `["O", "Ce"]` keeps pure-O OR pure-Ce planes but not mixed CeO. |
 
 **`candidates` options**
@@ -228,7 +228,7 @@ Nested dict: `{miller_tuple: {plane_id: info_dict}}`.
 Each `info_dict` contains:
 - `"atoms"` — list of `Atoms` objects (one per thickness)
 - `"tasker_type"` — `"I/II"` or `"III"`
-- `"plane_type"` — symbolic plane name (e.g. `"P0a"`, `"P0a-recon"`)
+- `"plane_type"` — label of the cut plane (e.g. `"O4"`, `"O4-recon"`); `cutslab` uses the same labels, so it can be passed to `cut_at`
 - `"plane_counts"` — `{atomic_number: count}` composition of the cut plane
 - `"reconstruction"` — reconstruction metadata dict (Tasker III) or `None`
 - `"candidate"` — raw scoring dict with dipole, bond score, etc.
@@ -290,10 +290,10 @@ termination.
 
 | Value | Behaviour |
 |---|---|
-| `"termination"` | Cut only at planes matching the thick slab's top/bottom plane types. |
+| `"termination"` | Cut only at planes with the labels of the thick slab's top/bottom planes. |
 | `"all"` | Cut at any plane that gives a stoichiometric, charge-neutral, zero-dipole sub-slab (contiguous runs of planes only, never across the vacuum). Automatically forced to `"termination"` when `reconstruction` is provided. |
-| `str` (e.g. `"P0"`) | Cut at boundaries whose plane label matches. `"P0"` selects every `P0*` variant; `"P0a"` selects that variant (and `P0a-recon` if present). |
-| `list[str]` (e.g. `["P0", "P1"]`) | Cut at boundaries matching any of the listed plane types/variants. |
+| `str` (e.g. `"O4"`, or genslab's `plane_type`) | Cut at planes whose label matches. `"IrO2"` selects every `IrO2-*` variant; `"IrO2-a"` selects that variant (and `IrO2-a-recon`). |
+| `list[str]` (e.g. `["O4", "Ce4"]`) | Cut at planes matching any of the listed labels. |
 
 **`cuts` options**
 
@@ -311,8 +311,8 @@ If no valid cut exists a `ValueError` says why; for a polar (Tasker III) slab,
 build it with `generate_slabs_for_miller` and pass `reconstruction=` instead.
 
 Each `Atoms` object carries metadata in `.info`:
-- `"cut_bottom_plane"` — plane type name of the bottom surface
-- `"cut_top_plane"` — plane type name of the top surface
+- `"cut_bottom_plane"` — label of the bottom surface plane (`...-recon` if reconstructed)
+- `"cut_top_plane"` — label of the top surface plane
 - `"cut_bottom_idx"` — integer index of the bottom plane
 - `"cut_top_idx"` — integer index of the top plane
 - `"cut_n_planes"` — number of atomic planes in the sub-slab
@@ -359,30 +359,32 @@ from taskerslabgen import assign_plane_names
 names, name_map = assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.5)
 ```
 
-Assign hierarchical labels ``P{n}{letter}`` (e.g. ``P0a``, ``P0b``):
+Label planes by composition (e.g. ``O4``, ``Ce4``, ``Ir2O2``).  A label
+depends only on the plane itself, so the same plane gets the same label in the
+bulk cell (genslab), in slabs cut from it (cutslab) and for any bulk origin.
 
-- **Type** ``P{n}`` — same composition, and in-plane geometry related by a
-  point-group operation of the in-plane lattice plus a translation (8
-  operations for a square lattice, 12 hexagonal, 4 rectangular, 2 oblique).
-  Example: IrO₂ (001) diagonal vs anti-diagonal IrO₂ planes share type
-  ``P0`` as ``P0a`` / ``P0b``.
-- **Variant letter** — planes related by a pure in-plane translation share the
-  full name; congruent but not translation-related planes get the next letter
-  along the stack.
+- Elements are written metals first, then non-metals, each alphabetically
+  (ASE's `"metal"` formula format), e.g. `TiO2`, `SrTiO3`, `Ir2O2`.
+- **Variant letter** — when one composition occurs in several geometries not
+  related by an in-plane translation, a letter is appended: IrO₂ (001)
+  diagonal vs anti-diagonal planes are ``IrO2-a`` / ``IrO2-b``.  Letters
+  follow a translation-invariant key of the geometry, not stacking order.
+- Reconstructed planes get ``-recon`` (e.g. ``O4-recon``), added by
+  genslab/cutslab.
 
-Helpers: `plane_name_base("P0a-recon") == "P0"`;
-`plane_name_matches("P0", "P0a")` is True.  Use these semantics in
-`prefer_plane` / `cut_at="P0"`.
+Helpers: `plane_name_base("IrO2-a-recon") == "IrO2"`;
+`plane_name_matches("IrO2", "IrO2-a")` is True.  Use these semantics in
+`prefer_plane` / `cut_at="IrO2"`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `planes_sorted` | `list[dict]` | *required* | Planes sorted by z-centre. |
-| `atoms` | `Atoms` or `None` | `None` | Provide to enable spatial fingerprinting. |
+| `atoms` | `Atoms` or `None` | `None` | Provide to tell geometric variants apart (otherwise composition only). |
 | `axis` | `int` | `2` | Stacking axis. |
 | `xy_tol` | `float` | `0.5` | Matching tolerance (Å, in-plane) for corresponding atoms. |
 
-Returns `(names, name_map)` where `names[i]` is the name of
-`planes_sorted[i]` and `name_map` is `{name: counts_dict}`.
+Returns `(names, name_map)` where `names[i]` is the label of
+`planes_sorted[i]` and `name_map` is `{label: counts_dict}`.
 
 ---
 
@@ -438,7 +440,7 @@ Returns a dict with `"slab_atoms"`, `"best_candidate"`,
 ## Folder layout
 
 - `src/taskerslabgen/core.py` — shared utilities: projection, plane
-  clustering, cut enumeration, stacking-aware plane naming, termination
+  clustering, cut enumeration, composition plane labels, termination
   fingerprinting.
 - `src/taskerslabgen/genslab.py` — `generate_slabs_for_miller`.
 - `src/taskerslabgen/slabcut.py` — `cutslab`.

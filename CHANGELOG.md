@@ -48,10 +48,18 @@ raise.
   zero-dipole cut now raises a ``ValueError`` pointing to
   ``generate_slabs_for_miller`` + ``reconstruction=``.  ``bond_threshold`` /
   ``bond_distances`` of ``cutslab`` are unused.
-- **Plane names (C6):** matching is translation-invariant (identical planes
-  shifted in-plane share a name) and uses the real point group of the
-  in-plane lattice instead of D4 in fractional coordinates.  ``xy_tol`` is
-  now in Å (default 0.5).
+- **Plane labels (C6, N1) — breaking:** planes are labelled by composition
+  (``O4``, ``Ce2O4``, ``Ir2O2``; ASE "metal" order) instead of ``P{n}{letter}``.
+  The old numbers followed stacking order, so genslab (bulk cell) and
+  cutslab (slab) gave the same plane different labels and genslab's
+  ``plane_type`` selected the wrong planes in ``cutslab(cut_at=...)``; labels
+  also changed with the bulk origin.  Composition labels depend only on the
+  plane.  Geometric variants of one composition get ``-a``/``-b`` (e.g.
+  rutile (001) ``IrO2-a``/``IrO2-b``) in a translation-invariant order.
+  Matching is translation-invariant; ``xy_tol`` is now in Å (default 0.5).
+  With ``reconstruction=``, cutslab labels reconstructed surfaces
+  ``<label>-recon`` like genslab.  ``prefer_plane="P0"``-style filters must be
+  rewritten (e.g. ``"O4"``, ``"IrO2"``).
 - **Errors (C9):** ``cutslab`` validates ``cuts`` up front; an empty result
   no longer reports "Unknown cuts mode".
 - Single-plane cells: cut midpoints no longer coincide with the plane.
@@ -66,8 +74,8 @@ raise.
 ### Tests
 - ``tests/test_regressions.py``: known Tasker types, origin invariance,
   validity of every generated slab, cutslab series (Tasker I/II and III),
-  adjacency against a thick-slab reference, plane-name invariance, in-plane
-  point groups, error messages, no ASE ``FutureWarning``.
+  adjacency against a thick-slab reference, plane-label invariance and
+  genslab/cutslab label agreement, error messages, no ASE ``FutureWarning``.
 
 ## 0.3.1
 

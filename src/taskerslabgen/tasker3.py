@@ -356,7 +356,7 @@ def find_tasker3_candidates(
         first.  Element matching is **exclusive** (``"O"`` matches only
         pure-O planes).
     plane_names : list of str or None
-        Symbolic plane names (e.g. ``["P0", "P1", ...]``).
+        Plane labels from :func:`assign_plane_names` (e.g. ``["O4", "Ce2", ...]``).
 
     Returns
     -------

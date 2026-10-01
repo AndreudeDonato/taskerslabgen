@@ -9,7 +9,7 @@ Primary entry points (start here)
 Common helpers
 --------------
 - :func:`build_adjacency_matrix` — bonding graph for Tasker III scoring
-- :func:`assign_plane_names` — stacking-aware labels (``P0a``, ``P0b``, …)
+- :func:`assign_plane_names` — composition labels (``O4``, ``IrO2-a``, …)
 - :func:`reconstruct_tasker_iii` — Tasker III-only path (also used internally)
 
 Advanced / lower-level helpers are also re-exported for power users; prefer the

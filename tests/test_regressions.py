@@ -297,20 +297,49 @@ def test_translated_identical_planes_share_a_name(ceo2_111_slab):
     assert all(len(v) == 1 for v in by_comp.values()), f"names: {names}"
 
 
+# ------------------------------------------------------------------
+# N1: labels depend only on the plane, so genslab and cutslab agree
+# ------------------------------------------------------------------
 @pytest.mark.parametrize(
-    "cell2d, n_ops",
+    "atoms, charges, hkl, kwargs",
     [
-        ([[3.0, 0.0], [0.0, 3.0]], 8),                      # square
-        ([[3.0, 0.0], [-1.5, 3.0 * np.sqrt(3) / 2]], 12),   # hexagonal
-        ([[3.0, 0.0], [0.0, 4.5]], 4),                      # rectangular
-        ([[3.0, 0.0], [0.7, 4.1]], 2),                      # oblique
+        (CEO2, Q_CEO2, (1, 1, 1), {}),
+        (IRO2, Q_IRO2, (1, 1, 0), {}),
+        (IRO2, Q_IRO2, (0, 0, 1), {}),
+        (CEO2, Q_CEO2, (0, 0, 1), {"prefer_plane": "O", "bond_distances": BOND_DISTS_CEO2}),
     ],
-    ids=["square", "hexagonal", "rectangular", "oblique"],
+    ids=["CeO2111", "IrO2110", "IrO2001", "CeO2001recon"],
 )
-def test_in_plane_lattice_point_group(cell2d, n_ops):
-    from taskerslabgen.core import _lattice_point_ops
+def test_genslab_label_selects_same_planes_in_cutslab(atoms, charges, hkl, kwargs):
+    from taskerslabgen import cutslab, generate_slabs_for_miller
 
-    assert len(_lattice_point_ops(np.array(cell2d))) == n_ops
+    res = generate_slabs_for_miller(atoms, charges, hkl, [3], candidates="all", **kwargs)
+    for term in res[hkl].values():
+        slab, label = term["atoms"][0], term["plane_type"]
+        recon = term["reconstruction"]
+        # cutslab gives the slab's bottom plane the label genslab reported ...
+        by_termination = cutslab(slab, charges, reconstruction=recon)
+        assert {s.info["cut_bottom_plane"] for s in by_termination} == {label}
+        # ... so genslab's label can be passed straight to cut_at.
+        by_label = cutslab(slab, charges, cut_at=label, reconstruction=recon)
+        assert by_label
+        assert {s.info["cut_bottom_plane"] for s in by_label} == {label}
+
+
+@pytest.mark.parametrize(
+    "atoms, charges, hkl",
+    [(CEO2, Q_CEO2, (1, 1, 1)), (IRO2, Q_IRO2, (1, 1, 0)), (IRO2, Q_IRO2, (0, 0, 1))],
+    ids=["CeO2111", "IrO2110", "IrO2001"],
+)
+def test_plane_labels_independent_of_bulk_origin(atoms, charges, hkl):
+    from taskerslabgen import generate_slabs_for_miller
+
+    rng = np.random.default_rng(3)
+    seen = set()
+    for shift in [np.zeros(3)] + [rng.random(3) for _ in range(4)]:
+        res = generate_slabs_for_miller(_shifted(atoms, shift), charges, hkl, [2], candidates="all")
+        seen.add(frozenset(info["plane_type"] for info in res[hkl].values()))
+    assert len(seen) == 1, f"origin-dependent labels: {seen}"
 
 
 # ------------------------------------------------------------------

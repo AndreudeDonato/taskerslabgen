@@ -5,7 +5,7 @@ from .core import (
     _INDEX_KEY,
     _charges_to_list,
     _finalize_slab,
-    _find_plane_alignment,
+    _find_plane_translation,
     _max_z_gap,
     identify_planes,
     compute_reduced_counts,
@@ -77,8 +77,8 @@ def cutslab(
           thick slab's top/bottom plane types.
         - ``"all"``: cut at any plane that gives a stoichiometric,
           charge-neutral, zero-dipole sub-slab.
-        - A plane name (e.g. ``"P0"``) or list of names: cut only at
-          boundaries where those plane types are exposed.
+        - A plane label (e.g. ``"O4"``, or a genslab ``plane_type``) or a
+          list of labels: cut only at planes with those labels.
     cuts : str
         ``"right"`` (default) -- fix bottom plane, peel from the top.
         ``"left"`` -- fix top plane, peel from the bottom.
@@ -177,6 +177,20 @@ def cutslab(
         for species, _, _ in delete_info:
             recon_del_counts[species] = recon_del_counts.get(species, 0) + 1
             recon_del_charge += charge_map.get(species, 0.0)
+
+    # Reconstructed surfaces carry genslab's label (e.g. "O4-recon"): the
+    # thick slab's outer planes if they are already reconstructed, and any
+    # plane that gets reconstructed when a cut exposes it.
+    recon_label = None
+    if reconstruction is not None:
+        recon_label = f"{reconstruction['cut_plane_name']}-recon"
+        recon_counts = {
+            Z: c - recon_del_counts.get(Z, 0) for Z, c in cut_plane_counts.items()
+        }
+        recon_counts = {Z: c for Z, c in recon_counts.items() if c > 0}
+        for i in {0, n - 1}:
+            if planes_sorted[i]["counts"] == recon_counts:
+                plane_names[i] = recon_label
 
     # ---- Planes allowed to become a surface ----
     # A sub-slab is a contiguous run of planes [bottom, top] of the input
@@ -338,12 +352,8 @@ def cutslab(
     # ---- Prepare plot names ----
     highlight_set = set(boundary_indices) | recon_eligible
     plot_names = list(plane_names)
-    cut_plane_name = (
-        reconstruction.get("cut_plane_name") if reconstruction else None
-    )
-    for i in range(n):
-        if i in recon_eligible and cut_plane_name:
-            plot_names[i] = f"{plane_names[i]}-recon"
+    for i in recon_eligible:
+        plot_names[i] = recon_label
 
     z_s = np.array([p["z_center"] % L for p in planes_sorted])
 
@@ -378,8 +388,8 @@ def cutslab(
 
         apply_vacuum_to_slab(slab, vacuum=vacuum, axis=axis)
 
-        bp = plane_names[cut["bottom_plane"]]
-        tp = plane_names[cut["top_plane"]]
+        bp = plot_names[cut["bottom_plane"]]
+        tp = plot_names[cut["top_plane"]]
         slab.info["cut_bottom_plane"] = bp
         slab.info["cut_top_plane"] = tp
         slab.info["cut_bottom_idx"] = cut["bottom_plane"]
@@ -445,9 +455,9 @@ def _apply_reconstruction(slab, plane_indices, delete_info, axis=2,
             for j in plane_indices
         ]
         cell2d = np.array(slab.cell)[np.ix_(ab_axes, ab_axes)]
-        match = _find_plane_alignment(reference_plane, target, cell2d, tol)
-        if match is not None:
-            shift = match[1]
+        t = _find_plane_translation(reference_plane, target, cell2d, tol)
+        if t is not None:
+            shift = t
     to_delete = set()
     for species, fx, fy in delete_info:
         fx, fy = fx + shift[0], fy + shift[1]

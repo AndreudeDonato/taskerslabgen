@@ -283,11 +283,11 @@ def test_iro2_001_plane_variants(iro2_bulk):
     )
     names, _ = assign_plane_names(planes, atoms=surf)
 
+    # Mirror-related IrO2 planes: same composition, two geometric variants.
     assert len(names) == 2
-    assert names[0] == "P0a"
-    assert names[1] == "P0b"
-    assert plane_name_base(names[0]) == "P0"
-    assert plane_name_base(names[1]) == "P0"
+    assert sorted(names) == ["IrO2-a", "IrO2-b"]
+    assert plane_name_base(names[0]) == "IrO2"
+    assert plane_name_base(names[1]) == "IrO2"
 
 
 def test_iro2_001_fixed_plane_tol_override(iro2_bulk):
@@ -318,17 +318,19 @@ def test_albite_001_stays_finely_cut(albite_bulk):
 def test_plane_name_matches_semantics():
     from taskerslabgen import plane_name_base, plane_name_matches
 
-    assert plane_name_base("P0a") == "P0"
-    assert plane_name_base("P0a-recon") == "P0"
-    assert plane_name_base("P12b") == "P12"
+    assert plane_name_base("IrO2-a") == "IrO2"
+    assert plane_name_base("IrO2-a-recon") == "IrO2"
+    assert plane_name_base("O4-recon") == "O4"
+    assert plane_name_base("Ce2O4") == "Ce2O4"
 
-    assert plane_name_matches("P0", "P0a")
-    assert plane_name_matches("P0", "P0b")
-    assert plane_name_matches("P0", "P0a-recon")
-    assert plane_name_matches("P0a", "P0a-recon")
-    assert plane_name_matches("P0a-recon", "P0a-recon")
-    assert not plane_name_matches("P0a", "P0b")
-    assert not plane_name_matches("P0a", "P1a")
+    assert plane_name_matches("IrO2", "IrO2-a")
+    assert plane_name_matches("IrO2", "IrO2-b")
+    assert plane_name_matches("IrO2", "IrO2-a-recon")
+    assert plane_name_matches("IrO2-a", "IrO2-a-recon")
+    assert plane_name_matches("O4", "O4-recon")
+    assert plane_name_matches("O4-recon", "O4-recon")
+    assert not plane_name_matches("IrO2-a", "IrO2-b")
+    assert not plane_name_matches("O4", "O2")
 
 
 def test_prefer_plane_type_matches_variants(iro2_bulk):
@@ -344,12 +346,12 @@ def test_prefer_plane_type_matches_variants(iro2_bulk):
         plot=False,
         verbose=False,
         candidates="all",
-        prefer_plane="P0",
+        prefer_plane="IrO2",
     )
     terminations = result[(0, 0, 1)]
     assert len(terminations) >= 1
     for info in terminations.values():
-        assert plane_name_base(info["plane_type"]) == "P0"
+        assert plane_name_base(info["plane_type"]) == "IrO2"
 
 
 # ------------------------------------------------------------------
