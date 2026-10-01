@@ -1,6 +1,5 @@
 import numpy as np
 from itertools import combinations
-from math import comb as math_comb
 
 from ase import Atoms
 from ase.data import atomic_numbers, covalent_radii, chemical_symbols
@@ -10,6 +9,8 @@ from .core import (
     _INDEX_KEY,
     _charges_to_list,
     _finalize_slab,
+    _formula_label,
+    _oriented_bulk,
     _tag_atom_indices,
     build_surface,
     compute_projection,
@@ -244,25 +245,6 @@ def _enumerate_deletion_masks(plane_indices, atoms_z_matrix, excess):
     return results
 
 
-def _compute_broken_bonds(adj, deleted_indices, excluded_layer_indices):
-    """
-    Count bonds broken by deleting atoms from a surface plane.
-    Bonds to the excluded layer (vacuum side) are not counted because
-    that layer does not exist in the real slab.
-    """
-    excluded = set(excluded_layer_indices)
-    deleted = set(deleted_indices)
-    n = adj.shape[0]
-    broken = 0
-    for d in deleted:
-        for j in range(n):
-            if j in excluded or j in deleted:
-                continue
-            if adj[d, j]:
-                broken += 1
-    return broken
-
-
 def _parse_bond_distances_map(bond_distances):
     """Convert user-facing bond_distances dict to a {(Zmin,Zmax): value} map."""
     from ase.data import atomic_numbers as ase_atomic_numbers
@@ -286,17 +268,108 @@ def _parse_bond_distances_map(bond_distances):
     return manual_map
 
 
-def _compute_distribution_score(
-    kept_indices, atoms_z_matrix, surf_bulk, bond_distances,
-):
+def _dangling_terms(r, i_idx, j_idx, dz, L):
+    """
+    Mask-independent terms for the bonds broken at one surface.
+
+    *r* are the heights of the cell's atoms above the cut, in ``[0, L)``;
+    ``(i_idx, j_idx, dz)`` are the bonds over periodic images (both
+    directions), *dz* the height of the bonded image of *j* above *i*.  The
+    slab holds the copies above the cut.  Each bond's partner sits ``p``
+    periods above the copy of *j* in period 0.
+    """
+    p = np.rint((r[i_idx] + dz - r[j_idx]) / L).astype(int)
+    n = len(r)
+    cut = int(np.sum(np.maximum(0, -p)))                # bonds crossing the cut
+    cross0 = np.bincount(i_idx[p <= -1], minlength=n)   # period-0 atom bonded below the cut
+    inward = np.bincount(j_idx[p <= 0], minlength=n)    # bonds reaching the period-0 atom from the slab side
+    pair0 = {}
+    for a, b in zip(i_idx[p == 0], j_idx[p == 0]):
+        pair0[(int(a), int(b))] = pair0.get((int(a), int(b)), 0) + 1
+    return cut, cross0, inward, pair0
+
+
+def _dangling_bonds(mask, terms):
+    """Bonds of kept slab atoms to missing atoms at one surface when the
+    period-0 copies of *mask* are deleted (see :func:`_dangling_terms`)."""
+    cut, cross0, inward, pair0 = terms
+    m = list(mask)
+    ms = set(m)
+    inside = sum(c for (a, b), c in pair0.items() if a in ms and b in ms)
+    return int(cut - cross0[m].sum() + inward[m].sum() - inside)
+
+
+def _tasker3_slab_moments(q, r, plane_idx, mask, L, atoms_per_fu, min_layers=1):
+    """
+    Exact charge and dipole of the Tasker III slab, from atom positions.
+
+    The slab of ``lt`` repeat units holds the cell's atoms at heights
+    ``r + m L`` (``m < lt``) plus the cut plane at ``r + lt L``, without the
+    *mask* atoms of its bottom (``m = 0``) and top (``m = lt``) copies; *r*
+    are heights above the bottom cut.  Returns ``(dipole, charge,
+    dipole_per_fu, charge_per_fu)``: dipole (e·Å, about the mean height) and
+    net charge of the ``min_layers`` slab, and the largest |dipole| and
+    |charge| per formula unit over every thickness ``lt >= min_layers``.
+    """
+    q = np.asarray(q, dtype=float)
+    r = np.asarray(r, dtype=float)
+    P = np.asarray(plane_idx, dtype=int)
+    M = np.asarray(list(mask), dtype=int)
+    Nu, Qu, Du, Ru = len(q), q.sum(), q @ r, r.sum()
+    NP, QP, DP, RP = len(P), q[P].sum(), q[P] @ r[P], r[P].sum()
+    NM, QM, DM, RM = len(M), q[M].sum(), q[M] @ r[M], r[M].sum()
+
+    def moments(lt):
+        qz = lt * Du + L * Qu * lt * (lt - 1) / 2 + DP + lt * L * QP - 2 * DM - lt * L * QM
+        z = lt * Ru + L * Nu * lt * (lt - 1) / 2 + RP + lt * L * NP - 2 * RM - lt * L * NM
+        n = lt * Nu + NP - 2 * NM
+        Q = lt * Qu + QP - 2 * QM
+        mu = qz - Q * z / n
+        k = n / atoms_per_fu
+        return mu, Q, abs(mu) / k, abs(Q) / k
+
+    lts = sorted({min_layers, min_layers + 1, min_layers + 3, 10 * min_layers})
+    values = [moments(lt) for lt in lts]
+    # Thick-slab limits (the quadratic terms of the dipole cancel).
+    k_unit = Nu / atoms_per_fu
+    slope = Du - Qu * Ru / Nu + L * (QP - QM - Qu * (NP - NM) / Nu)
+    mu0, Q0 = values[0][0], values[0][1]
+    dipole_per_fu = max([v[2] for v in values] + [abs(slope) / k_unit])
+    charge_per_fu = max([v[3] for v in values] + [abs(Qu) / k_unit])
+    return float(mu0), float(Q0), float(dipole_per_fu), float(charge_per_fu)
+
+
+def _prefer_matches(prefer_plane, label, counts):
+    """
+    Whether a plane matches *prefer_plane* (str or list of str): an element
+    symbol selects planes made only of that element, any other string is a
+    plane label (:func:`plane_name_matches`).  Integers are ignored.
+    """
+    if prefer_plane is None:
+        return False
+    queries = [prefer_plane] if isinstance(prefer_plane, str) else list(prefer_plane)
+    present = {Z for Z, c in counts.items() if c > 0}
+    for query in queries:
+        if not isinstance(query, str):
+            continue
+        if query in atomic_numbers:
+            if present == {atomic_numbers[query]}:
+                return True
+        elif plane_name_matches(query, label):
+            return True
+    return False
+
+
+def _compute_distribution_score(kept_indices, atoms_z_matrix, numbers, dists, bond_distances):
     """
     Score how well-distributed the remaining atoms are on the
     reconstructed surface plane (lower is better).
 
     Pairs not listed in *bond_distances* contribute their Coulomb energy
     ``q_i * q_j / d_ij`` (charges from *atoms_z_matrix*, minimum-image
-    distances): like charges are pushed apart, so a half-occupied anion
-    plane prefers a checkerboard over rows, and opposite charges stay close.
+    distances *dists* between all atoms of the cell): like charges are
+    pushed apart, so a half-occupied anion plane prefers a checkerboard over
+    rows, and opposite charges stay close.
 
     Pairs listed in *bond_distances* keep their explicit rule: ``None``
     (forbidden) adds a repulsive ``1/d_ij``; a float adds
@@ -309,28 +382,22 @@ def _compute_distribution_score(
         return 0.0
 
     bd_map = _parse_bond_distances_map(bond_distances)
-
     kept = list(kept_indices)
-    sub = surf_bulk[kept]
-    sub.set_pbc((True, True, True))
-    dists = sub.get_all_distances(mic=True)
-    numbers = sub.numbers
-    charges = atoms_z_matrix[kept, 2]
-    n = len(sub)
+    charges = atoms_z_matrix[:, 2]
 
     sums = {"forbidden": 0.0, "target": 0.0, "coulomb": 0.0}
     counts = {"forbidden": 0, "target": 0, "coulomb": 0}
-    for ii in range(n):
-        for jj in range(ii + 1, n):
-            zi, zj = int(numbers[ii]), int(numbers[jj])
+    for a, i in enumerate(kept):
+        for j in kept[a + 1:]:
+            zi, zj = int(numbers[i]), int(numbers[j])
             pair = (min(zi, zj), max(zi, zj))
-            d_ij = max(float(dists[ii, jj]), 1e-12)
+            d_ij = max(float(dists[i, j]), 1e-12)
             if pair in bd_map and bd_map[pair] is None:
                 kind, value = "forbidden", 1.0 / d_ij
             elif pair in bd_map:
                 kind, value = "target", abs(d_ij - bd_map[pair])
             else:
-                kind, value = "coulomb", charges[ii] * charges[jj] / d_ij
+                kind, value = "coulomb", charges[i] * charges[j] / d_ij
             sums[kind] += value
             counts[kind] += 1
 
@@ -349,14 +416,28 @@ def find_tasker3_candidates(
     verbose=None,
     prefer_plane=None,
     plane_names=None,
+    dipole_tol=0.05,
+    bulk_atoms=None,
+    miller=None,
+    bond_threshold=(0.85, 1.15),
+    min_layers=1,
 ):
     """
     Enumerate and score Tasker III reconstruction candidates.
 
     For each plane in the unit cell the stoichiometric excess is computed
-    and all unique deletion masks are enumerated.  Each mask is scored by
-    broken bonds, dipole moment, and surface charge distribution.  Masks
-    that produce identical spatial deletion patterns are deduplicated.
+    and every way of deleting it (the same atoms from both surface copies
+    of the plane) is scored:
+
+    - **dipole and charge** of the slab, exactly from the atom positions
+      after the deletions; a candidate is valid when its |dipole| and
+      |charge| per formula unit stay within *dipole_tol* / *charge_tol* for
+      every thickness of at least *min_layers* repeat units;
+    - **bond score**: bulk bonds of the kept atoms that end at missing atoms
+      (vacuum or deleted), counted per surface cell over periodic images of
+      the true bulk lattice (needs *bulk_atoms* and *miller*);
+    - **distribution score** of the kept atoms of the surface plane (see
+      :func:`_compute_distribution_score`).
 
     Parameters
     ----------
@@ -366,222 +447,167 @@ def find_tasker3_candidates(
         ``[Z, z, q]`` matrix.
     reduced_counts : dict
         Reduced bulk stoichiometry.
-    adj : ndarray
-        Boolean adjacency matrix.
+    adj : ndarray or None
+        Unused; kept for backward compatibility (bonds are counted
+        geometrically, see *bulk_atoms*).
     L : float
         Lattice-plane spacing (angstrom).
     surf_bulk : Atoms or None
-        Surface slab used for distribution scoring.
+        One-layer cell from :func:`build_surface` (needed for the bond and
+        distribution scores).
     bond_distances : dict or None
         Per-pair reference distances (same format as
         :func:`build_adjacency_matrix`).
     charge_tol : float
-        Tolerance for charge neutrality.
+        Largest |net charge| per formula unit (e) treated as neutral.
     verbose : bool or None
         Print candidate table.
     prefer_plane : str, list[str], or None
-        Preferred plane element/type; matching candidates are sorted
-        first.  Element matching is **exclusive** (``"O"`` matches only
-        pure-O planes).
+        Candidates on matching planes are sorted first: an element symbol
+        matches planes made only of that element, other strings match plane
+        labels (``"O4"``, ``"O4-recon"``, ``"IrO2"``).
     plane_names : list of str or None
-        Plane labels from :func:`assign_plane_names` (e.g. ``["O4", "Ce2", ...]``).
+        Plane labels from :func:`assign_plane_names`.
+    dipole_tol : float
+        Largest |dipole| per formula unit (e·Å) treated as zero.
+    bulk_atoms : Atoms or None
+        Bulk cell *surf_bulk* was built from; with *miller*, bonds follow
+        the true bulk lattice (:func:`surface_bulk_cell`).  Without it the
+        cell of *surf_bulk* is used, which is right only when its third
+        vector is a bulk lattice vector.
+    miller : tuple of int or None
+        Miller index of *surf_bulk*.
+    bond_threshold : tuple of float
+        ``(lo, hi)`` scaling of the reference bond distances.
+    min_layers : int
+        Thinnest slab (repeat units) the candidate must be valid for.
 
     Returns
     -------
     list of dict
-        Candidates sorted by ``(prefer_match, abs_dipole, bond_score,
-        distribution_score)``.  Each dict contains ``cut_plane_idx``,
-        ``deletion_mask``, ``net_dipole``, ``bond_score``,
-        ``distribution_score``, ``plane_counts``, ``is_neutral``
-        (``|total_charge| <= charge_tol``), ``dipole_per_fu`` (|dipole|
-        per formula unit of thick slabs), and more.  Polar candidates are
-        kept so they can be inspected; callers that build slabs keep only
-        neutral ones with ``dipole_per_fu <= dipole_tol``.
+        Candidates ranked by ``(prefer match, valid, bond_score,
+        distribution_score)``, ties broken by label and mask so the order is
+        deterministic; IDs in rank order.  Each dict contains
+        ``cut_plane_idx``, ``recon_label`` (e.g. ``"O4-recon"``),
+        ``deletion_mask``, ``net_dipole`` and ``total_charge`` (of the
+        *min_layers* slab), ``dipole_per_fu`` and ``charge_per_fu`` (largest
+        over thicknesses), ``is_neutral``, ``is_valid``, ``bond_score``
+        (``broken_top + broken_bottom``), ``distribution_score``,
+        ``plane_counts`` and more.  Invalid candidates are kept so they can
+        be inspected; callers that build slabs keep the valid ones.
     """
     n = len(planes_sorted)
-    candidates = []
-    # Formula units per bulk repeat unit.  A slab of lt repeat units has
-    # dipole lt * net_dipole, so net_dipole / fu_per_unit is its dipole per
-    # formula unit for thick slabs (the strictest value).
-    fu_per_unit = len(atoms_z_matrix) / sum(reduced_counts.values())
+    q = np.asarray(atoms_z_matrix[:, 2], dtype=float)
+    z = np.asarray(atoms_z_matrix[:, 1], dtype=float)
+    atoms_per_fu = float(sum(reduced_counts.values()))
+    if plane_names is None:
+        plane_names = [_formula_label(p["counts"]) for p in planes_sorted]
 
-    frac_all = surf_bulk.get_scaled_positions() if surf_bulk is not None else None
+    bonds = None
+    dists = None
+    numbers = atoms_z_matrix[:, 0].astype(int)
+    if surf_bulk is not None:
+        cell = surface_bulk_cell(bulk_atoms, miller) if bulk_atoms is not None else surf_bulk.cell
+        periodic = Atoms(numbers=surf_bulk.numbers, positions=surf_bulk.positions,
+                         cell=cell, pbc=True)
+        bi, bj, D = _bond_pairs(periodic, bond_threshold, bond_distances)
+        bonds = (bi, bj, D[:, 2])
+        dists = surf_bulk.get_all_distances(mic=True)
 
-    total_raw_combos = 0
-    for i in range(n):
-        plane = planes_sorted[i]
+    plane_masks = []
+    total = 0
+    for i, plane in enumerate(planes_sorted):
         excess, k = _compute_plane_excess(plane["counts"], reduced_counts)
         if excess is None or all(v == 0 for v in excess.values()):
             continue
-        groups = {}
-        for idx in plane["indices"]:
-            Z = int(atoms_z_matrix[idx, 0])
-            groups.setdefault(Z, []).append(idx)
-        n_combos = 1
-        for Z, n_del in excess.items():
-            if n_del == 0:
-                continue
-            available = len(groups.get(Z, []))
-            if available < n_del:
-                n_combos = 0
-                break
-            n_combos *= math_comb(available, n_del)
-        total_raw_combos += n_combos
-
-    if total_raw_combos > 10000 and verbose:
-        print(
-            f"WARNING: ~{total_raw_combos} Tasker III deletion combinations "
-            f"to evaluate. This may take a while."
-        )
-
-    for i in range(n):
-        plane = planes_sorted[i]
-        excess, k = _compute_plane_excess(plane["counts"], reduced_counts)
-
-        if excess is None:
-            continue
-        if all(v == 0 for v in excess.values()):
-            continue
-
-        above = planes_sorted[(i + 1) % n]
-        below = planes_sorted[(i - 1) % n]
-
         masks = _enumerate_deletion_masks(plane["indices"], atoms_z_matrix, excess)
-        if not masks:
-            continue
+        if masks:
+            plane_masks.append((i, excess, k, masks))
+            total += len(masks)
+    if total > 10000 and verbose:
+        print(f"WARNING: {total} Tasker III deletion patterns to evaluate. This may take a while.")
 
-        if frac_all is not None and len(masks) > 1:
-            seen_fingerprints = set()
-            unique_masks = []
-            for mask in masks:
-                fp = frozenset(
-                    (int(atoms_z_matrix[idx, 0]),
-                     round(float(frac_all[idx, 0]) % 1.0, 3),
-                     round(float(frac_all[idx, 1]) % 1.0, 3))
-                    for idx in mask
-                )
-                if fp not in seen_fingerprints:
-                    seen_fingerprints.add(fp)
-                    unique_masks.append(mask)
-            masks = unique_masks
+    candidates = []
+    for i, excess, k, masks in plane_masks:
+        plane = planes_sorted[i]
+        label = f"{plane_names[i]}-recon"
+        zbot, ztop = compute_cut_positions(planes_sorted, L, (i - 1) % n, i)
+        r_bot = (z - zbot) % L
+        span = (ztop - zbot) % L or L
+        r_top = (span - r_bot) % L  # depth below the top cut
+        if bonds is not None:
+            terms_bot = _dangling_terms(r_bot, bonds[0], bonds[1], bonds[2], L)
+            terms_top = _dangling_terms(r_top, bonds[0], bonds[1], -bonds[2], L)
+        matches = _prefer_matches(prefer_plane, label, plane["counts"])
+        plane_charge = float(q[plane["indices"]].sum())
 
         for mask in masks:
-            deleted_list = list(mask)
-
-            broken_top = _compute_broken_bonds(adj, deleted_list, above["indices"])
-            broken_bottom = _compute_broken_bonds(adj, deleted_list, below["indices"])
-            bond_score = broken_top + broken_bottom
-
-            plane_charge = float(np.sum(atoms_z_matrix[plane["indices"], 2]))
-            deleted_charges = float(np.sum(atoms_z_matrix[list(mask), 2]))
-            q_recon = plane_charge - deleted_charges
-
-            uc_charge = float(np.sum(atoms_z_matrix[:, 2]))
-            total_q = uc_charge + plane_charge - 2 * deleted_charges
-
-            z_P = plane["z_center"] % L
-            z_center_slab = z_P + L / 2.0
-
-            mu = 0.0
-            for j_plane in range(n):
-                if j_plane == i:
-                    continue
-                p_j = planes_sorted[j_plane]
-                z_j = p_j["z_center"] % L
-                if z_j < z_P:
-                    z_j += L
-                mu += p_j["q_total"] * (z_j - z_center_slab)
-
-            kept_indices = [idx for idx in plane["indices"] if idx not in set(mask)]
-            if surf_bulk is not None:
-                dist_score = _compute_distribution_score(
-                    kept_indices, atoms_z_matrix, surf_bulk, bond_distances,
-                )
+            mu, total_q, dipole_per_fu, charge_per_fu = _tasker3_slab_moments(
+                q, r_bot, plane["indices"], mask, L, atoms_per_fu, min_layers
+            )
+            if bonds is not None:
+                broken_bottom = _dangling_bonds(mask, terms_bot)
+                broken_top = _dangling_bonds(mask, terms_top)
             else:
-                dist_score = 0.0
-
-            matches_prefer = False
-            if prefer_plane is not None:
-                # Elements of the cut plane, as in genslab's prefer_plane
-                # filter (symmetric deletion removes at most half of each
-                # element, so the reconstructed plane has the same ones).
-                present_Zs = {Z for Z, c in plane["counts"].items() if c > 0}
-                if isinstance(prefer_plane, str):
-                    if plane_names is not None and any(
-                        plane_name_matches(prefer_plane, n) for n in plane_names
-                    ):
-                        matches_prefer = plane_name_matches(
-                            prefer_plane, plane_names[i]
-                        )
-                    else:
-                        z = atomic_numbers.get(prefer_plane)
-                        if z is not None:
-                            matches_prefer = present_Zs == {z}
-                else:
-                    try:
-                        for e in prefer_plane:
-                            if isinstance(e, str) and plane_names is not None and any(
-                                plane_name_matches(e, n) for n in set(plane_names)
-                            ):
-                                if plane_name_matches(e, plane_names[i]):
-                                    matches_prefer = True
-                                    break
-                            else:
-                                z = atomic_numbers[e] if isinstance(e, str) else int(e)
-                                if present_Zs == {z}:
-                                    matches_prefer = True
-                                    break
-                    except (TypeError, AttributeError, KeyError):
-                        pass
-
+                broken_bottom = broken_top = 0
+            kept = [idx for idx in plane["indices"] if idx not in set(mask)]
+            dist_score = (
+                _compute_distribution_score(kept, atoms_z_matrix, numbers, dists, bond_distances)
+                if dists is not None else 0.0
+            )
+            is_neutral = charge_per_fu <= charge_tol
             candidates.append({
                 "cut_plane_idx": i,
+                "recon_label": label,
                 "plane_z": plane["z_center"],
                 "plane_counts": dict(plane["counts"]),
-                "deletion_mask": mask,
+                "deletion_mask": tuple(int(m) for m in mask),
                 "excess": {Z: v for Z, v in excess.items() if v > 0},
                 "n_deleted": len(mask),
                 "formula_units_kept": k,
-                "bond_score": bond_score,
+                "bond_score": broken_top + broken_bottom,
                 "broken_top": broken_top,
                 "broken_bottom": broken_bottom,
                 "net_dipole": mu,
                 "abs_dipole": abs(mu),
-                "dipole_per_fu": abs(mu) / fu_per_unit,
+                "dipole_per_fu": dipole_per_fu,
                 "total_charge": total_q,
-                "is_neutral": abs(total_q) <= charge_tol,
-                "q_recon": q_recon,
+                "charge_per_fu": charge_per_fu,
+                "is_neutral": is_neutral,
+                "is_valid": is_neutral and dipole_per_fu <= dipole_tol,
+                "q_recon": plane_charge - float(q[list(mask)].sum()),
                 "distribution_score": dist_score,
-                "matches_prefer_plane": matches_prefer,
+                "matches_prefer_plane": matches,
             })
 
-    def _sort_key(c):
-        base = (c["abs_dipole"], c["bond_score"], c["distribution_score"])
-        if prefer_plane is not None:
-            return (0 if c["matches_prefer_plane"] else 1,) + base
-        return base
+    def _rank(c):
+        return (
+            not c["matches_prefer_plane"] if prefer_plane is not None else False,
+            not c["is_valid"],
+            0.0 if c["is_valid"] else c["dipole_per_fu"],
+            c["bond_score"],
+            round(c["distribution_score"], 8),
+            c["recon_label"],
+            c["deletion_mask"],
+        )
 
-    candidates.sort(key=_sort_key)
+    candidates.sort(key=_rank)
 
     if verbose:
         print(f"\nTasker III reconstruction candidates: {len(candidates)}")
         print(
-            f"{'#':>4s}  {'plane':>5s}  {'z':>7s}  {'del':>3s}  "
-            f"{'excess':<16s}  {'Q_slab':>8s}  {'Q_surf':>8s}  "
-            f"{'mu':>12s}  {'brkn':>5s}  {'(top':>5s}  {'bot)':>5s}  "
-            f"{'distr':>8s}"
+            f"{'#':>4s}  {'plane':>12s}  {'del':>3s}  {'excess':<16s}  {'Q/fu':>8s}  "
+            f"{'mu/fu':>10s}  {'brkn':>5s}  {'(top':>5s}  {'bot)':>5s}  {'distr':>8s}  valid"
         )
-        for i, c in enumerate(candidates):
+        for rank, c in enumerate(candidates):
             excess_str = ", ".join(
-                f"{chemical_symbols[Z]}:{n}" for Z, n in c["excess"].items()
+                f"{chemical_symbols[Z]}:{m}" for Z, m in c["excess"].items()
             )
             print(
-                f"{i:4d}  {c['cut_plane_idx']:5d}  {c['plane_z']:7.3f}  "
-                f"{c['n_deleted']:3d}  {excess_str:<16s}  "
-                f"{c['total_charge']:+8.3f}  {c['q_recon']:+8.3f}  "
-                f"{c['net_dipole']:+12.4e}  "
+                f"{rank:4d}  {c['recon_label']:>12s}  {c['n_deleted']:3d}  {excess_str:<16s}  "
+                f"{c['charge_per_fu']:8.4f}  {c['dipole_per_fu']:10.4e}  "
                 f"{c['bond_score']:5d}  {c['broken_top']:5d}  {c['broken_bottom']:5d}  "
-                f"{c['distribution_score']:+8.4f}"
+                f"{c['distribution_score']:+8.4f}  {c['is_valid']}"
             )
 
     return candidates
@@ -598,23 +624,31 @@ def _select_tasker3_candidates(candidates, miller, dipole_tol, charge_tol):
             f"No Tasker III reconstruction candidates for {tuple(miller)}: in this "
             "cell no plane can be made stoichiometric by removing the same atoms "
             "from both surfaces (the excess per surface is an odd number of atoms). "
-            "An in-plane supercell, e.g. bulk_atoms * (2, 2, 1), usually fixes this."
+            "An in-plane supercell usually fixes this: pass surface_supercell=(2, 1) "
+            "or (2, 2) (not bulk_atoms * (2, 2, 1), which changes the facet unless "
+            "the surface normal is along c)."
         )
-    valid = [
-        c for c in candidates
-        if c["dipole_per_fu"] <= dipole_tol and abs(c["total_charge"]) <= charge_tol
-    ]
-    if not valid:
-        best = min(candidates, key=lambda c: c["dipole_per_fu"])
+    valid = [c for c in candidates if c["is_neutral"] and c["dipole_per_fu"] <= dipole_tol]
+    if valid:
+        return valid
+    neutral = [c for c in candidates if c["is_neutral"]]
+    if not neutral:
+        best = min(candidates, key=lambda c: c["charge_per_fu"])
         raise ValueError(
-            f"No non-polar Tasker III reconstruction found for {tuple(miller)}: "
-            "removing atoms symmetrically from one plane type leaves a dipole of "
-            f"at least {best['dipole_per_fu']:.4g} e*A per formula unit "
-            f"(dipole_tol={dipole_tol}). "
-            "This stacking needs different reconstructions on the two surfaces, "
-            "which taskerslabgen does not build."
+            f"No charge-neutral Tasker III reconstruction found for {tuple(miller)}: "
+            f"the best leaves {best['charge_per_fu']:.4g} e per formula unit "
+            f"(charge_tol={charge_tol}).  Check that the charges sum to zero over "
+            "the bulk cell; computed charges may need a larger charge_tol."
         )
-    return valid
+    best = min(neutral, key=lambda c: c["dipole_per_fu"])
+    raise ValueError(
+        f"No non-polar Tasker III reconstruction found for {tuple(miller)}: "
+        "removing atoms symmetrically from one plane type leaves a dipole of "
+        f"at least {best['dipole_per_fu']:.4g} e*A per formula unit "
+        f"(dipole_tol={dipole_tol}). "
+        "This stacking needs different reconstructions on the two surfaces, "
+        "which taskerslabgen does not build."
+    )
 
 
 def build_tasker3_slabs(
@@ -716,6 +750,7 @@ def reconstruct_tasker_iii(
     bond_threshold=(0.85, 1.15),
     bond_distances=None,
     prefer_plane=None,
+    surface_supercell=None,
 ):
     """
     Standalone Tasker III reconstruction pipeline.
@@ -727,8 +762,8 @@ def reconstruct_tasker_iii(
     ----------
     bulk_atoms : Atoms
         Bulk unit cell.
-    charges : dict or list
-        Formal charges (same format as :func:`compute_projection`).
+    charges : dict, list or None
+        Formal charges (same format as :func:`generate_slabs_for_miller`).
     miller : tuple of int
         Miller index ``(h, k, l)``.
     layer_thickness_list : list of int
@@ -739,7 +774,7 @@ def reconstruct_tasker_iii(
         Largest z-gap (angstrom) within one plane.  ``None`` (default)
         uses 0.1 Å.
     charge_tol : float
-        Tolerance for charge neutrality.
+        Largest |net charge| per formula unit (e) treated as neutral.
     dipole_tol : float
         Largest |dipole| per formula unit (e·Å) still treated as zero
         (default 0.05).  Genuinely polar repeat units are ~1-6 e·Å per
@@ -753,11 +788,15 @@ def reconstruct_tasker_iii(
     verbose : bool or None
         Print detailed output.
     bond_threshold : tuple of float
-        ``(lo, hi)`` scaling factors for adjacency matrix.
+        ``(lo, hi)`` scaling factors for bond detection.
     bond_distances : dict or None
         Per-pair bond reference distances.
     prefer_plane : str, list[str], or None
-        Preferred plane element/type for candidate ranking.
+        Candidates on matching planes are ranked first (element symbol or
+        plane label, e.g. ``"O"``, ``"O4"``, ``"O4-recon"``).
+    surface_supercell : tuple of int or None
+        ``(n1, n2)`` in-plane repetition of the surface cell (see
+        :func:`generate_slabs_for_miller`).
 
     Returns
     -------
@@ -779,6 +818,10 @@ def reconstruct_tasker_iii(
 
     charges_list = _charges_to_list(bulk_atoms, charges)
     bulk = _tag_atom_indices(bulk_atoms)
+    out_miller = tuple(miller)
+    if surface_supercell is not None:
+        bulk = _oriented_bulk(bulk, miller, surface_supercell)
+        miller = (0, 0, 1)
     surf_bulk = build_surface(bulk, miller, layers=1, verbose=verbose)
     atoms_z_matrix, L = compute_projection(
         bulk, surf_bulk, [charges_list[i] for i in surf_bulk.arrays[_INDEX_KEY]], miller,
@@ -790,27 +833,29 @@ def reconstruct_tasker_iii(
     reduced_counts = compute_reduced_counts(atoms_z_matrix)
     planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
 
-    adj = build_adjacency_matrix(
-        surf_bulk, bond_threshold=bond_threshold, bond_distances=bond_distances,
-        bulk_atoms=bulk, miller=miller,
-    )
     if verbose:
-        n_bonds = int(np.sum(adj)) // 2
-        print(f"Planes: {len(planes_sorted)}, reduced: {reduced_counts}, bonds: {n_bonds}\n")
+        adj = build_adjacency_matrix(
+            surf_bulk, bond_threshold=bond_threshold, bond_distances=bond_distances,
+            bulk_atoms=bulk, miller=miller,
+        )
+        print(f"Planes: {len(planes_sorted)}, reduced: {reduced_counts}, "
+              f"bonds: {int(np.sum(adj)) // 2}\n")
         print_adjacency_matrix(adj, surf_bulk)
 
     plane_names, _ = assign_plane_names(planes_sorted, atoms=surf_bulk)
     candidates = find_tasker3_candidates(
-        planes_sorted, atoms_z_matrix, reduced_counts, adj, L,
+        planes_sorted, atoms_z_matrix, reduced_counts, None, L,
         surf_bulk=surf_bulk, bond_distances=bond_distances,
         charge_tol=charge_tol, verbose=verbose,
         prefer_plane=prefer_plane,
-        plane_names=plane_names,
+        plane_names=plane_names, dipole_tol=dipole_tol,
+        bulk_atoms=bulk, miller=miller, bond_threshold=bond_threshold,
+        min_layers=min(layer_thickness_list),
     )
-    best = _select_tasker3_candidates(candidates, miller, dipole_tol, charge_tol)[0]
+    best = _select_tasker3_candidates(candidates, out_miller, dipole_tol, charge_tol)[0]
     if verbose:
         print(
-            f"\n→ Best: plane {best['cut_plane_idx']}  "
+            f"\n→ Best: {best['recon_label']}  "
             f"mu={best['net_dipole']:+.4e}  bonds_broken={best['bond_score']}\n"
         )
 
@@ -823,7 +868,7 @@ def reconstruct_tasker_iii(
     if plot:
         plot_path = f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}_tasker3.png"
         plot_unitcell_atoms(
-            atoms_z_matrix, L, miller,
+            atoms_z_matrix, L, out_miller,
             out_png=plot_path, plane_tol=plane_tol, planes=planes,
             zbot=zbot, ztop=ztop, dipole=best["net_dipole"],
         )
@@ -838,6 +883,8 @@ def reconstruct_tasker_iii(
     )
     for slab in slabs:
         _finalize_slab(slab, charges_list, reduced_counts, charge_tol, dipole_tol)
+        slab.info["bulk_name"] = bulk_name
+        slab.info["miller"] = out_miller
 
     return {
         "plot": plot_path,

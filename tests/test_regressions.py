@@ -71,7 +71,9 @@ def _bulk_max_gap(atoms, hkl):
     return float(np.max(np.diff(np.concatenate([z, [z[0] + L]]))))
 
 
-def _assert_valid_slab(slab, charges, reduced, max_gap=None):
+def _assert_valid_slab(slab, charges, reduced, max_gap=None, dipole_per_fu=None):
+    """Stoichiometric, neutral, non-polar (|dipole| < 1e-4 e*A, or at most
+    *dipole_per_fu* per formula unit) and without gaps above *max_gap*."""
     counts = Counter(int(z) for z in slab.numbers)
     ks = {counts.get(z, 0) / r for z, r in reduced.items()}
     assert len(ks) == 1 and next(iter(ks)) >= 1 and float(next(iter(ks))).is_integer(), (
@@ -81,7 +83,13 @@ def _assert_valid_slab(slab, charges, reduced, max_gap=None):
     assert abs(q.sum()) < 1e-6, f"charged slab {slab.get_chemical_formula()} Q={q.sum():+.3f}"
     z = slab.positions[:, 2]
     mu = float(np.sum(q * (z - z.mean())))
-    assert abs(mu) < 1e-4, f"polar slab {slab.get_chemical_formula()} mu={mu:+.4f}"
+    if dipole_per_fu is None:
+        assert abs(mu) < 1e-4, f"polar slab {slab.get_chemical_formula()} mu={mu:+.4f}"
+    else:
+        k = len(slab) / sum(reduced.values())
+        assert abs(mu) / k <= dipole_per_fu + 1e-9, (
+            f"polar slab {slab.get_chemical_formula()} mu={mu:+.4f} ({abs(mu) / k:.4f} per f.u.)"
+        )
     if max_gap is not None:
         gap = float(np.max(np.diff(np.sort(z))))
         assert gap <= max_gap + 1e-3, (
@@ -805,3 +813,113 @@ def test_variant_letters_stable_under_small_displacements():
         noisy.positions[:, :2] += np.random.default_rng(seed).normal(0.0, 0.005, (len(noisy), 2))
         got = [s.info["cut_bottom_plane"] for s in cutslab(noisy, Q_IRO2, cut_at="all", cuts="all")]
         assert got == ref
+
+
+# ------------------------------------------------------------------
+# Second review pass: exact Tasker III scoring
+# ------------------------------------------------------------------
+def _corundum():
+    from ase.spacegroup import crystal
+
+    return crystal(["Al", "O"], [(0, 0, 0.3523), (0.3064, 0, 0.25)], spacegroup=167,
+                   cellpar=[4.759, 4.759, 12.99, 90, 90, 120])
+
+
+@pytest.mark.parametrize(
+    "atoms, charges, hkl, kwargs",
+    [(_corundum(), {"Al": 3.0, "O": -2.0}, (1, 1, 1), {}),
+     (ALBITE, Q_ALBITE, (0, 1, 1), {"plane_tol": 0.2})],
+    ids=["corundum111", "albite011"],
+)
+def test_tasker3_dipole_counts_the_deleted_atoms(atoms, charges, hkl, kwargs):
+    """T1: on rumpled planes the dipole depends on which atoms are deleted;
+    plane centres scored every pattern as zero and the built slab was polar."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    res = generate_slabs_for_miller(atoms, charges, hkl, [1, 2], candidates="all", **kwargs)
+    assert res[hkl]
+    for info in res[hkl].values():
+        assert info["tasker_type"] == "III"
+        for slab in info["atoms"]:
+            # Rumpled surface planes leave a small dipole; within dipole_tol.
+            _assert_valid_slab(slab, charges, _reduced(atoms), dipole_per_fu=0.05)
+
+
+@pytest.mark.parametrize(
+    "atoms, charges, hkl",
+    [(CEO2, Q_CEO2, (0, 0, 1)), (MGO, Q_MGO, (1, 1, 1))],
+    ids=["CeO2001", "MgO111"],
+)
+def test_tasker3_best_independent_of_bulk_origin(atoms, charges, hkl):
+    """T2: zero dipoles differing by 1e-15 used to decide the best pattern."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    rng = np.random.default_rng(2)
+    best = set()
+    for shift in [np.zeros(3)] + [rng.random(3) for _ in range(8)]:
+        info = next(iter(generate_slabs_for_miller(_shifted(atoms, shift), charges, hkl, [2])[hkl].values()))
+        best.add((info["plane_type"], info["candidate"]["bond_score"]))
+    assert len(best) == 1, f"origin-dependent Tasker III choice: {best}"
+
+
+def _coordination(atoms, lo=0.85, hi=1.15):
+    radii = covalent_radii[atoms.numbers]
+    i_idx, j_idx, d = neighbor_list("ijd", atoms, hi * 2.0 * float(radii.max()))
+    ref = radii[i_idx] + radii[j_idx]
+    ok = (d >= lo * ref) & (d <= hi * ref)
+    return np.bincount(i_idx[ok], minlength=len(atoms))
+
+
+@pytest.mark.parametrize(
+    "atoms, charges, hkl", [(MGO, Q_MGO, (1, 1, 1)), (CEO2, Q_CEO2, (0, 0, 1))],
+    ids=["MgO111", "CeO2001"],
+)
+def test_tasker3_bond_score_counts_dangling_bonds(atoms, charges, hkl):
+    """T3: the bond score is the number of bulk bonds the slab's atoms lose."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    bulk_coord = {int(z): c for z, c in zip(atoms.numbers, _coordination(atoms))}
+    res = generate_slabs_for_miller(atoms, charges, hkl, [4], candidates="all")
+    for info in res[hkl].values():
+        slab = info["atoms"][0].copy()
+        slab.pbc = (True, True, False)
+        expected = np.array([bulk_coord[int(z)] for z in slab.numbers])
+        deficit = int(np.sum(expected - _coordination(slab)))
+        assert info["candidate"]["bond_score"] == deficit
+
+
+def test_surface_supercell_keeps_the_facet():
+    """T4: bulk * (2, 2, 1) changes the facet; surface_supercell does not."""
+    from taskerslabgen import build_surface, generate_slabs_for_miller
+
+    prim = bulk("MgO", "rocksalt", a=4.21)
+    with pytest.raises(ValueError, match="surface_supercell"):
+        generate_slabs_for_miller(prim, Q_MGO, (1, 1, 1), [2])
+    res = generate_slabs_for_miller(prim, Q_MGO, (1, 1, 1), [2], surface_supercell=(2, 2))
+    slab = next(iter(res[(1, 1, 1)].values()))["atoms"][0]
+    one = build_surface(prim, (1, 1, 1), layers=1)
+    np.testing.assert_allclose(slab.cell[:2], 2 * one.cell[:2], atol=1e-8)
+    assert slab.info["miller"] == (1, 1, 1)
+    _assert_valid_slab(slab, Q_MGO, _reduced(prim))
+
+
+def test_tasker3_prefer_plane_accepts_recon_labels():
+    """SW2: genslab's own plane_type ("O4-recon") must work as prefer_plane."""
+    from taskerslabgen import generate_slabs_for_miller, reconstruct_tasker_iii
+
+    res = generate_slabs_for_miller(CEO2, Q_CEO2, (0, 0, 1), [2], prefer_plane="O4-recon")
+    assert [t["plane_type"] for t in res[(0, 0, 1)].values()] == ["O4-recon"]
+    out = reconstruct_tasker_iii(CEO2, Q_CEO2, (0, 0, 1), [2], "CeO2", prefer_plane="Ce2-recon")
+    assert out["best_candidate"]["recon_label"] == "Ce2-recon"
+
+
+def test_tasker3_errors_name_the_failed_condition():
+    """T5: a charge failure was reported as a dipole failure."""
+    from taskerslabgen.tasker3 import _select_tasker3_candidates
+
+    charged = {"is_neutral": False, "charge_per_fu": 0.5, "dipole_per_fu": 0.0}
+    with pytest.raises(ValueError, match="charge-neutral"):
+        _select_tasker3_candidates([charged], (0, 0, 1), 0.05, 1e-3)
+    polar = {"is_neutral": True, "charge_per_fu": 0.0, "dipole_per_fu": 1.0}
+    with pytest.raises(ValueError, match="dipole"):
+        _select_tasker3_candidates([polar], (0, 0, 1), 0.05, 1e-3)

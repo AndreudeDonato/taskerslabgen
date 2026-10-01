@@ -182,6 +182,30 @@ def surface_bulk_cell(bulk_atoms, miller):
     return np.array([two.cell[0], two.cell[1], a3])
 
 
+def _oriented_bulk(bulk_atoms, miller, surface_supercell=(1, 1)):
+    """
+    The bulk crystal in the frame of :func:`build_surface`, as a cell whose
+    ``(0, 0, 1)`` surface is the *miller* surface of *bulk_atoms*, repeated
+    ``surface_supercell = (n1, n2)`` times in-plane.
+
+    Rows of the cell are the in-plane vectors of :func:`build_surface` and
+    the true bulk vector ``a3`` (:func:`surface_bulk_cell`); per-atom arrays
+    are kept.
+    """
+    try:
+        n1, n2 = (int(x) for x in surface_supercell)
+        ok = (n1, n2) == tuple(surface_supercell) and n1 >= 1 and n2 >= 1
+    except (TypeError, ValueError):
+        ok = False
+    if not ok:
+        raise ValueError(
+            f"surface_supercell must be two positive integers (n1, n2), got {surface_supercell!r}."
+        )
+    oriented = build_surface(bulk_atoms, miller, layers=1)
+    oriented.set_cell(surface_bulk_cell(bulk_atoms, miller), scale_atoms=False)
+    return oriented.repeat((n1, n2, 1))
+
+
 def _charges_from_atoms(atoms):
     """Per-atom charges stored on *atoms*: calculator results, then initial charges."""
     calc = getattr(atoms, "calc", None)

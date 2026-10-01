@@ -7,6 +7,7 @@ from .core import (
     _INDEX_KEY,
     _charges_to_list,
     _finalize_slab,
+    _oriented_bulk,
     _tag_atom_indices,
     build_surface,
     compute_projection,
@@ -118,6 +119,7 @@ def generate_slabs_for_miller(
     prefer_plane=None,
     candidates="best",
     savecandidates=False,
+    surface_supercell=None,
 ):
     """
     Generate non-polar slabs for one or more Miller indices.
@@ -187,11 +189,18 @@ def generate_slabs_for_miller(
     candidates : str
         - ``"best"`` (default): return only the single best candidate
           after plane filtering.  Tasker I/II: fewest bulk bonds broken at
-          the cut, then densest surface planes.  Tasker III: lowest dipole,
-          then bond score, then distribution score.
+          the cut, then densest surface planes.  Tasker III: fewest bonds
+          broken at the surfaces, then distribution score.
         - ``"all"``: return every candidate, generating a plot for each.
     savecandidates : bool
         Save all valid candidates to an extxyz file for visual inspection.
+    surface_supercell : tuple of int or None
+        ``(n1, n2)``: repeat the surface cell in-plane before cutting, e.g.
+        when a Tasker III plane has an odd excess per surface.  The facet
+        stays the same (unlike ``bulk_atoms * (2, 2, 1)``, which changes the
+        meaning of the Miller index unless the normal is along c).  Plane
+        labels then count the atoms of the supercell (``O16`` for four
+        ``O4`` cells).
 
     Returns
     -------
@@ -227,7 +236,7 @@ def generate_slabs_for_miller(
             plane_tol, charge_tol, dipole_tol, vacuum,
             plot, plot_out_dir, verbose,
             bond_threshold, bond_distances,
-            prefer_plane, candidates, savecandidates,
+            prefer_plane, candidates, savecandidates, surface_supercell,
         )
 
     return result
@@ -238,7 +247,7 @@ def _generate_for_one_miller(
     plane_tol, charge_tol, dipole_tol, vacuum,
     plot, plot_out_dir, verbose,
     bond_threshold, bond_distances,
-    prefer_plane, candidates, savecandidates,
+    prefer_plane, candidates, savecandidates, surface_supercell=None,
 ):
     h, k, l = miller
 
@@ -253,6 +262,10 @@ def _generate_for_one_miller(
             f"Charges length ({len(charges_list)}) does not match atoms ({len(bulk_atoms)})."
         )
     bulk = _tag_atom_indices(bulk_atoms)
+    out_miller = miller
+    if surface_supercell is not None:
+        bulk = _oriented_bulk(bulk, miller, surface_supercell)
+        miller = (0, 0, 1)
 
     surf_bulk = build_surface(bulk, miller, layers=1, verbose=verbose)
     atoms_z_matrix, L = compute_projection(
@@ -294,7 +307,7 @@ def _generate_for_one_miller(
     # ---- Tasker I/II ----
     if best_seq["is_tasker_ii"]:
         return _tasker12_path(
-            bulk, charges, miller, layer_thickness_list, bulk_name,
+            bulk, charges, miller, out_miller, layer_thickness_list, bulk_name,
             planes, planes_sorted, plane_names, plane_name_map,
             sequences, reduced_counts, atoms_z_matrix, L, surf_bulk,
             dipole_tol, vacuum, plane_tol,
@@ -311,7 +324,7 @@ def _generate_for_one_miller(
         )
 
     return _tasker3_path(
-        bulk, charges, miller, layer_thickness_list, bulk_name,
+        bulk, charges, miller, out_miller, layer_thickness_list, bulk_name,
         planes, planes_sorted, plane_names, plane_name_map,
         reduced_counts, atoms_z_matrix, L, surf_bulk,
         vacuum, plane_tol, charge_tol,
@@ -322,7 +335,7 @@ def _generate_for_one_miller(
 
 
 def _tasker12_path(
-    bulk_atoms, charges, miller, layer_thickness_list, bulk_name,
+    bulk_atoms, charges, miller, out_miller, layer_thickness_list, bulk_name,
     planes, planes_sorted, plane_names, plane_name_map,
     sequences, reduced_counts, atoms_z_matrix, L, surf_bulk,
     dipole_tol, vacuum, plane_tol,
@@ -334,7 +347,7 @@ def _tasker12_path(
     from .builder import build_cut_slabs
     from .tasker3 import _bonds_across_plane
 
-    h, k, l = miller
+    h, k, l = out_miller
     n_pl = len(planes_sorted)
 
     # One entry per zero-dipole bulk repeat unit (full period); each gives
@@ -420,7 +433,7 @@ def _tasker12_path(
                 f"_{bp}_{tp}_{tid}.png"
             )
             plot_unitcell_atoms(
-                atoms_z_matrix, L, miller,
+                atoms_z_matrix, L, out_miller,
                 out_png=plot_path, plane_tol=plane_tol, planes=planes,
                 zbot=zbot, ztop=ztop, dipole=seq["net_dipole"],
                 plane_names=plane_names,
@@ -429,7 +442,7 @@ def _tasker12_path(
         for slab in slabs:
             _finalize_slab(slab, **validation)
             slab.info["bulk_name"] = bulk_name
-            slab.info["miller"] = miller
+            slab.info["miller"] = out_miller
 
         output[tid] = {
             "atoms": slabs,
@@ -444,7 +457,7 @@ def _tasker12_path(
 
 
 def _tasker3_path(
-    bulk_atoms, charges, miller, layer_thickness_list, bulk_name,
+    bulk_atoms, charges, miller, out_miller, layer_thickness_list, bulk_name,
     planes, planes_sorted, plane_names, plane_name_map,
     reduced_counts, atoms_z_matrix, L, surf_bulk,
     vacuum, plane_tol, charge_tol,
@@ -461,50 +474,43 @@ def _tasker3_path(
         _select_tasker3_candidates,
     )
 
-    h, k, l = miller
+    h, k, l = out_miller
 
-    adj = build_adjacency_matrix(
-        surf_bulk, bond_threshold=bond_threshold, bond_distances=bond_distances,
-        bulk_atoms=bulk_atoms, miller=miller,
-    )
     if verbose:
-        n_bonds = int(np.sum(adj)) // 2
-        print(f"Adjacency: {n_bonds} bonds (threshold {bond_threshold})")
+        adj = build_adjacency_matrix(
+            surf_bulk, bond_threshold=bond_threshold, bond_distances=bond_distances,
+            bulk_atoms=bulk_atoms, miller=miller,
+        )
+        print(f"Adjacency: {int(np.sum(adj)) // 2} bonds (threshold {bond_threshold})")
         print_adjacency_matrix(adj, surf_bulk)
 
-    t3_prefer = None
-    if isinstance(prefer_plane, str):
-        t3_prefer = prefer_plane
-    elif isinstance(prefer_plane, (list, tuple)) and prefer_plane and all(isinstance(x, str) for x in prefer_plane):
-        t3_prefer = prefer_plane
-
+    # Ranked independently of prefer_plane, so IDs do not depend on it;
+    # prefer_plane only filters.
     t3_candidates = find_tasker3_candidates(
-        planes_sorted, atoms_z_matrix, reduced_counts, adj, L,
+        planes_sorted, atoms_z_matrix, reduced_counts, None, L,
         surf_bulk=surf_bulk, bond_distances=bond_distances,
         charge_tol=charge_tol, verbose=verbose,
-        prefer_plane=t3_prefer,
-        plane_names=plane_names,
+        plane_names=plane_names, dipole_tol=validation["dipole_tol"],
+        bulk_atoms=bulk_atoms, miller=miller, bond_threshold=bond_threshold,
+        min_layers=min(layer_thickness_list),
     )
     t3_candidates = _select_tasker3_candidates(
-        t3_candidates, miller, validation["dipole_tol"], charge_tol
+        t3_candidates, out_miller, validation["dipole_tol"], charge_tol
     )
 
     all_terminations = {}
     for tid, cand in enumerate(t3_candidates):
         all_terminations[tid] = {
             "candidate": cand,
-            "plane_type": plane_names[cand["cut_plane_idx"]],
+            "plane_type": cand["recon_label"],
             "plane_counts": dict(cand["plane_counts"]),
         }
 
     filtered = _filter_by_prefer_plane(all_terminations, prefer_plane)
 
     if candidates_mode == "best" and filtered:
-        best_tid = min(filtered, key=lambda t: (
-            abs(filtered[t]["candidate"]["net_dipole"]),
-            filtered[t]["candidate"]["bond_score"],
-            filtered[t]["candidate"]["distribution_score"],
-        ))
+        # IDs are in rank order: fewest broken bonds, then distribution.
+        best_tid = min(filtered)
         selected = {best_tid: filtered[best_tid]}
     else:
         selected = filtered
@@ -592,7 +598,7 @@ def _tasker3_path(
                 f"_{bp}_{tp}_{tid}.png"
             )
             plot_unitcell_atoms(
-                atoms_z_matrix, L, miller,
+                atoms_z_matrix, L, out_miller,
                 out_png=plot_path, plane_tol=plane_tol, planes=planes,
                 zbot=zbot, ztop=ztop, dipole=cand["net_dipole"],
                 plane_names=recon_names,
@@ -601,7 +607,7 @@ def _tasker3_path(
         for slab in slabs:
             _finalize_slab(slab, **validation)
             slab.info["bulk_name"] = bulk_name
-            slab.info["miller"] = miller
+            slab.info["miller"] = out_miller
 
         output[tid] = {
             "atoms": slabs,

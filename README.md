@@ -14,8 +14,9 @@ The library:
 - projects atoms along the surface normal for any Miller index
 - clusters atoms into planes (single-linkage on z, fixed 0.1 Å tolerance, as in pymatgen)
 - enumerates Tasker cut pairs with stoichiometry + charge neutrality + dipole checks
-- performs Tasker III surface reconstruction (symmetric deletion, bond scoring,
-  Coulomb-energy distribution scoring that spreads like charges apart)
+- performs Tasker III surface reconstruction (symmetric deletion; exact slab
+  dipole from the atoms that remain; ranking by dangling bonds on the true bulk
+  lattice, then a Coulomb-energy distribution score that spreads like charges apart)
 - plane labels from composition (`O4`, `Ce2O4`, `IrO2-a`) that are identical in the bulk,
   in cut slabs and for any bulk origin
 - cuts thick slabs into thinner sub-slabs preserving termination
@@ -167,6 +168,7 @@ result = generate_slabs_for_miller(
     prefer_plane=None,
     candidates="best",
     savecandidates=False,
+    surface_supercell=None,
 )
 ```
 
@@ -195,6 +197,7 @@ classifies each surface as Tasker I/II (zero dipole) or Tasker III
 | `prefer_plane` | see below | `None` | Plane-type filter applied before candidate selection. |
 | `candidates` | `str` | `"best"` | `"best"` or `"all"` (see below). |
 | `savecandidates` | `bool` | `False` | Save all valid candidates to an extxyz file. |
+| `surface_supercell` | `(n1, n2)` or `None` | `None` | Repeat the surface cell in-plane before cutting (e.g. a Tasker III plane with an odd excess per surface).  Keeps the facet, unlike `bulk_atoms * (2, 2, 1)`.  Labels then count supercell atoms. |
 
 **`bond_distances` format**
 
@@ -234,7 +237,7 @@ bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
 
 | Value | Behaviour |
 |---|---|
-| `"best"` | Return only the single best candidate per Miller index. Tasker I/II: fewest bulk bonds broken at the cut, then densest surface planes (`candidate["broken_bonds"]`, `candidate["broken_bonds_by_pair"]`, `candidate["surface_density"]`); IDs follow this ranking. Tasker III: lowest dipole, then `bond_score`, then `distribution_score`. |
+| `"best"` | Return only the single best candidate per Miller index. Tasker I/II: fewest bulk bonds broken at the cut, then densest surface planes (`candidate["broken_bonds"]`, `candidate["broken_bonds_by_pair"]`, `candidate["surface_density"]`); IDs follow this ranking. Tasker III: candidates must stay neutral and non-polar for every thickness from the thinnest requested one up; ranked by `bond_score` (bulk bonds the slab's atoms lose at both surfaces), then `distribution_score`; IDs follow this ranking. |
 | `"all"` | Return every valid candidate, generating a separate plot for each. |
 
 **Returns**
@@ -421,7 +424,7 @@ result = reconstruct_tasker_iii(
     plane_tol=None, charge_tol=1e-3, dipole_tol=0.05,
     vacuum=15.0, plot=False, plot_out_dir=".",
     verbose=None, bond_threshold=(0.85, 1.15),
-    bond_distances=None, prefer_plane=None,
+    bond_distances=None, prefer_plane=None, surface_supercell=None,
 )
 ```
 

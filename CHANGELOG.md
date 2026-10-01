@@ -150,6 +150,30 @@ raise.
   translation-invariant fingerprint (structure-factor magnitudes and
   triplet phases) compared with a tolerance, instead of rounded fractional
   coordinates; 0.005 Å of noise swapped the letters of rutile (001) planes.
+- **Exact Tasker III scoring:** the dipole and charge of each deletion
+  pattern are computed from the atoms that remain (closed form over all
+  thicknesses), not from plane centres, which ignored which atoms were
+  deleted: on rumpled planes every pattern scored zero and the built slab
+  was polar (corundum (111) raised although half the patterns are valid).
+  A pattern is accepted when it stays neutral and non-polar per formula
+  unit for every thickness from the thinnest requested one up.  Valid
+  patterns are ranked by dangling bonds, i.e. bulk bonds the slab's atoms
+  lose at both surfaces, counted on the true bulk lattice (the old score
+  read a bond-count matrix as boolean and excluded neighbour planes by
+  index, scoring MgO (111) O-terminated as 0 broken bonds), then by the
+  distribution score.  Float noise no longer decides the best pattern (it
+  did for CeO₂ (001) in 7 of 30 bulk origins).  Candidates report
+  ``recon_label``, ``charge_per_fu``, ``is_valid``; ``net_dipole`` is the
+  dipole of the thinnest slab.  ``find_tasker3_candidates`` takes
+  ``dipole_tol``, ``bulk_atoms``, ``miller``, ``bond_threshold`` and
+  ``min_layers``; its ``adj`` argument is unused.
+- **``surface_supercell=(n1, n2)``** for ``generate_slabs_for_miller`` and
+  ``reconstruct_tasker_iii`` repeats the surface cell in-plane.  The old
+  advice for odd excesses, ``bulk_atoms * (2, 2, 1)``, changes the facet
+  whenever the normal is not along c (primitive MgO (111) became (110)).
+- Tasker III ``plane_type`` (``O4-recon``) works as ``prefer_plane``; IDs do
+  not depend on ``prefer_plane``.  Separate errors for charge and dipole
+  failures.
 - Anatase (101), reported against 0.3.1 (charged Ti₁₄O₂₆ slabs), gives
   stoichiometric, neutral slabs; regression test added
   (``bulk_files/TiO2_anatase.cif``).
