@@ -660,7 +660,7 @@ def _reconstruction_deletions(atoms, planes_sorted, outer, recon, cell2d, ab_axe
         if not period or a3 is None:
             return T, True
         m = (z[p] - z[anchor]) / period
-        return T + np.round(m) * a3, abs(m - np.round(m)) < 0.25
+        return T + np.round(m) * a3, abs(m - np.round(m)) * period < min(tol, 0.25 * period)
 
     def closest(T, p):
         target, whole = expected(T, p)

@@ -1067,3 +1067,19 @@ def test_bulk_matching_when_relaxation_splits_every_plane():
     subs = cutslab(split, Q_IRO2, bulk_atoms=IRO2, dipole_tol=0.3)
     assert [len(s) for s in subs] == [3 * m for m in range(1, 9)]
     assert {s.info["cut_bottom_plane"].rstrip("'") for s in subs} <= {"IrO2-a", "IrO2-b"}
+
+
+def test_cutslab_reconstruction_with_supercell_bulk():
+    """The 2x2x2 CeO2 CIF stacks copies of the O plane every quarter of its
+    period; whether they were whole repeat units apart depended on rounding.
+    (2x2 in-plane: about 5 s of Tasker III enumeration.)"""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    supercell = read((BULK_DIR / "CeO2_fluorite_supercell2x2x2.cif").as_posix())
+    res = generate_slabs_for_miller(supercell, Q_CEO2, (0, 0, 1), [2], prefer_plane="O",
+                                    bond_distances=BOND_DISTS_CEO2)
+    term = next(iter(res[(0, 0, 1)].values()))
+    subs = cutslab(term["atoms"][0], Q_CEO2, reconstruction=term["reconstruction"])
+    assert [s.get_chemical_formula() for s in subs] == [f"Ce{8 * m}O{16 * m}" for m in range(1, 9)]
+    for s in subs:
+        _assert_valid_slab(s, Q_CEO2, _reduced(CEO2))
