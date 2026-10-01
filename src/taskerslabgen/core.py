@@ -1,4 +1,5 @@
 from collections import Counter
+from functools import cmp_to_key
 from math import gcd
 
 import numpy as np
@@ -57,26 +58,48 @@ def build_surface(bulk_atoms, miller, layers=1, vacuum=None, verbose=None):
         Number of bulk repeat units along the surface normal.
     vacuum : float or None
         Vacuum to add (angstrom, per side).  ``None`` or ``0`` (default)
-        returns the bare oriented bulk: atoms are not shifted and the third
-        cell vector is normal to the surface with length ``layers * L``.
+        returns the bare oriented bulk, whose third cell vector is normal to
+        the surface with length ``layers * L``.
     verbose : bool or None
         Print debug information.
 
     Returns
     -------
     Atoms
-        Surface slab with full PBC enabled.  Its third cell vector is not a
+        Surface slab with full PBC enabled.  Atoms of ``ase.build.surface``
+        are moved by bulk lattice vectors (and all together along the
+        normal) so that the cell boundary lies in the widest atom-free gap
+        along the normal: no atomic plane straddles it, and copy ``m`` of
+        an atom sits ``m * L`` above copy 0.  The third cell vector is not a
         bulk lattice vector in general; see :func:`surface_bulk_cell`.
     """
     _check_miller(miller)
-    if vacuum is None or vacuum <= 0:
-        # Not ``periodic=True``: ASE would then wrap atoms along the normal by
-        # its orthogonalised third vector, which is not a lattice vector.
-        slab = surface(bulk_atoms, miller, layers=layers)
-        area = np.linalg.norm(np.cross(slab.cell[0], slab.cell[1]))
-        slab.cell[2] = [0.0, 0.0, layers * bulk_atoms.get_volume() / area]
-    else:
-        slab = surface(bulk_atoms, miller, layers=layers, vacuum=vacuum)
+    # Not ``periodic=True``: ASE would then wrap atoms along the normal by its
+    # orthogonalised third vector, which is not a lattice vector.  ASE keeps
+    # each atom's fractional coordinate along its oblique a3 in [0, 1), so a
+    # plane can straddle z = 0 with its two halves taken from different
+    # layers, which shears its in-plane geometry.  Instead, cut where the
+    # gap between atoms is widest and move what lies below by whole bulk
+    # lattice vectors.
+    a3 = surface_bulk_cell(bulk_atoms, miller)[2]
+    L = float(a3[2])
+    # From the one-layer build for every *layers*: equally wide gaps (e.g.
+    # rutile (110)) must not be told apart by rounding noise.
+    z0 = np.sort(surface(bulk_atoms, miller, layers=1).positions[:, 2] % L)
+    gaps = np.diff(np.append(z0, z0[0] + L))
+    k = int(np.flatnonzero(gaps >= gaps.max() - 1e-6)[0])
+    z_cut = (z0[k] + 0.5 * gaps[k]) % L
+    slab = surface(bulk_atoms, miller, layers=layers)
+    pos = slab.positions.copy()
+    pos[pos[:, 2] < z_cut] += layers * a3
+    pos[:, 2] -= z_cut
+    slab.positions = pos
+    slab.cell[2] = [0.0, 0.0, layers * L]
+    frac = slab.get_scaled_positions(wrap=False)
+    frac[:, :2] %= 1.0
+    slab.set_scaled_positions(frac)
+    if vacuum is not None and vacuum > 0:
+        slab.center(vacuum=vacuum, axis=2)
     slab.set_pbc((True, True, True))
     if verbose:
         print("BULK")
@@ -645,7 +668,9 @@ def assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.5):
     several geometries that are not related by an in-plane translation
     (e.g. the mirror-related IrO2 planes of rutile (001)), a variant letter
     is appended: ``IrO2-a``, ``IrO2-b``.  Variants are ordered by a
-    translation-invariant key of their geometry, not by stacking order.
+    translation-invariant fingerprint of their geometry
+    (:func:`_plane_signature`), not by stacking order, so small
+    displacements do not swap letters.
 
     Elements are written metals first, then non-metals, each alphabetically
     (ASE's ``"metal"`` formula format).  Reconstruction suffixes such as
@@ -708,7 +733,9 @@ def assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.5):
             continue
         if len(groups) > len(string.ascii_lowercase):
             raise ValueError(f"Too many geometric variants of {formula} planes (more than 26).")
-        order = sorted(range(len(groups)), key=lambda k: _canonical_plane_key(groups[k][0]))
+        sigs = [_plane_signature(groups[k][0]) for k in range(len(groups))]
+        order = sorted(range(len(groups)),
+                       key=cmp_to_key(lambda i, j: _compare_signatures(sigs[i], sigs[j])))
         for letter, k in zip(string.ascii_lowercase, order):
             labels[(formula, k)] = f"{formula}-{letter}"
 
@@ -728,24 +755,48 @@ def _formula_label(counts):
     ).format("metal")
 
 
-def _canonical_plane_key(geom, decimals=3):
-    """
-    Translation-invariant key of a plane geometry ``[(Z, fx, fy), ...]``.
+# In-plane reciprocal vectors (h, k) of the plane fingerprint, and pairs (a, b)
+# of its triplet invariants F(a) F(b) F(-a-b).
+_SIG_G = [(1, 0), (0, 1), (1, 1), (1, -1), (2, 0), (0, 2), (2, 1), (1, 2), (2, -1), (1, -2)]
+_SIG_TRIPLETS = [((1, 0), (0, 1)), ((1, 0), (1, 0)), ((0, 1), (0, 1)), ((1, 0), (0, -1)),
+                 ((1, 1), (1, -1)), ((2, 0), (-1, 1)), ((0, 2), (1, -1))]
 
-    The lexicographically smallest sorted list of rounded fractional
-    positions over all choices of origin atom (of the rarest species).
+
+def _plane_signature(geom):
     """
-    Zs = np.array([a[0] for a in geom], dtype=int)
-    frac = np.array([[a[1], a[2]] for a in geom], dtype=float)
-    species, counts = np.unique(Zs, return_counts=True)
-    anchor_Z = species[np.argmin(counts)]
-    best = None
-    for a in np.flatnonzero(Zs == anchor_Z):
-        shifted = np.round((frac - frac[a]) % 1.0, decimals) % 1.0
-        key = tuple(sorted((int(z), float(x), float(y)) for z, (x, y) in zip(Zs, shifted)))
-        if best is None or key < best:
-            best = key
-    return best
+    Translation-invariant fingerprint of a plane ``[(Z, fx, fy), ...]``.
+
+    Magnitudes of the Z-weighted structure factor ``F(g)`` over
+    :data:`_SIG_G`, then the imaginary parts of triplet invariants
+    ``F(a) F(b) F(-a-b)``, which tell a plane from its 180-degree rotation.
+    ``F`` is normalised by the total weight, so every entry is in [-1, 1]
+    and changes smoothly with the atom positions.
+    """
+    w = np.array([a[0] for a in geom], dtype=float)
+    f = np.array([[a[1], a[2]] for a in geom], dtype=float)
+
+    def F(g):
+        return np.sum(w * np.exp(2j * np.pi * (f @ np.asarray(g, dtype=float)))) / w.sum()
+
+    mags = [abs(F(g)) for g in _SIG_G]
+    trips = [(F(a) * F(b) * F(-np.add(a, b))).imag for a, b in _SIG_TRIPLETS]
+    return np.array(mags + trips)
+
+
+def _compare_signatures(a, b, tol=0.02):
+    """
+    Order two plane fingerprints, robustly to small displacements.
+
+    Equal if no entry differs by more than *tol*; otherwise decided by the
+    first entry whose difference is at least half the largest one (mirror
+    variants have swapped entries of equal size, so the first one decides).
+    """
+    d = np.asarray(a) - np.asarray(b)
+    big = float(np.max(np.abs(d)))
+    if big <= tol:
+        return 0
+    k = int(np.flatnonzero(np.abs(d) >= 0.5 * big)[0])
+    return -1 if d[k] < 0 else 1
 
 
 def plane_name_base(name):

@@ -23,12 +23,14 @@ IRO2 = read((BULK_DIR / "IrO2_rutile.cif").as_posix())
 ZNO = bulk("ZnO", "wurtzite", a=3.25, c=5.21, u=0.382)
 GAN = bulk("GaN", "wurtzite", a=3.19, c=5.19, u=0.377)
 MGO = bulk("MgO", "rocksalt", a=4.21, cubic=True)
+ALBITE = read((BULK_DIR / "NaAlSi3O8_albite.cif").as_posix())
 
 Q_CEO2 = {"Ce": 4.0, "O": -2.0}
 Q_IRO2 = {"Ir": 4.0, "O": -2.0}
 Q_ZNO = {"Zn": 2.0, "O": -2.0}
 Q_GAN = {"Ga": 3.0, "N": -3.0}
 Q_MGO = {"Mg": 2.0, "O": -2.0}
+Q_ALBITE = {"Na": 1.0, "Al": 3.0, "Si": 4.0, "O": -2.0}
 BOND_DISTS_CEO2 = {"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
 
 
@@ -338,8 +340,62 @@ def test_plane_labels_independent_of_bulk_origin(atoms, charges, hkl):
     seen = set()
     for shift in [np.zeros(3)] + [rng.random(3) for _ in range(4)]:
         res = generate_slabs_for_miller(_shifted(atoms, shift), charges, hkl, [2], candidates="all")
-        seen.add(frozenset(info["plane_type"] for info in res[hkl].values()))
+        # The label must stay attached to the same plane geometry, not only
+        # the set of labels (letters of variants could swap).
+        seen.add(frozenset(
+            (info["plane_type"], _bottom_plane_descriptor(info["atoms"][0]))
+            for info in res[hkl].values()
+        ))
     assert len(seen) == 1, f"origin-dependent labels: {seen}"
+
+
+def _plane_descriptor(atoms, indices):
+    """Translation-invariant geometry of a plane: species-ordered in-plane
+    difference vectors (fractional, 2 decimals)."""
+    frac = atoms.get_scaled_positions()
+    out = []
+    for i in indices:
+        for j in indices:
+            if i != j and atoms.numbers[i] <= atoms.numbers[j]:
+                d = np.round((frac[j, :2] - frac[i, :2]) % 1.0, 2) % 1.0
+                out.append((int(atoms.numbers[i]), int(atoms.numbers[j]), *map(float, d)))
+    return tuple(sorted(out))
+
+
+def _bottom_plane_descriptor(slab):
+    from taskerslabgen import identify_planes
+
+    atoms_z = np.column_stack([slab.numbers, slab.positions[:, 2], np.zeros(len(slab))])
+    planes = sorted(identify_planes(atoms_z, slab.cell[2, 2]), key=lambda p: p["z_center"])
+    return _plane_descriptor(slab, planes[0]["indices"])
+
+
+@pytest.mark.parametrize(
+    "atoms, charges, hkl",
+    [(ALBITE, Q_ALBITE, (0, 0, 1)), (ALBITE, Q_ALBITE, (1, 2, 1)), (IRO2, Q_IRO2, (0, 0, 1))],
+    ids=["albite001", "albite121", "IrO2001"],
+)
+def test_every_plane_label_follows_its_geometry(atoms, charges, hkl):
+    """L1/SW4: planes straddling the cell boundary of ase.build.surface had a
+    sheared geometry, so variant letters changed with the bulk origin."""
+    from taskerslabgen import assign_plane_names, build_surface, compute_projection, identify_planes
+
+    def labels(bulk_atoms):
+        surf = build_surface(bulk_atoms, hkl, layers=1)
+        atoms_z, L = compute_projection(bulk_atoms, surf, charges, hkl)
+        planes = sorted(identify_planes(atoms_z, L), key=lambda p: p["z_center"])
+        names, _ = assign_plane_names(planes, atoms=surf)
+        return frozenset((name, _plane_descriptor(surf, p["indices"]))
+                         for name, p in zip(names, planes))
+
+    rng = np.random.default_rng(5)
+    shifts = [np.zeros(3)] + [rng.random(3) for _ in range(5)]
+    if hkl == (0, 0, 1):
+        # Put the cell boundary just below each atom in turn: its plane then
+        # straddles z = 0 in ase.build.surface.
+        shifts += [np.array([0.0, 0.0, 1e-3 - f]) for f in atoms.get_scaled_positions()[:, 2]]
+    seen = {labels(_shifted(atoms, shift)) for shift in shifts}
+    assert len(seen) == 1, "plane labels depend on the bulk origin"
 
 
 # ------------------------------------------------------------------
@@ -403,10 +459,6 @@ def test_cutslab_relaxed_slab_keeps_thick_cuts(ceo2_111_slab):
 # ------------------------------------------------------------------
 # N3: best Tasker I/II termination = fewest broken bonds, origin-independent
 # ------------------------------------------------------------------
-ALBITE = read((BULK_DIR / "NaAlSi3O8_albite.cif").as_posix())
-Q_ALBITE = {"Na": 1.0, "Al": 3.0, "Si": 4.0, "O": -2.0}
-
-
 def _srtio3():
     from ase.spacegroup import crystal
 
@@ -724,3 +776,32 @@ def test_charges_read_from_atoms(ceo2_111_slab):
     assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
     with pytest.raises(ValueError, match="set_initial_charges"):
         cutslab(ceo2_111_slab, None)
+
+
+def test_oriented_bulk_layers_are_consistent_copies():
+    """L1: copy m of every atom sits m*L above copy 0, and no plane straddles z=0."""
+    from taskerslabgen import build_surface
+
+    hkl = (0, 0, 1)
+    for f in ALBITE.get_scaled_positions()[::4, 2]:
+        bulk_atoms = _shifted(ALBITE, [0.0, 0.0, 1e-3 - f])  # boundary just below an atom
+        one = build_surface(bulk_atoms, hkl, layers=1)
+        three = build_surface(bulk_atoms, hkl, layers=3)
+        L = one.cell[2, 2]
+        z1 = one.positions[:, 2]
+        assert z1.min() > 0.05 and z1.max() < L - 0.05
+        expected = np.sort(np.concatenate([z1 + m * L for m in range(3)]))
+        np.testing.assert_allclose(np.sort(three.positions[:, 2]), expected, atol=1e-8)
+
+
+def test_variant_letters_stable_under_small_displacements():
+    """L2: 0.005 A of in-plane noise swapped IrO2-a / IrO2-b."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    slab = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, (0, 0, 1), [3])[(0, 0, 1)].values()))["atoms"][0]
+    ref = [s.info["cut_bottom_plane"] for s in cutslab(slab, Q_IRO2, cut_at="all", cuts="all")]
+    for seed in range(10):
+        noisy = slab.copy()
+        noisy.positions[:, :2] += np.random.default_rng(seed).normal(0.0, 0.005, (len(noisy), 2))
+        got = [s.info["cut_bottom_plane"] for s in cutslab(noisy, Q_IRO2, cut_at="all", cuts="all")]
+        assert got == ref

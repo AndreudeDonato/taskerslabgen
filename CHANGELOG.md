@@ -136,6 +136,20 @@ raise.
   nothing; ``plot=True`` creates ``plot_out_dir``; ``parse_hirshfeld_fhi_aims``
   returns the last Hirshfeld analysis instead of concatenating all of them;
   cutslab's unknown-label error explains supercell labels.
+- **Planes no longer straddle the cell boundary (``build_surface``):**
+  ``ase.build.surface`` keeps each atom's coordinate along the oblique bulk
+  vector in [0, 1), so a plane crossing z = 0 had its two halves taken from
+  different layers and a sheared in-plane geometry.  Labels, the bulk
+  plane catalog and reconstruction patterns read that geometry, so they
+  changed with the bulk origin (albite (0,0,1) swapped ``O3-a``/``O3-b``).
+  ``build_surface`` now moves atoms by bulk lattice vectors so the cell
+  boundary lies in the widest atom-free gap along the normal; with vacuum
+  the slab is centred.  Positions differ from earlier versions by lattice
+  translations and one shift along z.
+- **Stable variant letters:** ``-a``/``-b`` are ordered by a
+  translation-invariant fingerprint (structure-factor magnitudes and
+  triplet phases) compared with a tolerance, instead of rounded fractional
+  coordinates; 0.005 Å of noise swapped the letters of rutile (001) planes.
 - Anatase (101), reported against 0.3.1 (charged Ti₁₄O₂₆ slabs), gives
   stoichiometric, neutral slabs; regression test added
   (``bulk_files/TiO2_anatase.cif``).
