@@ -1,8 +1,12 @@
 """
-Generate one Tasker I/II surface per Miller index for IrO2.
+Generate every Tasker I/II termination of IrO2 for several Miller indices.
 
-Writes structures and stacking-axis PNG plots under example/output_tasker2/.
-Pass --view to open ASE's GUI after generation.
+Terminations come ranked: ID 0 breaks the fewest bonds (then is the densest
+surface), which is what ``candidates="best"`` returns.
+
+Writes structures under example/output_tasker2/.  Pass --plot for
+stacking-axis PNG plots, --verbose for the full analysis, --view to open
+ASE's GUI after generation.
 """
 from __future__ import annotations
 
@@ -25,6 +29,11 @@ def main(argv=None):
         "--plot",
         action="store_true",
         help="Write stacking-axis PNG plots next to the structures.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print the plane and stacking analysis.",
     )
     args = parser.parse_args(argv)
 
@@ -54,7 +63,7 @@ def main(argv=None):
         bulk_name=stem,
         vacuum=15.0,
         plot_out_dir=output_dir.as_posix(),
-        verbose=True,
+        verbose=args.verbose,
         plot=args.plot,
         candidates="all",
     )
@@ -71,9 +80,10 @@ def main(argv=None):
             slab = info["atoms"][0]
             fname = f"{stem}_hkl_{hkl}_term_{tid}_{info['plane_type']}.cif"
             write((output_dir / fname).as_posix(), slab)
+            bonds = info["candidate"]["broken_bonds_by_pair"]
             print(
                 f"    ID {tid}: {len(slab)} atoms, Tasker {info['tasker_type']}  "
-                f"plane={info['plane_type']}  -> {fname}"
+                f"plane={info['plane_type']}  broken bonds={bonds}  -> {fname}"
             )
             slabs.append(slab)
 

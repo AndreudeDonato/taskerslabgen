@@ -76,6 +76,13 @@ python example/NaAlSi3O8_albite.py
 python example/x2supercell_CeO2_fluorite.py
 ```
 
+### Cutting a relaxed slab (`cutslab(bulk_atoms=...)`)
+
+```bash
+python example/relaxed_cutslab.py
+python example/relaxed_cutslab.py --slab slab.out --bulk bulk.out --miller 1 1 0
+```
+
 ### Batch slab generation
 
 ```bash
@@ -485,7 +492,7 @@ Import these from `taskerslabgen.advanced` (except `validate_slab` and
   Hirshfeld).
 - `example/` — runnable example scripts and tutorial.
 - `bulk_files/` — example bulk input files.
-- `tests/` — smoke tests (`pytest tests/`).
+- `tests/` — regression and smoke tests (`pytest tests/`).
 
 ## Outputs
 

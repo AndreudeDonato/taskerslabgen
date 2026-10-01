@@ -1,9 +1,16 @@
 """
-Generate all dipole-zero Tasker III reconstructions for CeO2 (001)
-using generate_slabs_for_miller with candidates="all".
+Generate the Tasker III reconstructions of CeO2 (001) with
+generate_slabs_for_miller and candidates="all".
+
+CeO2 (001) is polar: half of the surface O (or Ce) atoms have to move from
+one side of the slab to the other.  Each returned termination is one
+symmetry-distinct way of choosing them; ``multiplicity`` counts the
+equivalent patterns it stands for.  They are ranked by broken bonds, then
+by how evenly the remaining surface atoms are spread.
 
 Headless by default: writes structures under example/output_tasker3/.
-Pass --view to open ASE's GUI after generation.
+Pass --plot for stacking-axis PNG plots, --verbose for the full analysis,
+--view to open ASE's GUI after generation.
 """
 from __future__ import annotations
 
@@ -27,6 +34,11 @@ def main(argv=None):
         action="store_true",
         help="Write stacking-axis PNG plots next to the structures.",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print the plane, stacking and reconstruction analysis.",
+    )
     args = parser.parse_args(argv)
 
     here = Path(__file__).resolve().parent
@@ -45,13 +57,16 @@ def main(argv=None):
         millers=miller,
         layer_thickness_list=[2],
         bulk_name="CeO2",
-        plane_tol=0.05,
         vacuum=15.0,
         plot=args.plot,
         plot_out_dir=output_dir.as_posix(),
-        verbose=True,
+        verbose=args.verbose,
+        # Count only Ce-O bonds (covalent radii would also count Ce-Ce).
         bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35},
         candidates="all",
+        # Ce- and O-terminated reconstructions break the same number of
+        # bonds; keep the O-terminated ones, the termination usually
+        # modelled for CeO2 (001).
         prefer_plane="O",
     )
 
@@ -64,9 +79,12 @@ def main(argv=None):
             fname = f"CeO2_hkl_001_term_{tid}_{info['plane_type']}.cif"
             out_path = output_dir / fname
             write(out_path.as_posix(), slab)
+            cand = info["candidate"]
             print(
                 f"  ID {tid}: type={info['tasker_type']}  "
-                f"plane={info['plane_type']}  atoms={len(slab)}  -> {fname}"
+                f"plane={info['plane_type']}  atoms={len(slab)}  "
+                f"broken bonds={cand['bond_score']}  "
+                f"multiplicity={cand['multiplicity']}  -> {fname}"
             )
 
     if not slabs:

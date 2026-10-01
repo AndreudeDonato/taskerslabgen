@@ -20,8 +20,9 @@ Requires Python >= 3.9. Dependencies: ASE, NumPy, Matplotlib, SciPy.
 
 The script looks for inputs in this order:
 
-1. `workbulkfiles/unitcell/*.out` — relaxed FHI-aims bulks (preferred for production batches)
-2. `bulk_files/*.cif` — shipped demo structures (used automatically when no `.out` files are present)
+1. `--bulk-dir DIR` — every `*.out` / `*.cif` in `DIR`, when given
+2. `workbulkfiles/unitcell/*.out` — relaxed FHI-aims bulks (preferred for production batches)
+3. `bulk_files/*.cif` — shipped demo structures (used automatically when no `.out` files are present)
 
 Expected stems for a full FHI-aims batch (16 materials):
 
@@ -61,6 +62,9 @@ python example/batch_unitcell_slabs.py
 
 # Optional stacking plots
 python example/batch_unitcell_slabs.py --quick --plot
+
+# Bulks from elsewhere, slabs written elsewhere
+python example/batch_unitcell_slabs.py --bulk-dir /path/to/bulks --out-dir /path/to/slabs
 ```
 
 ## 4. What the script does
@@ -80,8 +84,28 @@ Output files follow:
 {stem}_hkl_{h}{k}{l}_cut_{stoich_k}.in
 ```
 
+## 5. Per-material settings
+
+All in the top of `batch_unitcell_slabs.py`:
+
+- `MILLER_BY_CRYSTAL` / `STEM_TO_CRYSTAL` — Miller indices per crystal type.
+  Stems not listed get `DEFAULT_MILLERS` (the seven low-index facets).
+- `CHARGES` — formal charges by element.
+- `BOND_DISTANCES_BY_STEM` — which pairs count as bonds when ranking
+  terminations (e.g. CeO2 ignores Ce–Ce contacts).
+- `PREFER_PLANE` — force a surface plane for one facet (CeO2 (001): `"O"`).
+- `PLANE_TOL` — per-facet plane tolerance, used for both genslab and cutslab.
+  The default 0.1 Å absorbs relaxation noise; PtO2 marcasite (001) uses
+  0.05 Å because its two O planes 0.07 Å apart allow a better Tasker II cut.
+- `DIPOLE_TOL_*` — 0.3 e·Å per formula unit, for relaxed bulks.
+
+MoO2 forms Mo–Mo dimers, so a rutile-cell MoO2 has no clean planes: some
+facets come out Tasker III or are reported as polar.
+
 ## Troubleshooting
 
 - **No bulk inputs found** — add `.out` files under `workbulkfiles/unitcell/`, or rely on shipped `bulk_files/*.cif`.
 - **Missing charges** — extend the `CHARGES` dict in `batch_unitcell_slabs.py`.
+- **Short thickness series** — genslab and cutslab must see the same planes;
+  give both the same `plane_tol` (the script does, through `PLANE_TOL`).
 - **Tasker III cut_at="all"** — the library forces `"termination"` when a reconstruction is active; the batch script already uses `"termination"`.

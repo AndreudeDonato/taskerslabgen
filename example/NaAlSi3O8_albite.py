@@ -2,7 +2,8 @@
 Generate Tasker I/II slabs for albite (NaAlSi3O8) over common Miller indices.
 
 Writes structures and stacking-axis PNG plots under example/output_albite/.
-Pass --view to open ASE's GUI after generation.
+Pass --verbose for the full analysis, --view to open ASE's GUI after
+generation.
 """
 from __future__ import annotations
 
@@ -25,6 +26,11 @@ def main(argv=None):
         "--no-plot",
         action="store_true",
         help="Skip writing stacking-axis PNG plots.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print the plane and stacking analysis.",
     )
     args = parser.parse_args(argv)
 
@@ -57,7 +63,7 @@ def main(argv=None):
         bulk_name=stem,
         vacuum=15.0,
         plot_out_dir=output_dir.as_posix(),
-        verbose=True,
+        verbose=args.verbose,
         plot=not args.no_plot,
         candidates="best",
     )

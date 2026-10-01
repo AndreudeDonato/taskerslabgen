@@ -66,7 +66,11 @@ MILLER_BY_CRYSTAL = {
         (1, 0, 1),
     ],
     "OsO2_pyrite": [(1, 0, 0), (1, 1, 0), (1, 1, 1), (2, 1, 0), (2, 1, 1)],
+    "albite": [(0, 0, 1), (0, 1, 0), (1, 0, 0)],
 }
+
+# Used for bulks whose crystal type is not listed above
+DEFAULT_MILLERS = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0), (1, 0, 1), (0, 1, 1), (1, 1, 1)]
 
 STEM_TO_CRYSTAL = {
     "CeO2_fluorite": "CeO2_fluorite",
@@ -85,6 +89,7 @@ STEM_TO_CRYSTAL = {
     "VO2_C2m": "VO2_C2m",
     "VO2_P2c": "VO2_P21c",
     "VO2_rutile": "rutile",
+    "NaAlSi3O8_albite": "albite",
 }
 
 CHARGES = {
@@ -99,10 +104,13 @@ CHARGES = {
     "Ti": 4.0,
     "V": 4.0,
     "Mo": 4.0,
+    "Na": 1.0,
+    "Al": 3.0,
+    "Si": 4.0,
     "O": -2.0,
 }
 
-# Per-stem bond filters (None = forbid that pair in Tasker III adjacency)
+# Per-stem bond filters (None = never count that pair as a bond)
 BOND_DISTANCES_BY_STEM = {
     "CeO2_fluorite": {"Ce-Ce": None, "O-O": None, "Ce-O": 2.35},
 }
@@ -113,6 +121,17 @@ PREFER_PLANE = {
     ("CeO2_fluorite", (0, 0, 1)): "O",
 }
 
+# Per (stem, miller): plane_tol (angstrom) for both genslab and cutslab.
+# The default (None = 0.1 A) merges atoms closer than 0.1 A along the normal
+# into one plane, which absorbs relaxation noise.  Marcasite (001) has two O
+# planes only 0.07 A apart: merged, the facet needs a Tasker III
+# reconstruction; split, it has a better Tasker II cut between them.
+# MoO2 forms Mo-Mo dimers, so a rutile-cell MoO2 has no clean planes for any
+# tolerance; expect Tasker III or polar facets there.
+PLANE_TOL = {
+    ("PtO2_marcasite", (0, 0, 1)): 0.05,
+}
+
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
@@ -121,8 +140,6 @@ REPO_ROOT = HERE.parent
 WORKBULKFILES = REPO_ROOT / "workbulkfiles" / "unitcell"
 SHIPPED_BULKS = REPO_ROOT / "bulk_files"
 OUTPUT_DIR = REPO_ROOT / "X1output_slabs"
-PLANE_TOL_GENSLAB = 0.005
-PLANE_TOL_CUTSLAB = 0.05
 THICK_LAYERS = 6
 VACUUM = 15.0
 OUTPUT_EXT = "in"
@@ -167,7 +184,7 @@ def _stoich_k_for_slab(slab, reduced_counts):
     return slab.info.get("cut_n_planes", 0)
 
 
-def get_crystal_type(stem: str) -> str:
+def get_crystal_type(stem: str) -> str | None:
     if stem in STEM_TO_CRYSTAL:
         return STEM_TO_CRYSTAL[stem]
     if "fluorite" in stem:
@@ -186,7 +203,9 @@ def get_crystal_type(stem: str) -> str:
         return "OsO2_pyrite"
     if "rutile" in stem:
         return "rutile"
-    raise ValueError(f"Unknown crystal type for stem: {stem}")
+    if "albite" in stem:
+        return "albite"
+    return None
 
 
 def process_miller(
@@ -206,6 +225,8 @@ def process_miller(
     h, k, l = miller
     hkl_str = "".join(str(i) for i in miller)
     prefer_plane = PREFER_PLANE.get((stem, miller))
+    # Same plane_tol in genslab and cutslab, so both see the same planes.
+    plane_tol = PLANE_TOL.get((stem, miller))
     bond_distances = BOND_DISTANCES_BY_STEM.get(stem, DEFAULT_BOND_DISTANCES)
 
     print("=" * 60)
@@ -223,7 +244,7 @@ def process_miller(
         plot_out_dir=output_dir.as_posix(),
         verbose=VERBOSE,
         bond_distances=bond_distances,
-        plane_tol=PLANE_TOL_GENSLAB,
+        plane_tol=plane_tol,
         dipole_tol=DIPOLE_TOL_GENSLAB,
         prefer_plane=prefer_plane,
         candidates="best",
@@ -251,7 +272,7 @@ def process_miller(
         plot_out_dir=output_dir.as_posix(),
         cut_at="termination",
         reconstruction=term.get("reconstruction"),
-        plane_tol=PLANE_TOL_CUTSLAB,
+        plane_tol=plane_tol,
         vacuum=VACUUM,
         cuts="right",
         verbose=VERBOSE,
@@ -275,11 +296,20 @@ def process_miller(
     return n_written, None
 
 
-def _discover_bulk_files(quick: bool = False) -> tuple[list[Path], Path]:
+def _discover_bulk_files(
+    quick: bool = False, bulk_dir: Path | None = None
+) -> tuple[list[Path], Path]:
     """
-    Prefer FHI-aims ``.out`` files in workbulkfiles/unitcell when present;
-    otherwise fall back to shipped CIF files in bulk_files/.
+    Use ``*.out`` / ``*.cif`` files in *bulk_dir* when given.  Otherwise
+    prefer FHI-aims ``.out`` files in workbulkfiles/unitcell and fall back
+    to the shipped CIF files in bulk_files/.
     """
+    if bulk_dir is not None:
+        files = sorted(bulk_dir.glob("*.out")) + sorted(bulk_dir.glob("*.cif"))
+        if quick:
+            files = [p for p in files if p.stem == "CeO2_fluorite"][:1]
+        return files, bulk_dir
+
     out_files = sorted(WORKBULKFILES.glob("*.out"))
     if quick:
         preferred = WORKBULKFILES / "CeO2_fluorite.out"
@@ -316,10 +346,25 @@ def main():
         action="store_true",
         help="Write stacking-axis PNG plots next to slab outputs.",
     )
+    parser.add_argument(
+        "--bulk-dir",
+        type=Path,
+        default=None,
+        help="Read *.out / *.cif bulks from this directory instead.",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=OUTPUT_DIR,
+        help=f"Where to write the slabs (default: {OUTPUT_DIR}).",
+    )
     args = parser.parse_args()
     plot = bool(args.plot)
+    output_dir = args.out_dir
 
-    bulk_files, bulk_dir = _discover_bulk_files(quick=args.quick)
+    bulk_files, bulk_dir = _discover_bulk_files(
+        quick=args.quick, bulk_dir=args.bulk_dir
+    )
     if args.quick:
         miller_override = {"CeO2_fluorite": [(1, 1, 1)]}
         thick = 5
@@ -328,18 +373,21 @@ def main():
         miller_override = None
         thick = THICK_LAYERS
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     if not bulk_files:
         print("No bulk inputs found.")
-        print(f"  Looked for *.out in {WORKBULKFILES}")
-        print(f"  Looked for *.cif in {SHIPPED_BULKS}")
+        if args.bulk_dir is not None:
+            print(f"  Looked for *.out / *.cif in {args.bulk_dir}")
+        else:
+            print(f"  Looked for *.out in {WORKBULKFILES}")
+            print(f"  Looked for *.cif in {SHIPPED_BULKS}")
         print("See example/BATCH_SLABS.md for setup instructions.")
         return 1
 
     print(f"Processing {len(bulk_files)} bulk file(s) from {bulk_dir}")
     print(f"Workflow: generate_slabs_for_miller (thick={thick}) -> cutslab")
-    print(f"Output directory: {OUTPUT_DIR}")
+    print(f"Output directory: {output_dir}")
     print()
 
     total_slabs = 0
@@ -347,23 +395,23 @@ def main():
 
     for bulk_path in bulk_files:
         stem = bulk_path.stem
-        try:
-            if miller_override and stem in miller_override:
-                millers = miller_override[stem]
+        if miller_override and stem in miller_override:
+            millers = miller_override[stem]
+        else:
+            crystal = get_crystal_type(stem)
+            if crystal is None:
+                print(f"{stem}: crystal type not listed, using DEFAULT_MILLERS")
+                millers = DEFAULT_MILLERS
             else:
-                crystal = get_crystal_type(stem)
                 millers = MILLER_BY_CRYSTAL[crystal]
-        except (KeyError, ValueError) as exc:
-            errors.append((stem, str(exc)))
-            continue
 
         try:
             bulk = read(bulk_path.as_posix())
+            _ensure_charges_for_atoms(CHARGES, bulk)
         except Exception as exc:
-            errors.append((stem, f"Read failed: {exc}"))
+            errors.append((stem, str(exc)))
             continue
 
-        _ensure_charges_for_atoms(CHARGES, bulk)
         reduced_counts = _bulk_reduced_counts(bulk, CHARGES)
 
         for miller in millers:
@@ -373,7 +421,7 @@ def main():
                     stem,
                     miller,
                     thick,
-                    OUTPUT_DIR,
+                    output_dir,
                     reduced_counts,
                     plot=plot,
                 )
@@ -383,7 +431,7 @@ def main():
             except Exception as exc:
                 errors.append((f"{stem} {miller}", str(exc)))
 
-    print(f"Generated {total_slabs} slab files in {OUTPUT_DIR}")
+    print(f"Generated {total_slabs} slab files in {output_dir}")
     if errors:
         print(f"\nErrors ({len(errors)}):")
         for item, msg in errors:

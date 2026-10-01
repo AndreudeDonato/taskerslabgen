@@ -248,6 +248,18 @@ raise.
   adjacency against a thick-slab reference, plane-label invariance and
   genslab/cutslab label agreement, error messages, no ASE ``FutureWarning``.
 
+### Examples
+- New ``example/relaxed_cutslab.py``: ``cutslab(bulk_atoms=...)`` on a
+  relaxed slab (synthetic, or your own via ``--slab/--bulk``).
+- ``batch_unitcell_slabs.py``: one ``plane_tol`` for genslab and cutslab
+  (the library default, with per-facet overrides in ``PLANE_TOL``); the old
+  0.005 / 0.05 Å pair split noisy planes of relaxed bulks and gave short
+  thickness series.  Runs the shipped albite CIF, falls back to
+  ``DEFAULT_MILLERS`` for unlisted crystal types, and takes ``--bulk-dir`` /
+  ``--out-dir``.
+- The examples use the default ``plane_tol``/``dipole_tol``, print broken
+  bonds (and Tasker III multiplicity), and are quiet unless ``--verbose``.
+
 ## 0.3.1
 
 ### Plane naming

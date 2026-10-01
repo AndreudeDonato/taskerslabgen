@@ -42,6 +42,7 @@ def main(argv=None):
     bulk = read(bulk_path.as_posix())
     stem = bulk_path.stem
 
+    # (001): keep the O-terminated reconstruction (see CeO2_fluorite.py).
     plane = [None, "O"]
     for i, miller in enumerate(millers):
         hkl_str = "".join(str(x) for x in miller)
@@ -58,6 +59,7 @@ def main(argv=None):
             vacuum=15.0,
             plot=args.plot,
             plot_out_dir=output_dir.as_posix(),
+            # Count only Ce-O bonds (covalent radii would also count Ce-Ce).
             bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35},
             prefer_plane=plane[i],
             candidates="best",
@@ -81,12 +83,10 @@ def main(argv=None):
             input_structure=thick_slab,
             charges=charges,
             axis=2,
-            dipole_tol=1e-1,
             plot=args.plot,
             plot_out_dir=output_dir.as_posix(),
             cut_at="termination",
             reconstruction=term.get("reconstruction"),
-            plane_tol=0.05,
             vacuum=15.0,
             cuts="right",
         )
