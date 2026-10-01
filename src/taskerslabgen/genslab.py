@@ -119,6 +119,7 @@ def generate_slabs_for_miller(
     candidates="best",
     savecandidates=False,
     surface_supercell=None,
+    max_masks=200000,
 ):
     """
     Generate non-polar slabs for one or more Miller indices.
@@ -200,6 +201,10 @@ def generate_slabs_for_miller(
         meaning of the Miller index unless the normal is along c).  Plane
         labels then count the atoms of the supercell (``O16`` for four
         ``O4`` cells).
+    max_masks : int
+        Largest number of Tasker III deletion patterns to enumerate before
+        symmetry reduction (default 200000); larger surface cells raise a
+        ``ValueError`` instead of running for hours.
 
     Returns
     -------
@@ -221,7 +226,11 @@ def generate_slabs_for_miller(
         - ``"candidate"`` -- raw scoring dict (Tasker I/II: includes
           ``broken_bonds`` per surface cell, ``broken_bonds_by_pair``
           (e.g. ``{"Ce-O": 8, "Ce-Ce": 12}``) and ``surface_density`` in
-          atoms/Å²; IDs are in rank order, ID 0 = best)
+          atoms/Å²; Tasker III: ``bond_score``, ``distribution_score``,
+          ``multiplicity`` (number of symmetry-equivalent deletion patterns
+          it stands for), ...).  IDs are in rank order (ID 0 = best) and
+          each ID is a distinct termination: symmetry-equivalent Tasker III
+          patterns are reported once.
 
         Every slab is checked to be stoichiometric, neutral and non-polar;
         a :class:`SlabValidationError` is raised otherwise.  A ``ValueError``
@@ -240,7 +249,7 @@ def generate_slabs_for_miller(
             plane_tol, charge_tol, dipole_tol, vacuum,
             plot, plot_out_dir, verbose,
             bond_threshold, bond_distances,
-            prefer_plane, candidates, savecandidates, surface_supercell,
+            prefer_plane, candidates, savecandidates, surface_supercell, max_masks,
         )
 
     return result
@@ -251,7 +260,7 @@ def _generate_for_one_miller(
     plane_tol, charge_tol, dipole_tol, vacuum,
     plot, plot_out_dir, verbose,
     bond_threshold, bond_distances,
-    prefer_plane, candidates, savecandidates, surface_supercell=None,
+    prefer_plane, candidates, savecandidates, surface_supercell=None, max_masks=200000,
 ):
     h, k, l = miller
 
@@ -334,7 +343,7 @@ def _generate_for_one_miller(
         vacuum, plane_tol, charge_tol,
         plot, plot_out_dir, verbose,
         bond_threshold, bond_distances,
-        prefer_plane, candidates, savecandidates, validation,
+        prefer_plane, candidates, savecandidates, validation, max_masks,
     )
 
 
@@ -468,7 +477,7 @@ def _tasker3_path(
     vacuum, plane_tol, charge_tol,
     plot, plot_out_dir, verbose,
     bond_threshold, bond_distances,
-    prefer_plane, candidates_mode, savecandidates, validation,
+    prefer_plane, candidates_mode, savecandidates, validation, max_masks=200000,
 ):
     from .plotting import plot_unitcell_atoms
     from .tasker3 import (
@@ -498,7 +507,7 @@ def _tasker3_path(
         charge_tol=charge_tol, verbose=verbose,
         plane_names=plane_names, dipole_tol=validation["dipole_tol"],
         bulk_atoms=bulk_atoms, miller=miller, bond_threshold=bond_threshold,
-        min_layers=min(layer_thickness_list),
+        min_layers=min(layer_thickness_list), max_masks=max_masks,
     )
     t3_candidates = _select_tasker3_candidates(
         t3_candidates, out_miller, validation["dipole_tol"], charge_tol

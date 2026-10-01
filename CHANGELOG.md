@@ -209,6 +209,19 @@ raise.
   stoichiometric, neutral slabs; regression test added
   (``bulk_files/TiO2_anatase.cif``).
 
+### Symmetry-distinct Tasker III terminations (C7, M7)
+- Deletion patterns related by a symmetry operation of the crystal that
+  keeps the stacking direction (in-plane rotations and mirrors,
+  translations including centring, screw axes) give the same slab; only
+  one per set is scored, and ``candidate["multiplicity"]`` counts the set.
+  Equivalent planes of the cell are merged too.  Tasker III IDs are now
+  distinct terminations (CeO₂ (001): 3 instead of 16; a 2×2 cell: 255
+  instead of 25 880 patterns scored).  The reduction keeps every distinct
+  score (checked against full enumeration).
+- ``max_masks`` (default 200 000) on ``generate_slabs_for_miller``,
+  ``reconstruct_tasker_iii`` and ``find_tasker3_candidates`` raises before
+  enumerating more patterns than that.
+
 ### Compatibility
 - ``ase.build.surface`` is no longer called with ``vacuum=0`` (deprecated in
   ASE 3.29, slated to raise); ``build_surface`` without vacuum keeps atom

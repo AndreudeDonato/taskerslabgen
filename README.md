@@ -169,6 +169,7 @@ result = generate_slabs_for_miller(
     candidates="best",
     savecandidates=False,
     surface_supercell=None,
+    max_masks=200000,
 )
 ```
 
@@ -197,6 +198,7 @@ classifies each surface as Tasker I/II (zero dipole) or Tasker III
 | `prefer_plane` | see below | `None` | Plane-type filter applied before candidate selection. |
 | `candidates` | `str` | `"best"` | `"best"` or `"all"` (see below). |
 | `savecandidates` | `bool` | `False` | Save all valid candidates to an extxyz file. |
+| `max_masks` | `int` | `200000` | Largest number of Tasker III deletion patterns to enumerate (before symmetry reduction); above it a `ValueError` is raised instead of running for hours. |
 | `surface_supercell` | `(n1, n2)` or `None` | `None` | Repeat the surface cell in-plane before cutting (e.g. a Tasker III plane with an odd excess per surface).  Keeps the facet, unlike `bulk_atoms * (2, 2, 1)`.  Labels then count supercell atoms. |
 
 **`bond_distances` format**
@@ -237,7 +239,7 @@ bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
 
 | Value | Behaviour |
 |---|---|
-| `"best"` | Return only the single best candidate per Miller index. Tasker I/II: fewest bulk bonds broken at the cut, then densest surface planes (`candidate["broken_bonds"]`, `candidate["broken_bonds_by_pair"]`, `candidate["surface_density"]`); IDs follow this ranking. Tasker III: candidates must stay neutral and non-polar for every thickness from the thinnest requested one up; ranked by `bond_score` (bulk bonds the slab's atoms lose at both surfaces), then `distribution_score`; IDs follow this ranking. |
+| `"best"` | Return only the single best candidate per Miller index. Tasker I/II: fewest bulk bonds broken at the cut, then densest surface planes (`candidate["broken_bonds"]`, `candidate["broken_bonds_by_pair"]`, `candidate["surface_density"]`); IDs follow this ranking. Tasker III: candidates must stay neutral and non-polar for every thickness from the thinnest requested one up; ranked by `bond_score` (bulk bonds the slab's atoms lose at both surfaces), then `distribution_score`; IDs follow this ranking.  Deletion patterns related by a symmetry of the crystal that keeps the stacking direction are one termination (`candidate["multiplicity"]` counts them). |
 | `"all"` | Return every valid candidate, generating a separate plot for each. |
 
 **Returns**

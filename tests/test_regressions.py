@@ -1083,3 +1083,55 @@ def test_cutslab_reconstruction_with_supercell_bulk():
     assert [s.get_chemical_formula() for s in subs] == [f"Ce{8 * m}O{16 * m}" for m in range(1, 9)]
     for s in subs:
         _assert_valid_slab(s, Q_CEO2, _reduced(CEO2))
+
+
+# ------------------------------------------------------------------
+# C7 + M7: symmetry-equivalent Tasker III patterns are one termination
+# ------------------------------------------------------------------
+def test_symmetry_equivalent_patterns_are_one_termination():
+    """CeO2 (001): 16 deletion patterns, 3 distinct terminations (O4
+    checkerboard, O4 rows, half Ce plane); the two O4 planes of the
+    conventional cell are related by an FCC translation."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    res = generate_slabs_for_miller(CEO2, Q_CEO2, (0, 0, 1), [2], candidates="all")
+    terms = res[(0, 0, 1)]
+    assert sorted(t["plane_type"] for t in terms.values()) == ["Ce2-recon", "O4-recon", "O4-recon"]
+    assert sum(t["candidate"]["multiplicity"] for t in terms.values()) == 16
+    assert sorted(terms) == list(range(len(terms)))
+
+
+def test_symmetry_reduction_keeps_the_scores():
+    """Every distinct score of the full enumeration survives the reduction."""
+    import taskerslabgen.tasker3 as t3
+    from taskerslabgen import assign_plane_names, build_surface, compute_projection, compute_reduced_counts, identify_planes
+
+    def candidates(identity_only):
+        surf = build_surface(MGO, (1, 1, 1), layers=1)
+        atoms_z, L = compute_projection(MGO, surf, Q_MGO, (1, 1, 1))
+        planes = sorted(identify_planes(atoms_z, L), key=lambda p: p["z_center"])
+        names, _ = assign_plane_names(planes, atoms=surf)
+        original = t3._stacking_symmetry
+        if identity_only:
+            t3._stacking_symmetry = lambda numbers, *a, **k: [np.arange(len(numbers))]
+        try:
+            return t3.find_tasker3_candidates(planes, atoms_z, compute_reduced_counts(atoms_z), None, L,
+                                              surf_bulk=surf, plane_names=names, bulk_atoms=MGO,
+                                              miller=(1, 1, 1))
+        finally:
+            t3._stacking_symmetry = original
+
+    def scores(cands):
+        return {(c["recon_label"], c["bond_score"], round(c["distribution_score"], 6)) for c in cands}
+
+    full, reduced = candidates(True), candidates(False)
+    assert len(full) == 12 and len(reduced) == 2
+    assert scores(full) == scores(reduced)
+    assert sum(c["multiplicity"] for c in reduced) == len(full)
+
+
+def test_max_masks_guard():
+    from taskerslabgen import generate_slabs_for_miller
+
+    with pytest.raises(ValueError, match="max_masks"):
+        generate_slabs_for_miller(CEO2, Q_CEO2, (0, 0, 1), [2], max_masks=10)

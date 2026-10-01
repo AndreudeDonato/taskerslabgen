@@ -1,5 +1,6 @@
 import numpy as np
-from itertools import combinations
+from itertools import combinations, product
+from math import comb
 
 from ase import Atoms
 from ase.data import atomic_numbers, covalent_radii, chemical_symbols
@@ -208,6 +209,89 @@ def _compute_plane_excess(plane_counts, reduced_counts):
             return excess, j
 
     return None, None
+
+
+def _gauss_reduce_basis(cell2d):
+    """Integer unimodular ``P`` such that ``P @ cell2d`` is a Lagrange-Gauss reduced basis."""
+    P = np.eye(2, dtype=int)
+    B = np.array(cell2d, dtype=float)
+    for _ in range(100):
+        if np.dot(B[1], B[1]) < np.dot(B[0], B[0]):
+            B = B[::-1].copy()
+            P = P[::-1].copy()
+        mu = int(np.round(np.dot(B[0], B[1]) / np.dot(B[0], B[0])))
+        if mu == 0:
+            break
+        B[1] -= mu * B[0]
+        P[1] -= mu * P[0]
+    return P
+
+
+def _lattice_point_ops(cell2d, tol=1e-3):
+    """
+    Point-group operations of the 2D lattice with basis rows *cell2d*, as
+    integer matrices ``W`` with ``W @ cell2d`` the rotated basis: 8 for a
+    square lattice, 12 hexagonal, 4 (centred) rectangular, 2 oblique.
+    """
+    P = _gauss_reduce_basis(cell2d)
+    P_inv = np.round(np.linalg.inv(P)).astype(int)
+    reduced = P @ np.asarray(cell2d, dtype=float)
+    G = reduced @ reduced.T
+    atol = tol * float(np.max(np.abs(G)))
+    ops = []
+    for entries in product((-1, 0, 1), repeat=4):
+        W = np.array(entries, dtype=int).reshape(2, 2)
+        if abs(round(np.linalg.det(W))) != 1:
+            continue
+        if np.allclose(W @ G @ W.T, G, atol=atol):
+            ops.append(P_inv @ W @ P)
+    return ops
+
+
+def _stacking_symmetry(numbers, positions, cell, tol=0.1):
+    """
+    Atom permutations of the symmetry operations of a crystal that keep the
+    stacking direction (in-plane rotation or mirror, any translation, z only
+    shifted).
+
+    *positions* and the true lattice *cell* (rows ``a1``, ``a2`` in-plane,
+    ``a3``) describe one bulk repeat unit, e.g. the one-layer cell of
+    :func:`build_surface` with :func:`surface_bulk_cell`.  Returns a list of
+    arrays ``perm`` (``perm[a]`` is the image of atom ``a``), identity first.
+    """
+    cell = np.asarray(cell, dtype=float)
+    numbers = np.asarray(numbers)
+    frac = np.asarray(positions, dtype=float) @ np.linalg.inv(cell)
+    cell2d = cell[:2, :2]
+    inv2d = np.linalg.inv(cell2d)
+    species, counts = np.unique(numbers, return_counts=True)
+    anchor = int(np.flatnonzero(numbers == species[np.argmin(counts)])[0])
+    perms = [np.arange(len(numbers))]
+    seen = {tuple(perms[0])}
+    for W in _lattice_point_ops(cell2d):
+        # In-plane rotation R (Cartesian): cell2d @ R.T = W @ cell2d.  It is a
+        # lattice operation only if it moves a3 by an in-plane lattice vector.
+        RT = inv2d @ W @ cell2d
+        k = (cell[2, :2] @ RT - cell[2, :2]) @ inv2d
+        if not np.allclose(k, np.round(k), atol=1e-3):
+            continue
+        W3 = np.eye(3)
+        W3[:2, :2] = W
+        W3[2, :2] = np.round(k)
+        rotated = frac @ W3
+        for b in np.flatnonzero(numbers == numbers[anchor]):
+            t = frac[b] - rotated[anchor]
+            d = (rotated + t)[:, None, :] - frac[None, :, :]
+            d -= np.round(d)
+            dist = np.linalg.norm(d @ cell, axis=-1)
+            dist[numbers[:, None] != numbers[None, :]] = np.inf
+            perm = np.argmin(dist, axis=1)
+            if dist[np.arange(len(perm)), perm].max() > tol or len(set(perm)) != len(perm):
+                continue
+            if tuple(perm) not in seen:
+                seen.add(tuple(perm))
+                perms.append(perm)
+    return perms
 
 
 def _enumerate_deletion_masks(plane_indices, atoms_z_matrix, excess):
@@ -422,6 +506,7 @@ def find_tasker3_candidates(
     miller=None,
     bond_threshold=(0.85, 1.15),
     min_layers=1,
+    max_masks=200000,
 ):
     """
     Enumerate and score Tasker III reconstruction candidates.
@@ -439,6 +524,12 @@ def find_tasker3_candidates(
       the true bulk lattice (needs *bulk_atoms* and *miller*);
     - **distribution score** of the kept atoms of the surface plane (see
       :func:`_compute_distribution_score`).
+
+    Patterns related by a symmetry operation of the crystal that keeps the
+    stacking direction (in-plane rotations and mirrors, translations,
+    screw axes) give the same slab up to that operation; only one of each
+    set is scored, and its ``multiplicity`` is the size of the set.  This
+    also merges symmetry-equivalent planes of the cell.
 
     Parameters
     ----------
@@ -482,6 +573,10 @@ def find_tasker3_candidates(
         ``(lo, hi)`` scaling of the reference bond distances.
     min_layers : int
         Thinnest slab (repeat units) the candidate must be valid for.
+    max_masks : int
+        Largest number of deletion patterns (before symmetry reduction) to
+        enumerate; above it a ``ValueError`` is raised instead of running
+        for a very long time.
 
     Returns
     -------
@@ -494,7 +589,7 @@ def find_tasker3_candidates(
         *min_layers* slab), ``dipole_per_fu`` and ``charge_per_fu`` (largest
         over thicknesses), ``is_neutral``, ``is_valid``, ``bond_score``
         (``broken_top + broken_bottom``), ``distribution_score``,
-        ``plane_counts`` and more.  Invalid candidates are kept so they can
+        ``multiplicity``, ``plane_counts`` and more.  Invalid candidates are kept so they can
         be inspected; callers that build slabs keep the valid ones.
     """
     n = len(planes_sorted)
@@ -506,6 +601,7 @@ def find_tasker3_candidates(
 
     bonds = None
     dists = None
+    perms = None
     numbers = atoms_z_matrix[:, 0].astype(int)
     if surf_bulk is not None:
         cell = surface_bulk_cell(bulk_atoms, miller) if bulk_atoms is not None else surf_bulk.cell
@@ -514,19 +610,53 @@ def find_tasker3_candidates(
         bi, bj, D = _bond_pairs(periodic, bond_threshold, bond_distances)
         bonds = (bi, bj, D[:, 2])
         dists = surf_bulk.get_all_distances(mic=True)
+        perms = _stacking_symmetry(surf_bulk.numbers, surf_bulk.positions, cell)
 
-    plane_masks = []
+    # Number of patterns before enumerating them: the count is combinatorial
+    # in the size of the surface cell.
+    plane_excess = []
     total = 0
     for i, plane in enumerate(planes_sorted):
         excess, k = _compute_plane_excess(plane["counts"], reduced_counts)
         if excess is None or all(v == 0 for v in excess.values()):
             continue
-        masks = _enumerate_deletion_masks(plane["indices"], atoms_z_matrix, excess)
+        n_masks = 1
+        for Z, n_del in excess.items():
+            n_masks *= comb(plane["counts"].get(Z, 0), n_del)
+        plane_excess.append((i, excess, k))
+        total += n_masks
+    if total > max_masks:
+        raise ValueError(
+            f"{total} Tasker III deletion patterns to enumerate (max_masks={max_masks}); "
+            "use a smaller surface cell, or raise max_masks if you mean it."
+        )
+
+    plane_of = np.full(len(atoms_z_matrix), -1)
+    for i, plane in enumerate(planes_sorted):
+        plane_of[plane["indices"]] = i
+
+    def orbit(i, mask):
+        """Symmetry images (plane, sorted mask) of a pattern, or None if a
+        smaller image exists (so the pattern is not its set's representative)."""
+        key = (i, tuple(sorted(int(a) for a in mask)))
+        images = {key}
+        for perm in perms or ():
+            image = perm[list(mask)]
+            other = (int(plane_of[image[0]]), tuple(sorted(int(a) for a in image)))
+            if other < key:
+                return None
+            images.add(other)
+        return images
+
+    plane_masks = []
+    for i, excess, k in plane_excess:
+        masks = []
+        for mask in _enumerate_deletion_masks(planes_sorted[i]["indices"], atoms_z_matrix, excess):
+            images = orbit(i, mask)
+            if images is not None:
+                masks.append((mask, len(images)))
         if masks:
             plane_masks.append((i, excess, k, masks))
-            total += len(masks)
-    if total > 10000 and verbose:
-        print(f"WARNING: {total} Tasker III deletion patterns to evaluate. This may take a while.")
 
     candidates = []
     for i, excess, k, masks in plane_masks:
@@ -542,7 +672,7 @@ def find_tasker3_candidates(
         matches = _prefer_matches(prefer_plane, label, plane["counts"])
         plane_charge = float(q[plane["indices"]].sum())
 
-        for mask in masks:
+        for mask, multiplicity in masks:
             mu, total_q, dipole_per_fu, charge_per_fu = _tasker3_slab_moments(
                 q, r_bot, plane["indices"], mask, L, atoms_per_fu, min_layers
             )
@@ -578,6 +708,7 @@ def find_tasker3_candidates(
                 "is_valid": is_neutral and dipole_per_fu <= dipole_tol,
                 "q_recon": plane_charge - float(q[list(mask)].sum()),
                 "distribution_score": dist_score,
+                "multiplicity": multiplicity,
                 "matches_prefer_plane": matches,
             })
 
@@ -805,6 +936,7 @@ def reconstruct_tasker_iii(
     bond_distances=None,
     prefer_plane=None,
     surface_supercell=None,
+    max_masks=200000,
 ):
     """
     Standalone Tasker III reconstruction pipeline.
@@ -851,6 +983,9 @@ def reconstruct_tasker_iii(
     surface_supercell : tuple of int or None
         ``(n1, n2)`` in-plane repetition of the surface cell (see
         :func:`generate_slabs_for_miller`).
+    max_masks : int
+        Largest number of deletion patterns to enumerate (see
+        :func:`find_tasker3_candidates`).
 
     Returns
     -------
@@ -904,7 +1039,7 @@ def reconstruct_tasker_iii(
         prefer_plane=prefer_plane,
         plane_names=plane_names, dipole_tol=dipole_tol,
         bulk_atoms=bulk, miller=miller, bond_threshold=bond_threshold,
-        min_layers=min(layer_thickness_list),
+        min_layers=min(layer_thickness_list), max_masks=max_masks,
     )
     best = _select_tasker3_candidates(candidates, out_miller, dipole_tol, charge_tol)[0]
     if verbose:
