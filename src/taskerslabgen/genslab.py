@@ -1,4 +1,6 @@
-from dataclasses import dataclass
+import math
+import warnings
+from dataclasses import dataclass, replace
 
 import numpy as np
 from ase import Atoms
@@ -6,6 +8,7 @@ from ase.data import atomic_numbers, chemical_symbols
 from ase.io import write
 
 from .core import (
+    PolarSurfaceError,
     _INDEX_KEY,
     _charges_to_list,
     _finalize_slab,
@@ -122,6 +125,7 @@ def generate_slabs_for_miller(
     savecandidates=False,
     surface_supercell=None,
     max_masks=200000,
+    dipole_tol_max=None,
 ):
     """
     Generate non-polar slabs for one or more Miller indices.
@@ -207,6 +211,15 @@ def generate_slabs_for_miller(
         Largest number of Tasker III deletion patterns to enumerate before
         symmetry reduction (default 200000); larger surface cells raise a
         ``ValueError`` instead of running for hours.
+    dipole_tol_max : float or None
+        Opt-in fallback for slightly distorted bulks (e.g. relaxed ones that
+        lost a symmetry).  When no termination or reconstruction of a facet
+        is non-polar within *dipole_tol*, generate the facet again with the
+        smallest tolerance that gives a slab (rounded up), if it is at most
+        *dipole_tol_max*, and warn.  Facets that succeed with *dipole_tol*
+        are not affected.  ``None`` (default) raises
+        :class:`~taskerslabgen.PolarSurfaceError` instead.  Genuinely polar
+        facets need ~1-6 e·Å per formula unit, so keep it below ~1.
 
     Returns
     -------
@@ -225,6 +238,10 @@ def generate_slabs_for_miller(
           ``cut_at="termination"``)
         - ``"plane_counts"`` -- element composition of the cut plane
         - ``"reconstruction"`` -- reconstruction metadata (or None)
+        - ``"dipole_tol"`` -- the dipole tolerance the slabs were built and
+          checked with: *dipole_tol*, or the larger one used by the
+          *dipole_tol_max* fallback.  Pass it to :func:`cutslab` to cut
+          the same slab
         - ``"candidate"`` -- raw scoring dict (Tasker I/II: includes
           ``broken_bonds`` per surface cell, ``broken_bonds_by_pair``
           (e.g. ``{"Ce-O": 8, "Ce-Ce": 12}``) and ``surface_density`` in
@@ -236,10 +253,15 @@ def generate_slabs_for_miller(
 
         Every slab is checked to be stoichiometric, neutral and non-polar;
         a :class:`SlabValidationError` is raised otherwise.  A ``ValueError``
-        explains when no non-polar reconstruction exists.
+        explains when no non-polar reconstruction exists
+        (:class:`PolarSurfaceError` when the dipole is what fails).
     """
     if candidates not in ("best", "all"):
         raise ValueError(f"candidates must be 'best' or 'all', got {candidates!r}")
+    if dipole_tol_max is not None and dipole_tol_max < dipole_tol:
+        raise ValueError(
+            f"dipole_tol_max ({dipole_tol_max}) must be at least dipole_tol ({dipole_tol})."
+        )
 
     if isinstance(millers, tuple) and len(millers) == 3 and all(isinstance(x, (int, float)) for x in millers):
         millers = [millers]
@@ -250,13 +272,48 @@ def generate_slabs_for_miller(
         plot_out_dir=plot_out_dir, verbose=verbose, bond_threshold=bond_threshold,
         bond_distances=bond_distances, max_masks=max_masks,
     )
-    return {
-        tuple(miller): _generate_for_one_miller(
-            bulk_atoms, charges, tuple(miller), opts, prefer_plane, candidates,
-            savecandidates, surface_supercell,
+    # A plain loop: the fallback's warning points at the caller (stacklevel=3).
+    results = {}
+    for miller in millers:
+        results[tuple(miller)] = _generate_with_dipole_fallback(
+            bulk_atoms, charges, tuple(miller), opts, dipole_tol_max, prefer_plane,
+            candidates, savecandidates, surface_supercell,
         )
-        for miller in millers
-    }
+    return results
+
+
+def _round_up(x, digits=2):
+    """*x* rounded up to *digits* significant digits."""
+    step = 10.0 ** (math.floor(math.log10(x)) - digits + 1)
+    return round(math.ceil(x / step - 1e-9) * step, 12)
+
+
+def _generate_with_dipole_fallback(bulk_atoms, charges, miller, opts, dipole_tol_max, *args):
+    """
+    :func:`_generate_for_one_miller`, retried once with the smallest
+    dipole tolerance that gives a slab when *dipole_tol_max* allows it.
+    Records the tolerance used as ``info["dipole_tol"]``.
+    """
+    try:
+        result = _generate_for_one_miller(bulk_atoms, charges, miller, opts, *args)
+    except PolarSurfaceError as exc:
+        needed = _round_up(exc.min_dipole_per_fu * 1.02)
+        if dipole_tol_max is None or needed > dipole_tol_max:
+            raise
+        warnings.warn(
+            f"{opts.bulk_name} {miller}: no slab is non-polar within "
+            f"dipole_tol={opts.dipole_tol} (the least polar has "
+            f"{exc.min_dipole_per_fu:.3g} e*A per formula unit); built with "
+            f"dipole_tol={needed}.  Check the bulk's symmetry, and cut these "
+            "slabs with cutslab(dipole_tol=info['dipole_tol']).",
+            UserWarning,
+            stacklevel=3,
+        )
+        opts = replace(opts, dipole_tol=needed)
+        result = _generate_for_one_miller(bulk_atoms, charges, miller, opts, *args)
+    for info in result.values():
+        info["dipole_tol"] = opts.dipole_tol
+    return result
 
 
 @dataclass(frozen=True)
@@ -380,7 +437,12 @@ def _generate_for_one_miller(bulk_atoms, charges, miller, opts, prefer_plane, ca
             f"No Tasker I/II plane found for miller=({h},{k},{l}) "
             f"on {opts.bulk_name}. Reconstructing Tasker III slab."
         )
-    return _tasker3_path(facet, opts, prefer_plane, candidates, savecandidates)
+    try:
+        return _tasker3_path(facet, opts, prefer_plane, candidates, savecandidates)
+    except PolarSurfaceError as exc:
+        # The least polar Tasker I/II cut may beat every reconstruction.
+        exc.min_dipole_per_fu = min(exc.min_dipole_per_fu, best_seq["dipole_per_fu"])
+        raise
 
 
 def _select(terminations, prefer_plane, candidates_mode):

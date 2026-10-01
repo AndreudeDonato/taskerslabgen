@@ -180,6 +180,7 @@ result = generate_slabs_for_miller(
     savecandidates=False,
     surface_supercell=None,
     max_masks=200000,
+    dipole_tol_max=None,
 )
 ```
 
@@ -210,6 +211,7 @@ classifies each surface as Tasker I/II (zero dipole) or Tasker III
 | `savecandidates` | `bool` | `False` | Save all valid candidates to an extxyz file. |
 | `max_masks` | `int` | `200000` | Largest number of Tasker III deletion patterns to enumerate (before symmetry reduction); above it a `ValueError` is raised instead of running for hours. |
 | `surface_supercell` | `(n1, n2)` or `None` | `None` | Repeat the surface cell in-plane before cutting (e.g. a Tasker III plane with an odd excess per surface).  Keeps the facet, unlike `bulk_atoms * (2, 2, 1)`.  Labels then count supercell atoms. |
+| `dipole_tol_max` | `float` or `None` | `None` | Opt-in fallback for slightly distorted (e.g. relaxed) bulks: when no slab of a facet is non-polar within `dipole_tol`, rebuild it with the smallest tolerance that works, up to this cap, and warn.  Facets that succeed are unaffected; the tolerance used is returned as `info["dipole_tol"]` (pass it to `cutslab`).  `None` raises `PolarSurfaceError`. |
 
 **`bond_distances` format**
 
@@ -264,6 +266,7 @@ Each `info_dict` contains:
 - `"plane_counts"` — `{atomic_number: count}` composition of the cut plane
 - `"reconstruction"` — reconstruction metadata dict (Tasker III; JSON-serialisable, pass it to `cutslab(reconstruction=...)`) or `None`
 - `"candidate"` — raw scoring dict with dipole, bond score, etc.
+- `"dipole_tol"` — the dipole tolerance the slabs were built and checked with (`dipole_tol`, or larger after the `dipole_tol_max` fallback)
 
 Each `Atoms` object carries metadata in `.info`:
 - `"bulk_name"` — the `bulk_name` parameter

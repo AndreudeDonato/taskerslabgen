@@ -9,6 +9,7 @@ from ase.data import atomic_numbers, covalent_radii, chemical_symbols
 from ase.neighborlist import neighbor_list
 
 from .core import (
+    PolarSurfaceError,
     _formula_label,
     apply_vacuum_to_slab,
     build_surface,
@@ -749,7 +750,8 @@ def _select_tasker3_candidates(candidates, miller, dipole_tol, charge_tol):
     """
     Keep the Tasker III candidates that give neutral, non-polar slabs.
 
-    Raises ``ValueError`` with an explanation when there are none.
+    Raises ``ValueError`` with an explanation when there are none
+    (:class:`PolarSurfaceError` when only the dipole is too large).
     """
     if not candidates:
         raise ValueError(
@@ -773,13 +775,16 @@ def _select_tasker3_candidates(candidates, miller, dipole_tol, charge_tol):
             "the bulk cell; computed charges may need a larger charge_tol."
         )
     best = min(neutral, key=lambda c: c["dipole_per_fu"])
-    raise ValueError(
+    raise PolarSurfaceError(
         f"No non-polar Tasker III reconstruction found for {tuple(miller)}: "
         "removing atoms symmetrically from one plane type leaves a dipole of "
         f"at least {best['dipole_per_fu']:.4g} e*A per formula unit "
         f"(dipole_tol={dipole_tol}). "
         "This stacking needs different reconstructions on the two surfaces, "
-        "which taskerslabgen does not build."
+        "which taskerslabgen does not build.  If the bulk is only slightly "
+        "distorted (e.g. relaxed), generate_slabs_for_miller(dipole_tol_max=...) "
+        "retries with the smallest tolerance that gives a slab.",
+        best["dipole_per_fu"],
     )
 
 

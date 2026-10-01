@@ -233,10 +233,11 @@ def test_every_generated_slab_is_valid(atoms, charges, hkl, kwargs):
 
 def test_polar_reconstruction_is_rejected_not_returned():
     """Wurtzite (0001) cannot be fixed by symmetric deletion from one plane type."""
-    from taskerslabgen import generate_slabs_for_miller
+    from taskerslabgen import PolarSurfaceError, generate_slabs_for_miller
 
-    with pytest.raises(ValueError, match="(?i)dipole"):
+    with pytest.raises(PolarSurfaceError, match="(?i)dipole") as err:
         generate_slabs_for_miller(ZNO * (2, 2, 1), Q_ZNO, (0, 0, 1), [2])
+    assert err.value.min_dipole_per_fu > 1.0  # genuinely polar
 
 
 def test_odd_excess_error_suggests_supercell():
@@ -1164,3 +1165,70 @@ def test_public_api_and_deprecated_names(ceo2_111_slab):
         taskerslabgen.extract_termination
     with pytest.warns(DeprecationWarning, match="bond_threshold"):
         taskerslabgen.cutslab(ceo2_111_slab, Q_CEO2, bond_threshold=(0.8, 1.2))
+
+
+# ------------------------------------------------------------------
+# dipole_tol_max: opt-in fallback for slightly distorted bulks
+# ------------------------------------------------------------------
+def _distorted_iro2(shift=0.05):
+    """IrO2 with one Ir moved along a: (110) becomes slightly polar
+    (least polar slab ~0.07 e*A per formula unit)."""
+    b = IRO2.copy()
+    i = [a.index for a in b if a.symbol == "Ir"][0]
+    b.positions[i] += [shift, 0.0, 0.0]
+    return b
+
+
+def test_dipole_tol_max_builds_slightly_polar_facet_with_warning():
+    from taskerslabgen import PolarSurfaceError, cutslab, generate_slabs_for_miller
+
+    b = _distorted_iro2()
+    with pytest.raises(PolarSurfaceError) as err:
+        generate_slabs_for_miller(b, Q_IRO2, (1, 1, 0), [4])
+    needed = err.value.min_dipole_per_fu
+    assert 0.05 < needed < 0.1
+    # A cap below what the facet needs still raises.
+    with pytest.raises(PolarSurfaceError):
+        generate_slabs_for_miller(b, Q_IRO2, (1, 1, 0), [4], dipole_tol_max=0.9 * needed)
+
+    with pytest.warns(UserWarning, match="dipole_tol"):
+        result = generate_slabs_for_miller(b, Q_IRO2, (1, 1, 0), [4], dipole_tol_max=0.2)
+    term = result[(1, 1, 0)][0]
+    assert needed <= term["dipole_tol"] <= 0.2
+    slab = term["atoms"][0]
+    _assert_valid_slab(slab, Q_IRO2, _reduced(b), dipole_per_fu=term["dipole_tol"])
+    # The recorded tolerance lets cutslab cut the same slab.
+    subs = cutslab(slab, Q_IRO2, dipole_tol=term["dipole_tol"], reconstruction=term["reconstruction"])
+    assert len(subs[-1]) == len(slab)
+
+
+def test_dipole_tol_max_leaves_non_polar_facets_alone():
+    """The fallback runs only after a failure: facets that succeed, Tasker III
+    reconstructions included, come out exactly as without it."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    cases = [
+        (CEO2, Q_CEO2, (0, 0, 1), {"bond_distances": BOND_DISTS_CEO2}),
+        (IRO2, Q_IRO2, (1, 1, 0), {}),
+        (IRO2, Q_IRO2, (1, 0, 0), {}),
+    ]
+    for b, q, hkl, kw in cases:
+        ref = generate_slabs_for_miller(b, q, hkl, [2], candidates="all", **kw)[hkl]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            new = generate_slabs_for_miller(
+                b, q, hkl, [2], candidates="all", dipole_tol_max=1.0, **kw
+            )[hkl]
+        assert ref.keys() == new.keys()
+        for tid in ref:
+            assert new[tid]["dipole_tol"] == ref[tid]["dipole_tol"] == 0.05
+            assert new[tid]["plane_type"] == ref[tid]["plane_type"]
+            assert repr(new[tid]["reconstruction"]) == repr(ref[tid]["reconstruction"])
+            np.testing.assert_array_equal(new[tid]["atoms"][0].positions, ref[tid]["atoms"][0].positions)
+
+
+def test_dipole_tol_max_below_dipole_tol_is_rejected():
+    from taskerslabgen import generate_slabs_for_miller
+
+    with pytest.raises(ValueError, match="dipole_tol_max"):
+        generate_slabs_for_miller(IRO2, Q_IRO2, (1, 1, 0), [2], dipole_tol=0.3, dipole_tol_max=0.1)

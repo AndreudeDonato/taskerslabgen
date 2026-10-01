@@ -9,7 +9,8 @@ Workflow
   the same terminations
 - :func:`reconstruct_tasker_iii` — the Tasker III path on its own
 
-Also here: :func:`validate_slab` / :class:`SlabValidationError`, the label
+Also here: :func:`validate_slab` / :class:`SlabValidationError`,
+:class:`PolarSurfaceError`, the label
 helpers :func:`plane_name_matches` / :func:`plane_name_base`, and
 :func:`parse_hirshfeld_fhi_aims`.  Lower-level steps (plane clustering, cut
 enumeration, bonding, Tasker III candidates, builders) are in
@@ -20,7 +21,13 @@ import warnings
 
 from . import advanced
 from .chargeparsers import parse_hirshfeld_fhi_aims
-from .core import SlabValidationError, plane_name_base, plane_name_matches, validate_slab
+from .core import (
+    PolarSurfaceError,
+    SlabValidationError,
+    plane_name_base,
+    plane_name_matches,
+    validate_slab,
+)
 from .genslab import generate_slabs_for_miller
 from .slabcut import cutslab
 from .tasker3 import reconstruct_tasker_iii
@@ -31,6 +38,7 @@ __all__ = [
     "reconstruct_tasker_iii",
     "validate_slab",
     "SlabValidationError",
+    "PolarSurfaceError",
     "plane_name_matches",
     "plane_name_base",
     "parse_hirshfeld_fhi_aims",

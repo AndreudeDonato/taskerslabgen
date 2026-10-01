@@ -98,9 +98,12 @@ All in the top of `batch_unitcell_slabs.py`:
   The default 0.1 Å absorbs relaxation noise; PtO2 marcasite (001) uses
   0.05 Å because its two O planes 0.07 Å apart allow a better Tasker II cut.
 - `DIPOLE_TOL_*` — 0.3 e·Å per formula unit, for relaxed bulks.
+- `DIPOLE_TOL_MAX` — facets with no slab within 0.3 are rebuilt with the
+  smallest tolerance that works, up to 1.0, with a warning; cutslab then uses
+  the same tolerance.
 
-MoO2 forms Mo–Mo dimers, so a rutile-cell MoO2 has no clean planes: some
-facets come out Tasker III or are reported as polar.
+MoO2 forms Mo–Mo dimers, so a rutile-cell MoO2 has no clean planes: (100),
+(010) and (111) need dipole_tol ≈ 0.45 and go through the fallback.
 
 ## Troubleshooting
 

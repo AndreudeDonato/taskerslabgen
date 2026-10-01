@@ -248,6 +248,17 @@ raise.
   adjacency against a thick-slab reference, plane-label invariance and
   genslab/cutslab label agreement, error messages, no ASE ``FutureWarning``.
 
+### Slightly polar facets (``dipole_tol_max``)
+- New opt-in ``generate_slabs_for_miller(dipole_tol_max=...)``: when no slab
+  of a facet is non-polar within ``dipole_tol`` (e.g. a relaxed bulk that
+  lost a symmetry, like dimerised MoO₂), the facet is rebuilt with the
+  smallest tolerance that gives a slab, if it is at most the cap, and a
+  ``UserWarning`` names it.  Facets that succeed are untouched (checked
+  byte-for-byte on 52 facets, Tasker III ones included).  Every termination
+  reports the tolerance used as ``info["dipole_tol"]``, for ``cutslab``.
+- The "no non-polar reconstruction" error is now ``PolarSurfaceError`` (a
+  ``ValueError``) with ``min_dipole_per_fu``, exported at the top level.
+
 ### Examples
 - New ``example/relaxed_cutslab.py``: ``cutslab(bulk_atoms=...)`` on a
   relaxed slab (synthetic, or your own via ``--slab/--bulk``).

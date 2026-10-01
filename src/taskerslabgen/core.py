@@ -22,6 +22,20 @@ class SlabValidationError(ValueError):
     """A generated slab is not stoichiometric, neutral, non-polar and contiguous."""
 
 
+class PolarSurfaceError(ValueError):
+    """
+    No termination or reconstruction of a facet is non-polar within
+    ``dipole_tol``.
+
+    ``min_dipole_per_fu`` is the smallest |dipole| per formula unit (e·Å)
+    that any candidate reaches: the ``dipole_tol`` a slab would need.
+    """
+
+    def __init__(self, message, min_dipole_per_fu):
+        super().__init__(message)
+        self.min_dipole_per_fu = float(min_dipole_per_fu)
+
+
 def _check_miller(miller):
     hkl = tuple(int(round(x)) for x in miller)
     if len(hkl) != 3 or any(abs(x - y) > 1e-9 for x, y in zip(miller, hkl)):

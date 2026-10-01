@@ -127,7 +127,7 @@ PREFER_PLANE = {
 # planes only 0.07 A apart: merged, the facet needs a Tasker III
 # reconstruction; split, it has a better Tasker II cut between them.
 # MoO2 forms Mo-Mo dimers, so a rutile-cell MoO2 has no clean planes for any
-# tolerance; expect Tasker III or polar facets there.
+# tolerance; some facets need the DIPOLE_TOL_MAX fallback below.
 PLANE_TOL = {
     ("PtO2_marcasite", (0, 0, 1)): 0.05,
 }
@@ -148,6 +148,10 @@ OUTPUT_EXT = "in"
 # small symmetry-breaking noise, hence the looser value here.
 DIPOLE_TOL_GENSLAB = 0.3
 DIPOLE_TOL_CUTSLAB = 0.3
+# Facets with no slab within DIPOLE_TOL_GENSLAB are rebuilt with the smallest
+# tolerance that works, up to this cap, with a warning (e.g. dimerised MoO2
+# needs ~0.45).  Genuinely polar facets need ~1-6, so they still fail.
+DIPOLE_TOL_MAX = 1.0
 VERBOSE = False
 
 
@@ -246,6 +250,7 @@ def process_miller(
         bond_distances=bond_distances,
         plane_tol=plane_tol,
         dipole_tol=DIPOLE_TOL_GENSLAB,
+        dipole_tol_max=DIPOLE_TOL_MAX,
         prefer_plane=prefer_plane,
         candidates="best",
     )
@@ -261,13 +266,18 @@ def process_miller(
         f"\n  Thick slab: {len(thick_slab)} atoms, "
         f"Tasker {term['tasker_type']}, plane={term['plane_type']}"
     )
+    # Cut with the tolerance the slab was built with (larger if genslab
+    # needed the DIPOLE_TOL_MAX fallback).
+    dipole_tol_cut = max(DIPOLE_TOL_CUTSLAB, term["dipole_tol"])
+    if term["dipole_tol"] > DIPOLE_TOL_GENSLAB:
+        print(f"  Slightly polar facet: built with dipole_tol={term['dipole_tol']}")
 
     print(f"\n  Cutting thick slab for {miller}...")
     sub_slabs = cutslab(
         input_structure=thick_slab,
         charges=CHARGES,
         axis=2,
-        dipole_tol=DIPOLE_TOL_CUTSLAB,
+        dipole_tol=dipole_tol_cut,
         plot=plot,
         plot_out_dir=output_dir.as_posix(),
         cut_at="termination",
