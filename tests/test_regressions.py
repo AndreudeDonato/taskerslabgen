@@ -400,6 +400,47 @@ def test_cutslab_relaxed_slab_keeps_thick_cuts(ceo2_111_slab):
     assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
 
 
+# ------------------------------------------------------------------
+# N3: best Tasker I/II termination = fewest broken bonds, origin-independent
+# ------------------------------------------------------------------
+ALBITE = read((BULK_DIR / "NaAlSi3O8_albite.cif").as_posix())
+Q_ALBITE = {"Na": 1.0, "Al": 3.0, "Si": 4.0, "O": -2.0}
+
+
+def _srtio3():
+    from ase.spacegroup import crystal
+
+    return crystal(["Sr", "Ti", "O"], [(0, 0, 0), (0.5, 0.5, 0.5), (0.5, 0.5, 0)],
+                   spacegroup=221, cellpar=[3.905] * 3 + [90] * 3)
+
+
+@pytest.mark.parametrize(
+    "atoms, charges, hkl",
+    [(ALBITE, Q_ALBITE, (0, 0, 1)), (_srtio3(), {"Sr": 2.0, "Ti": 4.0, "O": -2.0}, (1, 0, 0)),
+     (IRO2, Q_IRO2, (1, 1, 1))],
+    ids=["albite001", "SrTiO3100", "IrO2111"],
+)
+def test_best_termination_independent_of_bulk_origin(atoms, charges, hkl):
+    from taskerslabgen import generate_slabs_for_miller
+
+    rng = np.random.default_rng(1)
+    best = set()
+    for shift in [np.zeros(3)] + [rng.random(3) for _ in range(5)]:
+        res = generate_slabs_for_miller(_shifted(atoms, shift), charges, hkl, [2])
+        best.add(next(iter(res[hkl].values()))["plane_type"])
+    assert len(best) == 1, f"origin-dependent best termination: {best}"
+
+
+def test_terminations_ranked_by_broken_bonds():
+    from taskerslabgen import generate_slabs_for_miller
+
+    res = generate_slabs_for_miller(ALBITE, Q_ALBITE, (0, 0, 1), [2], candidates="all")
+    ranked = [res[(0, 0, 1)][tid] for tid in sorted(res[(0, 0, 1)])]
+    bonds = [t["candidate"]["broken_bonds"] for t in ranked]
+    assert bonds == sorted(bonds) and bonds[0] < bonds[-1]
+    assert ranked[0]["plane_type"] == "Si"   # the Si cut breaks 4 bonds, the O cut 9
+
+
 def test_no_ase_future_warnings():
     from taskerslabgen import generate_slabs_for_miller
 

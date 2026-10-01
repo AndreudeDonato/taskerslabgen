@@ -71,6 +71,13 @@ raise.
   first.  Polar repeat units are ~1–6 e·Å per formula unit; relaxed
   structures typically need ~0.3.  Sequences carry a new ``dipole_per_fu``
   field, Tasker III candidates too.
+- **Best Tasker I/II termination (N3):** terminations are ranked by bulk
+  bonds broken at the cut (true lattice, same bond rules as Tasker III),
+  then by surface atom density, then by label; ``candidates="all"`` IDs
+  follow the ranking.  The old "first in stacking order" changed with the
+  bulk origin (e.g. albite (001) picked the Si cut for one origin and the
+  O cut for others; the Si cut breaks 4 bonds, the O cut 9).  Candidates
+  report ``broken_bonds`` and ``surface_density``.
 - **Errors (C9):** ``cutslab`` validates ``cuts`` up front; an empty result
   no longer reports "Unknown cuts mode".
 - Single-plane cells: cut midpoints no longer coincide with the plane.

@@ -73,6 +73,19 @@ def build_adjacency_matrix(atoms, bond_threshold=(0.85, 1.15), bond_distances=No
 
     n = len(atoms)
     adj = np.zeros((n, n), dtype=int)
+    i_idx, j_idx, _ = _bond_pairs(atoms, bond_threshold, bond_distances)
+    np.add.at(adj, (i_idx, j_idx), 1)
+    return adj
+
+
+def _bond_pairs(atoms, bond_threshold=(0.85, 1.15), bond_distances=None):
+    """
+    Bonded pairs over periodic images, with the rules of
+    :func:`build_adjacency_matrix`.
+
+    Returns ``(i, j, D)``: every bond appears as ``(i, j)`` and ``(j, i)``;
+    ``D`` is the vector from atom *i* to the bonded image of atom *j*.
+    """
     lo, hi = bond_threshold
     manual_map = _parse_bond_distances_map(bond_distances)
 
@@ -86,15 +99,32 @@ def build_adjacency_matrix(atoms, bond_threshold=(0.85, 1.15), bond_distances=No
             if d is not None:
                 ref[slot[za], slot[zb]] = d
     if np.all(np.isnan(ref)):
-        return adj
+        return np.zeros(0, dtype=int), np.zeros(0, dtype=int), np.zeros((0, 3))
 
-    i_idx, j_idx, dist = neighbor_list("ijd", atoms, hi * float(np.nanmax(ref)))
+    i_idx, j_idx, vec = neighbor_list("ijD", atoms, hi * float(np.nanmax(ref)))
+    dist = np.linalg.norm(vec, axis=1)
     kinds = np.array([slot[int(z)] for z in atoms.numbers])
     pair_ref = ref[kinds[i_idx], kinds[j_idx]]
     with np.errstate(invalid="ignore"):
         bonded = (dist >= lo * pair_ref) & (dist <= hi * pair_ref)
-    np.add.at(adj, (i_idx[bonded], j_idx[bonded]), 1)
-    return adj
+    return i_idx[bonded], j_idx[bonded], vec[bonded]
+
+
+def _bonds_across_plane(atoms, z_cut, period, bond_threshold=(0.85, 1.15),
+                        bond_distances=None):
+    """
+    Number of bonds per cell crossing the planes ``z = z_cut + m * period``.
+
+    *atoms* must be periodic with its true lattice (e.g. the 1-layer cell
+    with :func:`surface_bulk_cell`); *period* is the layer spacing L.  This
+    is the number of bonds a cut at *z_cut* breaks per surface cell.
+    """
+    i_idx, _, vec = _bond_pairs(atoms, bond_threshold, bond_distances)
+    z0 = atoms.positions[i_idx, 2]
+    z1 = z0 + vec[:, 2]
+    lower, upper = np.minimum(z0, z1), np.maximum(z0, z1)
+    crossings = np.floor((upper - z_cut) / period) - np.floor((lower - z_cut) / period)
+    return int(round(float(np.sum(crossings)) / 2.0))  # each bond is listed twice
 
 
 def print_adjacency_matrix(adj, atoms):

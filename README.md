@@ -186,7 +186,7 @@ classifies each surface as Tasker I/II (zero dipole) or Tasker III
 | `plot` | `bool` | `False` | Generate stacking-axis plots showing planes and cuts. |
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
 | `verbose` | `bool` or `None` | `None` | Print detailed information (plane sequences, candidates, etc.). |
-| `bond_threshold` | `tuple[float, float]` | `(0.85, 1.15)` | `(lo, hi)` scaling factors applied to the bond reference distance for the adjacency matrix. Only affects Tasker III. |
+| `bond_threshold` | `tuple[float, float]` | `(0.85, 1.15)` | `(lo, hi)` scaling factors applied to the bond reference distance: Tasker III bond scores and the broken-bond ranking of Tasker I/II terminations. |
 | `bond_distances` | `dict` or `None` | `None` | Per-pair bond reference distances (see below). |
 | `prefer_plane` | see below | `None` | Plane-type filter applied before candidate selection. |
 | `candidates` | `str` | `"best"` | `"best"` or `"all"` (see below). |
@@ -218,7 +218,7 @@ bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
 
 | Value | Behaviour |
 |---|---|
-| `"best"` | Return only the single best candidate per Miller index. Tasker I/II: the first zero-dipole bulk repeat unit in stacking order (deterministic). Tasker III: lowest `abs_dipole`, then `bond_score`, then `distribution_score`. |
+| `"best"` | Return only the single best candidate per Miller index. Tasker I/II: fewest bulk bonds broken at the cut, then densest surface planes (`candidate["broken_bonds"]`, `candidate["surface_density"]`); IDs follow this ranking. Tasker III: lowest dipole, then `bond_score`, then `distribution_score`. |
 | `"all"` | Return every valid candidate, generating a separate plot for each. |
 
 **Returns**

@@ -1,4 +1,5 @@
 import numpy as np
+from ase import Atoms
 from ase.data import atomic_numbers, chemical_symbols
 from ase.io import write
 
@@ -17,6 +18,7 @@ from .core import (
     assign_plane_names,
     compute_delete_info,
     plane_name_matches,
+    surface_bulk_cell,
 )
 
 
@@ -151,8 +153,8 @@ def generate_slabs_for_miller(
     verbose : bool or None
         Print detailed information.
     bond_threshold : tuple of float
-        ``(lo, hi)`` scaling factors for the adjacency matrix (Tasker
-        III only).
+        ``(lo, hi)`` scaling factors for bond detection: Tasker III bond
+        scores and the broken-bond ranking of Tasker I/II terminations.
     bond_distances : dict or None
         Per-pair bond reference distances.  Keys are ``"X-Y"`` strings
         (e.g. ``"Ce-O"``).  Values are ``float`` (reference distance)
@@ -173,8 +175,9 @@ def generate_slabs_for_miller(
           planes OR pure-Ce planes, but not mixed CeO planes.
     candidates : str
         - ``"best"`` (default): return only the single best candidate
-          (lowest dipole, then bond score, then distribution score)
-          after plane filtering.
+          after plane filtering.  Tasker I/II: fewest bulk bonds broken at
+          the cut, then densest surface planes.  Tasker III: lowest dipole,
+          then bond score, then distribution score.
         - ``"all"``: return every candidate, generating a plot for each.
     savecandidates : bool
         Save all valid candidates to an extxyz file for visual inspection.
@@ -191,7 +194,9 @@ def generate_slabs_for_miller(
           ``"O4-recon"``); pass it to ``cutslab(cut_at=...)``
         - ``"plane_counts"`` -- element composition of the cut plane
         - ``"reconstruction"`` -- reconstruction metadata (or None)
-        - ``"candidate"`` -- raw scoring dict
+        - ``"candidate"`` -- raw scoring dict (Tasker I/II: includes
+          ``broken_bonds`` per surface cell and ``surface_density`` in
+          atoms/Å²; IDs are in rank order, ID 0 = best)
 
         Every slab is checked to be stoichiometric, neutral, non-polar
         and free of internal gaps; a :class:`SlabValidationError` is raised
@@ -283,6 +288,7 @@ def _generate_for_one_miller(
             sequences, reduced_counts, atoms_z_matrix, L, surf_bulk,
             dipole_tol, vacuum, plane_tol,
             plot, plot_out_dir, verbose,
+            bond_threshold, bond_distances,
             prefer_plane, candidates, savecandidates, validation,
         )
 
@@ -310,27 +316,49 @@ def _tasker12_path(
     sequences, reduced_counts, atoms_z_matrix, L, surf_bulk,
     dipole_tol, vacuum, plane_tol,
     plot, plot_out_dir, verbose,
+    bond_threshold, bond_distances,
     prefer_plane, candidates_mode, savecandidates, validation,
 ):
     from .plotting import plot_unitcell_atoms
     from .builder import build_cut_slabs
+    from .tasker3 import _bonds_across_plane
 
     h, k, l = miller
+    n_pl = len(planes_sorted)
 
-    # One entry per zero-dipole bulk repeat unit (full period), in plane
-    # order; each gives slabs of exactly `lt` repeat units.
-    zero_dipole = sorted(
-        (
-            s for s in sequences
-            if s["is_neutral"] and s["is_stoich"] and s["is_full_period"]
-            and s["dipole_per_fu"] <= dipole_tol
-        ),
-        key=lambda s: s["bottom_cut"],
+    # One entry per zero-dipole bulk repeat unit (full period); each gives
+    # slabs of exactly `lt` repeat units.  Ranked by bulk bonds broken at the
+    # cut, then by surface atom density (denser = more compact), then by
+    # label, so the order does not depend on the bulk origin.  IDs follow
+    # the ranking (ID 0 = best).
+    periodic = Atoms(
+        numbers=surf_bulk.numbers, positions=surf_bulk.positions,
+        cell=surface_bulk_cell(bulk_atoms, miller), pbc=True,
     )
+    area = float(np.linalg.norm(np.cross(surf_bulk.cell[0], surf_bulk.cell[1])))
+    ranked = []
+    for s in sequences:
+        if not (s["is_neutral"] and s["is_stoich"] and s["is_full_period"]
+                and s["dipole_per_fu"] <= dipole_tol):
+            continue
+        cut = s["bottom_cut"]
+        bot, top = (cut + 1) % n_pl, cut
+        z_cut, _ = compute_cut_positions(planes, L, cut, cut)
+        seq = dict(s)
+        seq["broken_bonds"] = _bonds_across_plane(
+            periodic, z_cut, L, bond_threshold, bond_distances
+        )
+        seq["surface_density"] = (
+            len(planes_sorted[bot]["indices"]) + len(planes_sorted[top]["indices"])
+        ) / (2.0 * area)
+        key = (seq["broken_bonds"], -round(seq["surface_density"], 6),
+               plane_names[bot], plane_names[top], cut)
+        ranked.append((key, seq, bot))
+    ranked.sort(key=lambda r: r[0])
+    zero_dipole = [seq for _, seq, _ in ranked]
 
     all_terminations = {}
-    for tid, seq in enumerate(zero_dipole):
-        bot_plane_idx = (seq["bottom_cut"] + 1) % len(planes_sorted)
+    for tid, (_, seq, bot_plane_idx) in enumerate(ranked):
         all_terminations[tid] = {
             "sequence": seq,
             "plane_type": plane_names[bot_plane_idx],
@@ -340,7 +368,7 @@ def _tasker12_path(
     filtered = _filter_by_prefer_plane(all_terminations, prefer_plane)
 
     if candidates_mode == "best" and filtered:
-        # All have zero dipole; take the first in plane order (deterministic).
+        # IDs are in rank order: fewest broken bonds, then densest surface.
         best_tid = min(filtered)
         selected = {best_tid: filtered[best_tid]}
     else:
