@@ -1,5 +1,74 @@
 # Changelog
 
+## Unreleased
+
+Bug-fix pass from the 0.3.1 review (see `REVIEW_NOTES.md`).  Several
+defaults produced wrong or invalid slabs without an error; results for the
+same input can change, and some calls that used to return invalid slabs now
+raise.
+
+### Correctness
+- **Plane clustering (C1/C2):** ``identify_planes`` uses single-linkage
+  clustering of z with a fixed tolerance (``plane_tol=None`` → 0.1 Å, as
+  pymatgen), replacing the adaptive tolerance.  The adaptive version merged
+  real planes (ZnO/GaN (0001) came out Tasker I/II, rutile (100) Tasker III),
+  depended on the bulk origin, and collapsed slabs with vacuum into a single
+  plane, so ``cutslab`` returned no thickness series by default.
+- **Tasker type from full periods (M2/M4):** the Tasker type and the Tasker
+  I/II terminations use only sequences spanning one whole bulk repeat unit.
+  ``layer_thickness=n`` now always gives exactly *n* repeat units, and the
+  "best" termination is chosen deterministically (lowest plane index) instead
+  of by floating-point noise.  ``select_best_sequence`` returns a copy.
+- **Validated output (C3):** every slab returned by
+  ``generate_slabs_for_miller``, ``cutslab`` and ``reconstruct_tasker_iii``
+  is checked (stoichiometric, neutral, non-polar, no internal gaps; new
+  ``validate_slab`` / ``SlabValidationError``).
+- **Tasker III deletions (C3):** surface-plane atoms are found from the cut
+  positions and atom indices instead of a hard-coded 0.05 Å z-window, which
+  silently skipped deletions (e.g. IrO₂ (100) gave Ir₄O₁₀ with charge −4).
+  ``build_tasker3_slabs`` deletes the copies of the chosen atoms, so both
+  surfaces carry the same pattern; ``cutslab`` re-applies it by aligning the
+  reference plane (``reconstruction["cut_plane_frac"]``, new) to each exposed
+  plane.
+- **Polar reconstructions rejected (C3/M1):** Tasker III candidates must be
+  neutral and have ``|dipole| <= dipole_tol``; ``find_tasker3_candidates``
+  marks ``is_neutral``.  If none qualifies (e.g. wurtzite (0001)) a
+  ``ValueError`` explains why; odd excesses suggest an in-plane supercell.
+- **Adjacency (C4):** ``build_adjacency_matrix(..., bulk_atoms=, miller=)``
+  uses the true bulk lattice in the surface frame (new
+  ``surface_bulk_cell``); the old code mixed rotated positions with the
+  unrotated bulk cell, so bond counts were wrong for every facet except
+  (001).  It now returns bond counts over periodic images (``adj > 0`` for
+  the old boolean view).  ``bulk_atoms`` without ``miller`` raises.
+- **cutslab ``cut_at="all"`` (C5):** uses the same contiguous search as the
+  other modes; it no longer glues top and bottom planes across the vacuum,
+  returns duplicates, or anchors ``cuts="right"`` at the wrong plane.
+- **cutslab Tasker III fallback removed:** it treated a slab as a periodic
+  bulk cell and returned non-stoichiometric slabs.  A slab with no
+  zero-dipole cut now raises a ``ValueError`` pointing to
+  ``generate_slabs_for_miller`` + ``reconstruction=``.  ``bond_threshold`` /
+  ``bond_distances`` of ``cutslab`` are unused.
+- **Plane names (C6):** matching is translation-invariant (identical planes
+  shifted in-plane share a name) and uses the real point group of the
+  in-plane lattice instead of D4 in fractional coordinates.  ``xy_tol`` is
+  now in Å (default 0.5).
+- **Errors (C9):** ``cutslab`` validates ``cuts`` up front; an empty result
+  no longer reports "Unknown cuts mode".
+- Single-plane cells: cut midpoints no longer coincide with the plane.
+- Miller indices are validated (integers, not (0, 0, 0), reduced).
+
+### Compatibility
+- ``ase.build.surface`` is no longer called with ``vacuum=0`` (deprecated in
+  ASE 3.29, slated to raise); ``build_surface`` without vacuum keeps atom
+  positions and sets a normal third vector of height ``layers * L``.
+- ``ase>=3.22``; pytest turns ``FutureWarning`` into errors.
+
+### Tests
+- ``tests/test_regressions.py``: known Tasker types, origin invariance,
+  validity of every generated slab, cutslab series (Tasker I/II and III),
+  adjacency against a thick-slab reference, plane-name invariance, in-plane
+  point groups, error messages, no ASE ``FutureWarning``.
+
 ## 0.3.1
 
 ### Plane naming

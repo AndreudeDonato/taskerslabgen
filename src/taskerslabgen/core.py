@@ -1,11 +1,48 @@
+from itertools import product
+from math import gcd
+
 import numpy as np
 from ase.build import surface
 from ase.data import atomic_numbers
 from ase.io import read
 from scipy.optimize import linear_sum_assignment
 
+# Single-linkage z-gap (angstrom) below which atoms share a plane; same
+# default as pymatgen's ``ftol``.
+DEFAULT_PLANE_TOL = 0.1
 
-def build_surface(bulk_atoms, miller, layers=1, vacuum=0.0, verbose=None):
+# Per-atom array used internally to track which input atom each slab atom
+# came from (survives ``ase.build.surface`` and slicing).  Removed before
+# slabs are returned.
+_INDEX_KEY = "_tsg_index"
+
+
+class SlabValidationError(ValueError):
+    """A generated slab is not stoichiometric, neutral, non-polar and contiguous."""
+
+
+def _check_miller(miller):
+    hkl = tuple(int(round(x)) for x in miller)
+    if len(hkl) != 3 or any(abs(x - y) > 1e-9 for x, y in zip(miller, hkl)):
+        raise ValueError(f"Miller index must be three integers, got {miller!r}.")
+    if not any(hkl):
+        raise ValueError("Miller index (0, 0, 0) does not define a plane.")
+    g = gcd(gcd(abs(hkl[0]), abs(hkl[1])), abs(hkl[2]))
+    if g != 1:
+        reduced = tuple(x // g for x in hkl)
+        raise ValueError(
+            f"Miller index {hkl} is not reduced; use {reduced} (same surface orientation)."
+        )
+
+
+def _tag_atom_indices(atoms):
+    """Return a copy of *atoms* that records each atom's index in ``_INDEX_KEY``."""
+    tagged = atoms.copy()
+    tagged.arrays[_INDEX_KEY] = np.arange(len(tagged))
+    return tagged
+
+
+def build_surface(bulk_atoms, miller, layers=1, vacuum=None, verbose=None):
     """
     Build an ASE surface slab from a bulk structure.
 
@@ -17,17 +54,28 @@ def build_surface(bulk_atoms, miller, layers=1, vacuum=0.0, verbose=None):
         Miller index ``(h, k, l)``.
     layers : int
         Number of bulk repeat units along the surface normal.
-    vacuum : float
-        Vacuum to add (angstrom).  Set to 0 for bare slab.
+    vacuum : float or None
+        Vacuum to add (angstrom, per side).  ``None`` or ``0`` (default)
+        returns the bare oriented bulk: atoms are not shifted and the third
+        cell vector is normal to the surface with length ``layers * L``.
     verbose : bool or None
         Print debug information.
 
     Returns
     -------
     Atoms
-        Surface slab with full PBC enabled.
+        Surface slab with full PBC enabled.  Its third cell vector is not a
+        bulk lattice vector in general; see :func:`surface_bulk_cell`.
     """
-    slab = surface(bulk_atoms, miller, layers=layers, vacuum=vacuum)
+    _check_miller(miller)
+    if vacuum is None or vacuum <= 0:
+        # Not ``periodic=True``: ASE would then wrap atoms along the normal by
+        # its orthogonalised third vector, which is not a lattice vector.
+        slab = surface(bulk_atoms, miller, layers=layers)
+        area = np.linalg.norm(np.cross(slab.cell[0], slab.cell[1]))
+        slab.cell[2] = [0.0, 0.0, layers * bulk_atoms.get_volume() / area]
+    else:
+        slab = surface(bulk_atoms, miller, layers=layers, vacuum=vacuum)
     slab.set_pbc((True, True, True))
     if verbose:
         print("BULK")
@@ -62,6 +110,7 @@ def compute_projection(bulk, surf_bulk, charges, miller, verbose=None):
     L : float
         Lattice-plane spacing (angstrom) for this Miller index.
     """
+    _check_miller(miller)
     if isinstance(charges, dict):
         charges = _charges_to_list(surf_bulk, charges)
     if len(charges) != len(surf_bulk):
@@ -85,6 +134,29 @@ def compute_projection(bulk, surf_bulk, charges, miller, verbose=None):
     return atoms_z_matrix, L
 
 
+def surface_bulk_cell(bulk_atoms, miller):
+    """
+    Periodic cell of the bulk crystal in the frame of :func:`build_surface`.
+
+    ``ase.build.surface`` replaces the third lattice vector by one normal to
+    the surface.  That vector is generally *not* a bulk lattice vector, so
+    periodic images across layers computed with it are wrong.  The true
+    third vector is the displacement between the two copies of the same atom
+    in a two-layer build.
+
+    Returns
+    -------
+    ndarray, shape (3, 3)
+        Rows ``a1, a2`` (in-plane, as in :func:`build_surface`) and the bulk
+        lattice vector ``a3`` that stacks one layer onto the next.
+    """
+    _check_miller(miller)
+    two = surface(bulk_atoms, miller, layers=2)
+    n = len(bulk_atoms)
+    a3 = two.positions[n] - two.positions[0]
+    return np.array([two.cell[0], two.cell[1], a3])
+
+
 def _charges_to_list(atoms, charges):
     if isinstance(charges, dict):
         charge_map = {}
@@ -106,53 +178,30 @@ def _charges_to_list(atoms, charges):
     return list(charges)
 
 
-def _infer_plane_tol(z_mod, L, min_tol=0.02, max_tol=None):
-    """
-    Infer a plane-merge tolerance from the z-gap distribution.
-
-    Strong bimodality (small intra-plane gaps vs large inter-plane gaps)
-    yields a tolerance between the two clusters so coplanar atoms merge.
-    Weak / uniform gaps (staggered silicates) keep fine cuts via the
-    25th percentile of gaps.
-    """
-    if max_tol is None:
-        max_tol = 0.25 * float(L)
-
-    z = np.sort(np.asarray(z_mod, dtype=float) % float(L))
-    if len(z) < 2:
-        return float(min_tol)
-
-    gaps = np.diff(z)
-    wrap = (z[0] + float(L)) - z[-1]
-    gaps = np.concatenate([gaps, [wrap]])
-    g = np.sort(gaps)
-
-    if len(g) < 2:
-        return float(np.clip(0.5 * g[0], min_tol, max_tol))
-
-    dg = np.diff(g)
-    k = int(np.argmax(dg))
-    g_lo = float(g[k])
-    g_hi = float(g[k + 1])
-    jump = float(dg[k])
-    ratio = g_hi / max(g_lo, 1e-12)
-    strong = ratio >= 2.0 or jump >= 0.05
-
-    if strong:
-        tol = 0.5 * (g_lo + g_hi)
-    else:
-        tol = max(min_tol, float(np.percentile(g, 25)))
-
-    return float(np.clip(tol, min_tol, max_tol))
+def _make_plane(indices, z_center, atoms_z, charge_tol):
+    q_total = float(np.sum(atoms_z[indices, 2]))
+    if abs(q_total) < charge_tol:
+        q_total = 0.0
+    counts = {}
+    for Z in atoms_z[indices, 0].astype(int):
+        counts[int(Z)] = counts.get(int(Z), 0) + 1
+    return {
+        "z_center": float(z_center),
+        "q_total": q_total,
+        "indices": [int(i) for i in indices],
+        "counts": counts,
+    }
 
 
 def identify_planes(atoms_z, L, plane_tol=None, charge_tol=1e-3):
     """
     Cluster atoms into atomic planes along the stacking direction.
 
-    Atoms whose z-coordinates (mod *L*) differ by less than the effective
-    tolerance are grouped into the same plane.  Planes that wrap across
-    the periodic boundary are merged.
+    Single-linkage clustering of the z-coordinates (mod *L*), as in
+    pymatgen's ``SlabGenerator``: two atoms share a plane when they are
+    joined by a chain of neighbours whose z-gaps are all at most
+    *plane_tol*.  The result does not depend on atom order, and planes that
+    straddle the periodic boundary are kept whole.
 
     Parameters
     ----------
@@ -161,95 +210,52 @@ def identify_planes(atoms_z, L, plane_tol=None, charge_tol=1e-3):
     L : float
         Lattice-plane spacing (angstrom).
     plane_tol : float or None
-        Maximum distance (angstrom) for two atoms to belong to the same
-        plane.  ``None`` (default) infers the tolerance from the z-gap
-        distribution (adaptive clustering).  A float forces a fixed
-        override.
+        Largest z-gap (angstrom) between neighbouring atoms of one plane.
+        ``None`` (default) uses ``DEFAULT_PLANE_TOL`` (0.1 Å).
     charge_tol : float
         Charges with ``abs(q) < charge_tol`` are set to exactly 0.
 
     Returns
     -------
     list of dict
-        Each dict contains ``z_center``, ``q_total``, ``indices``, and
-        ``counts`` (element composition ``{Z: count}``).
+        Planes sorted by ``z_center`` (in ``[0, L)``).  Each dict contains
+        ``z_center``, ``q_total``, ``indices``, and ``counts`` (element
+        composition ``{Z: count}``).
     """
     if len(atoms_z) == 0:
         return []
 
-    z_mod = atoms_z[:, 1] % L
-    if plane_tol is None:
-        effective_tol = _infer_plane_tol(z_mod, L)
+    tol = DEFAULT_PLANE_TOL if plane_tol is None else float(plane_tol)
+    L = float(L)
+    z_mod = np.asarray(atoms_z[:, 1], dtype=float) % L
+    order = np.argsort(z_mod, kind="stable")
+    z_sorted = z_mod[order]
+    n = len(order)
+
+    # gaps[k] separates sorted atoms k and k+1; the last gap wraps through L.
+    gaps = np.diff(np.concatenate([z_sorted, [z_sorted[0] + L]]))
+    breaks = np.flatnonzero(gaps > tol)
+    if len(breaks) == 0:
+        # One plane: unwrap it across its widest gap.
+        breaks = np.array([int(np.argmax(gaps))])
+        break_set = set()
     else:
-        effective_tol = float(plane_tol)
+        break_set = {int(b) for b in breaks}
 
-    sort_idx = np.argsort(z_mod)
+    # Walk the atoms cyclically starting just after a break so no plane is
+    # split by the periodic boundary; unwrap z on the way.
+    start = (int(breaks[-1]) + 1) % n
     planes = []
-    current_indices = [sort_idx[0]]
-    current_center = float(z_mod[sort_idx[0]])
+    group, group_z = [], []
+    for m in range(n):
+        k = (start + m) % n
+        group.append(order[k])
+        group_z.append(z_sorted[k] + (L if start + m >= n else 0.0))
+        if k in break_set or m == n - 1:
+            planes.append(_make_plane(group, np.mean(group_z) % L, atoms_z, charge_tol))
+            group, group_z = [], []
 
-    for idx in sort_idx[1:]:
-        z = float(z_mod[idx])
-        if abs(z - current_center) <= effective_tol:
-            current_indices.append(idx)
-            current_center = float(np.mean(z_mod[current_indices]))
-        else:
-            q_total = float(np.sum(atoms_z[current_indices, 2]))
-            if abs(q_total) < charge_tol:
-                q_total = 0.0
-            counts = {}
-            for Z in atoms_z[current_indices, 0].astype(int):
-                counts[Z] = counts.get(Z, 0) + 1
-            planes.append(
-                {
-                    "z_center": current_center,
-                    "q_total": q_total,
-                    "indices": current_indices,
-                    "counts": counts,
-                }
-            )
-            current_indices = [idx]
-            current_center = z
-
-    q_total = float(np.sum(atoms_z[current_indices, 2]))
-    if abs(q_total) < charge_tol:
-        q_total = 0.0
-    counts = {}
-    for Z in atoms_z[current_indices, 0].astype(int):
-        counts[Z] = counts.get(Z, 0) + 1
-    planes.append(
-        {"z_center": current_center, "q_total": q_total, "indices": current_indices, "counts": counts}
-    )
-
-    if len(planes) > 1:
-        first = planes[0]
-        last = planes[-1]
-        wrap_dist = (first["z_center"] + L) - last["z_center"]
-        if abs(wrap_dist) <= effective_tol:
-            merged_indices = last["indices"] + first["indices"]
-            angles = (z_mod[merged_indices] / L) * 2.0 * np.pi
-            sin_mean = np.mean(np.sin(angles))
-            cos_mean = np.mean(np.cos(angles))
-            merged_center = (np.arctan2(sin_mean, cos_mean) / (2.0 * np.pi)) * L
-            if merged_center < 0.0:
-                merged_center += L
-            merged_q = float(np.sum(atoms_z[merged_indices, 2]))
-            if abs(merged_q) < charge_tol:
-                merged_q = 0.0
-            merged_counts = {}
-            for Z in atoms_z[merged_indices, 0].astype(int):
-                merged_counts[Z] = merged_counts.get(Z, 0) + 1
-            planes = (
-                [
-                    {
-                        "z_center": merged_center,
-                        "q_total": merged_q,
-                        "indices": merged_indices,
-                        "counts": merged_counts,
-                    }
-                ]
-                + planes[1:-1]
-            )
+    planes.sort(key=lambda p: p["z_center"])
     return planes
 
 
@@ -334,7 +340,8 @@ def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3):
     list of dict
         Each entry describes a cut sequence with keys ``bottom_cut``,
         ``top_cut``, ``plane_indices``, ``total_charge``, ``net_dipole``,
-        ``is_neutral``, ``is_stoich``, ``stoich_k``, etc.
+        ``is_neutral``, ``is_stoich``, ``stoich_k``, ``is_full_period``
+        (the sequence spans one whole bulk repeat unit), etc.
     """
     if len(planes) == 0:
         return []
@@ -393,6 +400,7 @@ def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3):
                     "is_neutral": abs(total_q) <= charge_tol,
                     "is_stoich": is_stoich,
                     "stoich_k": stoich_k,
+                    "is_full_period": len(seq_indices_btt) == n,
                 }
             )
 
@@ -404,6 +412,13 @@ def select_best_sequence(sequences, dipole_tol=1e-6):
     """
     Select the best stoichiometric, charge-neutral sequence (lowest dipole).
 
+    Only full-period sequences (one bulk repeat unit along the normal) are
+    considered: they are what slabs are stacked from, so they decide the
+    Tasker type.  A zero-dipole partial sequence whose remainder is polar
+    cannot be stacked into a thick non-polar slab.  Among zero-dipole
+    sequences the one with the lowest ``bottom_cut`` is returned, so the
+    choice does not depend on floating-point noise.
+
     Parameters
     ----------
     sequences : list of dict
@@ -414,12 +429,21 @@ def select_best_sequence(sequences, dipole_tol=1e-6):
     Returns
     -------
     dict or None
-        Best sequence dict with an added ``is_tasker_ii`` flag, or None.
+        Copy of the best sequence with an added ``is_tasker_ii`` flag, or
+        None.
     """
-    valid = [s for s in sequences if s["is_neutral"] and s["is_stoich"]]
+    valid = [
+        s for s in sequences
+        if s["is_neutral"] and s["is_stoich"] and s.get("is_full_period", True)
+    ]
     if not valid:
         return None
-    best = valid[-1]
+
+    def key(s):
+        mu = abs(s["net_dipole"])
+        return (0.0 if mu <= dipole_tol else mu, s["bottom_cut"])
+
+    best = dict(min(valid, key=key))
     best["is_tasker_ii"] = abs(best["net_dipole"]) <= dipole_tol
     return best
 
@@ -454,7 +478,7 @@ def compute_cut_positions(planes, L, bottom_cut_index, top_cut_index):
     def midpoint(i):
         z0 = z_sorted[i]
         z1 = z_sorted[(i + 1) % n]
-        if z1 < z0:
+        if z1 <= z0:  # wraps (or a single plane: next copy is one L above)
             z1 += L
         return 0.5 * (z0 + z1)
 
@@ -487,65 +511,170 @@ def apply_vacuum_to_slab(atoms, vacuum=15.0, axis=2):
     atoms.set_pbc([True, True, True])
 
 
-def assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.1):
+def validate_slab(slab, charges, reduced_counts, axis=2, charge_tol=1e-3,
+                  dipole_tol=1e-6, max_gap=None):
+    """
+    Check that *slab* satisfies the conditions the generators promise.
+
+    Parameters
+    ----------
+    slab : Atoms
+        Slab to check.
+    charges : dict or list
+        Charges by element, or one charge per atom of *slab*.
+    reduced_counts : dict
+        Reduced bulk stoichiometry ``{Z: count}``.
+    axis : int
+        Surface-normal axis.
+    charge_tol, dipole_tol : float
+        Tolerances on the net charge (e) and on the dipole along *axis*
+        (e·Å), both per formula unit of the slab.
+    max_gap : float or None
+        Largest allowed z-gap (angstrom) between neighbouring atoms; catches
+        slabs glued together across vacuum.  ``None`` skips the check.
+
+    Raises
+    ------
+    SlabValidationError
+        If the slab is not stoichiometric, not neutral, polar, or has an
+        internal gap larger than *max_gap*.  The message lists every failed
+        check.
+    """
+    problems = []
+    counts = {}
+    for Z in slab.numbers:
+        counts[int(Z)] = counts.get(int(Z), 0) + 1
+    is_stoich, k = is_stoichiometric_sequence(counts, reduced_counts)
+    if not is_stoich or set(counts) - set(reduced_counts):
+        problems.append("not stoichiometric")
+        k = max(1, round(len(slab) / max(1, sum(reduced_counts.values()))))
+
+    q = np.asarray(_charges_to_list(slab, charges), dtype=float)
+    if len(q) != len(slab):
+        raise ValueError(f"Charges length ({len(q)}) does not match atoms ({len(slab)}).")
+    net_q = float(np.sum(q))
+    if abs(net_q) > charge_tol * k:
+        problems.append(f"net charge {net_q:+.4f} e")
+
+    z = slab.positions[:, axis]
+    dipole = float(np.sum(q * (z - z.mean())))
+    if abs(dipole) > dipole_tol * k:
+        problems.append(f"dipole {dipole:+.4e} e*A")
+
+    if max_gap is not None and len(slab) > 1:
+        gap = float(np.max(np.diff(np.sort(z))))
+        if gap > max_gap + 1e-6:
+            problems.append(f"internal z-gap of {gap:.2f} A (bulk max {max_gap:.2f} A)")
+
+    if problems:
+        raise SlabValidationError(
+            f"Invalid slab {slab.get_chemical_formula()}: {'; '.join(problems)} "
+            f"(charge_tol={charge_tol}, dipole_tol={dipole_tol} per formula unit)."
+        )
+
+
+def _finalize_slab(slab, charges_list, reduced_counts, charge_tol, dipole_tol,
+                   max_gap=None, axis=2):
+    """Validate a slab cut from an index-tagged structure, then drop the tag."""
+    q = np.asarray(charges_list, dtype=float)[slab.arrays[_INDEX_KEY]]
+    del slab.arrays[_INDEX_KEY]
+    validate_slab(slab, q, reduced_counts, axis=axis, charge_tol=charge_tol,
+                  dipole_tol=dipole_tol, max_gap=max_gap)
+
+
+def _max_z_gap(z, period=None):
+    """Largest gap between sorted z values (wrapping through *period* if given)."""
+    z = np.asarray(z, dtype=float)
+    if len(z) < 2:
+        return None
+    if period is None:
+        z = np.sort(z)
+    else:
+        z = np.sort(z % period)
+        z = np.append(z, z[0] + period)
+    return float(np.max(np.diff(z)))
+
+
+def assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.5):
     """
     Assign hierarchical plane labels ``P{n}{letter}`` (e.g. ``P0a``, ``P0b``).
 
-    - **Type** ``P{n}``: same composition and in-plane geometry congruent under
-      the square dihedral group D4 (rotations 0/90/180/270 and axis/diagonal
-      mirrors) applied to the centroid-centered fingerprint.
-    - **Variant letter**: exact fingerprint match reuses the same full name;
-      D4-congruent but not identical gets the next letter (``a``, ``b``, …)
-      in order of first appearance along the stacking axis.
+    - **Type** ``P{n}``: same composition, and in-plane geometry that maps
+      onto each other under a point-group operation of the in-plane lattice
+      plus a translation (8 operations for a square lattice, 12 hexagonal,
+      4 rectangular, 2 oblique).
+    - **Variant letter**: planes related by a pure in-plane translation
+      share the full name; congruent planes that are not translation-related
+      get the next letter (``a``, ``b``, …) in order of first appearance
+      along the stacking axis.
 
-    The spatial fingerprint uses each atom's displacement from the
-    PBC-aware centroid of the reference species (lowest Z), so labels are
-    translation-invariant.  Reconstruction suffixes such as ``P0a-recon``
-    are added by callers, not here.
+    Reconstruction suffixes such as ``P0a-recon`` are added by callers, not
+    here.  Without *atoms*, planes are named by composition only.
 
-    Fingerprints are compared within *xy_tol* (fractional-coordinate
-    tolerance) to handle small displacements from relaxation.
+    Parameters
+    ----------
+    planes_sorted : list of dict
+        Planes from :func:`identify_planes`, in stacking order.
+    atoms : Atoms or None
+        Structure the plane indices refer to; enables geometric matching.
+    axis : int
+        Stacking axis.
+    xy_tol : float
+        Matching tolerance (angstrom, in-plane) for corresponding atoms,
+        e.g. to absorb small relaxations.
 
-    Returns ``(names, name_map)`` where ``names[i]`` is the name of
-    ``planes_sorted[i]`` and ``name_map`` is ``{name: counts_dict}``.
+    Returns
+    -------
+    names : list of str
+        ``names[i]`` is the name of ``planes_sorted[i]``.
+    name_map : dict
+        ``{name: counts_dict}``.
     """
     import string
 
-    frac_all = None
-    ab_axes = None
+    identity = [np.eye(2, dtype=int)]
+    lattice_ops = identity
     if atoms is not None:
-        frac_all = atoms.get_scaled_positions()
         ab_axes = [i for i in range(3) if i != axis]
+        frac_all = atoms.get_scaled_positions()
+        cell2d = np.array(atoms.cell)[np.ix_(ab_axes, ab_axes)]
+        lattice_ops = _lattice_point_ops(cell2d)
 
-    # Per type index: list of (fingerprint, full_name)
+    def geometry(plane):
+        if atoms is None:
+            return None
+        return [
+            (int(atoms.numbers[i]), frac_all[i, ab_axes[0]], frac_all[i, ab_axes[1]])
+            for i in plane["indices"]
+        ]
+
+    def related(geom_a, geom_b, ops):
+        if geom_a is None:
+            return True
+        return _find_plane_alignment(geom_a, geom_b, cell2d, xy_tol, ops) is not None
+
+    # Per type index: list of (counts, geometry, full_name)
     type_variants = []
     next_letter = []
     names = []
     name_map = {}
 
     for plane in planes_sorted:
-        fp = _plane_fingerprint(plane, atoms, frac_all, ab_axes)
+        counts = dict(plane["counts"])
+        geom = geometry(plane)
 
         matched_name = None
         matched_type = None
-
         for t_idx, variants in enumerate(type_variants):
-            exact = None
-            for sfp, sname in variants:
-                if _fingerprints_match(fp, sfp, xy_tol):
-                    exact = sname
+            if variants[0][0] != counts:
+                continue
+            for _, vgeom, vname in variants:
+                if related(vgeom, geom, identity):
+                    matched_name = vname
                     break
-            if exact is not None:
-                matched_name = exact
-                matched_type = t_idx
+            if matched_name is not None:
                 break
-
-            congruent = False
-            for sfp, _sname in variants:
-                if _fingerprints_d4_congruent(fp, sfp, xy_tol):
-                    congruent = True
-                    break
-            if congruent:
+            if any(related(vgeom, geom, lattice_ops) for _, vgeom, _ in variants):
                 matched_type = t_idx
                 break
 
@@ -560,20 +689,19 @@ def assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.1):
                     f"Too many plane variants for type P{matched_type} "
                     f"(exceeded 26 letters)."
                 )
-            letter = string.ascii_lowercase[letter_i]
+            name = f"P{matched_type}{string.ascii_lowercase[letter_i]}"
             next_letter[matched_type] = letter_i + 1
-            name = f"P{matched_type}{letter}"
-            type_variants[matched_type].append((fp, name))
-            name_map[name] = dict(plane["counts"])
+            type_variants[matched_type].append((counts, geom, name))
+            name_map[name] = counts
             names.append(name)
             continue
 
         # New type
         t_idx = len(type_variants)
         name = f"P{t_idx}a"
-        type_variants.append([(fp, name)])
+        type_variants.append([(counts, geom, name)])
         next_letter.append(1)
-        name_map[name] = dict(plane["counts"])
+        name_map[name] = counts
         names.append(name)
 
     return names, name_map
@@ -617,134 +745,87 @@ def plane_name_matches(query, name):
     return query == plane_name_base(name)
 
 
-def _pbc_mean_1d(values):
-    """Circular (PBC-aware) mean of values on the [0, 1) domain."""
-    import math
-    s = sum(math.sin(2.0 * math.pi * v) for v in values)
-    c = sum(math.cos(2.0 * math.pi * v) for v in values)
-    if abs(s) < 1e-12 and abs(c) < 1e-12:
-        return 0.0
-    return (math.atan2(s, c) / (2.0 * math.pi)) % 1.0
+def _gauss_reduce_basis(cell2d):
+    """Integer unimodular ``P`` such that ``P @ cell2d`` is a Lagrange-Gauss reduced basis."""
+    P = np.eye(2, dtype=int)
+    B = np.array(cell2d, dtype=float)
+    for _ in range(100):
+        if np.dot(B[1], B[1]) < np.dot(B[0], B[0]):
+            B = B[::-1].copy()
+            P = P[::-1].copy()
+        mu = int(np.round(np.dot(B[0], B[1]) / np.dot(B[0], B[0])))
+        if mu == 0:
+            break
+        B[1] -= mu * B[0]
+        P[1] -= mu * P[0]
+    return P
 
 
-def _plane_fingerprint(plane, atoms, frac_all, ab_axes):
+def _lattice_point_ops(cell2d, tol=1e-3):
     """
-    Build a fingerprint: ``(composition_key, xy_displacement_key)``.
+    Point-group operations of the 2D lattice with basis rows *cell2d*.
 
-    Displacements are measured from the PBC-aware centroid of the
-    lowest-Z species and mapped to [0, 1), making the fingerprint
-    invariant to rigid translation of the whole plane within the cell
-    while avoiding sign ambiguity at the ±0.5 boundary.
+    Returned as integer matrices ``W`` acting on fractional coordinates
+    (``f' = f @ W``): 8 for a square lattice, 12 hexagonal, 4 (centred)
+    rectangular, 2 oblique.
     """
-    comp_key = tuple(sorted(plane["counts"].items()))
-    if atoms is None or frac_all is None:
-        return (comp_key, None)
-
-    by_species = {}
-    for idx in plane["indices"]:
-        Z = int(atoms.numbers[idx])
-        fx = float(frac_all[idx, ab_axes[0]])
-        fy = float(frac_all[idx, ab_axes[1]])
-        by_species.setdefault(Z, []).append((fx, fy))
-
-    ref_Z = min(by_species.keys())
-    cx = _pbc_mean_1d([p[0] for p in by_species[ref_Z]])
-    cy = _pbc_mean_1d([p[1] for p in by_species[ref_Z]])
-
-    xy_parts = []
-    for Z in sorted(by_species):
-        shifted = []
-        for fx, fy in by_species[Z]:
-            dx = (fx - cx) % 1.0
-            dy = (fy - cy) % 1.0
-            if dx > 1.0 - 1e-9:
-                dx = 0.0
-            if dy > 1.0 - 1e-9:
-                dy = 0.0
-            shifted.append((dx, dy))
-        xy_parts.append((Z, tuple(sorted(shifted))))
-
-    return (comp_key, tuple(xy_parts))
+    P = _gauss_reduce_basis(cell2d)
+    P_inv = np.round(np.linalg.inv(P)).astype(int)
+    reduced = P @ np.asarray(cell2d, dtype=float)
+    G = reduced @ reduced.T
+    atol = tol * float(np.max(np.abs(G)))
+    ops = []
+    for entries in product((-1, 0, 1), repeat=4):
+        W = np.array(entries, dtype=int).reshape(2, 2)
+        if abs(round(np.linalg.det(W))) != 1:
+            continue
+        if np.allclose(W @ G @ W.T, G, atol=atol):
+            ops.append(P_inv @ W @ P)
+    return ops
 
 
-def _wrap01(v):
-    v = v % 1.0
-    if v > 1.0 - 1e-9:
-        return 0.0
-    return v
-
-
-def _d4_point_transforms():
-    """Return D4 maps ``(x, y) -> (x', y')`` on the unit square torus."""
-    return (
-        lambda x, y: (x, y),                          # identity
-        lambda x, y: (_wrap01(-y), x),                # rot90
-        lambda x, y: (_wrap01(-x), _wrap01(-y)),      # rot180
-        lambda x, y: (y, _wrap01(-x)),                # rot270
-        lambda x, y: (_wrap01(-x), y),                # mirror vertical
-        lambda x, y: (x, _wrap01(-y)),                # mirror horizontal
-        lambda x, y: (y, x),                          # mirror diagonal
-        lambda x, y: (_wrap01(-y), _wrap01(-x)),      # mirror antidiag
-    )
-
-
-def _transform_xy_fingerprint(fp, transform):
-    """Apply a point transform to the spatial part of a fingerprint."""
-    comp_key, xy_parts = fp
-    if xy_parts is None:
-        return fp
-    new_parts = []
-    for Z, positions in xy_parts:
-        mapped = tuple(
-            sorted(
-                (transform(x, y) for x, y in positions),
-                key=lambda p: (p[0], p[1]),
-            )
-        )
-        new_parts.append((Z, mapped))
-    return (comp_key, tuple(new_parts))
-
-
-def _fingerprints_match(fp1, fp2, tol):
+def _find_plane_alignment(ref, tgt, cell2d, tol, ops=None):
     """
-    Check if two plane fingerprints match within *tol*.
+    Find an in-plane operation mapping plane *ref* onto plane *tgt*.
 
-    Composition must match exactly.  Spatial displacements (in [0, 1))
-    are compared element-wise after sorting, with PBC-aware distance.
+    *ref* and *tgt* are lists of ``(Z, fx, fy)`` in fractional coordinates
+    of the in-plane lattice with basis rows *cell2d*.  Returns ``(W, t)``
+    such that every ref atom moved to ``f @ W + t`` lies within *tol*
+    angstrom of a distinct tgt atom of the same species, or ``None``.
+    *ops* defaults to the identity (pure translations).
     """
-    if fp1[0] != fp2[0]:
-        return False
-    if fp1[1] is None and fp2[1] is None:
-        return True
-    if fp1[1] is None or fp2[1] is None:
-        return False
-    if len(fp1[1]) != len(fp2[1]):
-        return False
-    for (Z1, pos1), (Z2, pos2) in zip(fp1[1], fp2[1]):
-        if Z1 != Z2 or len(pos1) != len(pos2):
-            return False
-        for (x1, y1), (x2, y2) in zip(pos1, pos2):
-            dx = abs(x1 - x2)
-            dx = min(dx, 1.0 - dx)
-            dy = abs(y1 - y2)
-            dy = min(dy, 1.0 - dy)
-            if dx > tol or dy > tol:
-                return False
-    return True
+    if len(ref) != len(tgt):
+        return None
+    ref_Z = np.array([a[0] for a in ref], dtype=int)
+    tgt_Z = np.array([a[0] for a in tgt], dtype=int)
+    species, counts = np.unique(ref_Z, return_counts=True)
+    tgt_species, tgt_counts = np.unique(tgt_Z, return_counts=True)
+    if not (np.array_equal(species, tgt_species) and np.array_equal(counts, tgt_counts)):
+        return None
+    if len(ref) == 0:
+        return np.eye(2, dtype=int), np.zeros(2)
 
+    ref_f = np.array([[a[1], a[2]] for a in ref], dtype=float)
+    tgt_f = np.array([[a[1], a[2]] for a in tgt], dtype=float)
+    cell2d = np.asarray(cell2d, dtype=float)
+    anchor_Z = species[np.argmin(counts)]
+    anchor = int(np.flatnonzero(ref_Z == anchor_Z)[0])
+    groups = [(np.flatnonzero(ref_Z == Z), np.flatnonzero(tgt_Z == Z)) for Z in species]
 
-def _fingerprints_d4_congruent(fp1, fp2, tol):
-    """True if *fp2* matches *fp1* under any D4 transform (incl. identity)."""
-    if fp1[0] != fp2[0]:
-        return False
-    if fp1[1] is None and fp2[1] is None:
-        return True
-    if fp1[1] is None or fp2[1] is None:
-        return False
-    for transform in _d4_point_transforms():
-        if _fingerprints_match(fp1, _transform_xy_fingerprint(fp2, transform), tol):
-            return True
-    return False
+    for W in (ops if ops is not None else [np.eye(2, dtype=int)]):
+        moved = ref_f @ W
+        for b in np.flatnonzero(tgt_Z == anchor_Z):
+            t = tgt_f[b] - moved[anchor]
+            for r_idx, t_idx in groups:
+                d = (moved[r_idx] + t)[:, None, :] - tgt_f[t_idx][None, :, :]
+                d -= np.round(d)
+                dist = np.linalg.norm(d @ cell2d, axis=-1)
+                rows, cols = linear_sum_assignment(dist)
+                if dist[rows, cols].max() > tol:
+                    break
+            else:
+                return W, t % 1.0
+    return None
 
 
 def compute_delete_info(cut_plane, deletion_mask, atoms_z_matrix, surf_bulk):

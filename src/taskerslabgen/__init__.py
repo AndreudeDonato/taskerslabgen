@@ -17,6 +17,7 @@ primary API unless you are extending the pipeline.
 """
 
 from .core import (
+    SlabValidationError,
     apply_vacuum_to_slab,
     assign_plane_names,
     build_surface,
@@ -32,6 +33,8 @@ from .core import (
     plane_name_base,
     plane_name_matches,
     select_best_sequence,
+    surface_bulk_cell,
+    validate_slab,
 )
 from .genslab import generate_slabs_for_miller
 from .slabcut import cutslab
@@ -77,6 +80,9 @@ _ADVANCED = (
     "print_adjacency_matrix",
     "find_tasker3_candidates",
     "build_tasker3_slabs",
+    "surface_bulk_cell",
+    "validate_slab",
+    "SlabValidationError",
 )
 
 __all__ = list(_PRIMARY) + list(_ADVANCED)

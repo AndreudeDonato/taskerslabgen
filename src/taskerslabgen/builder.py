@@ -1,5 +1,4 @@
-from ase.build import surface
-from .core import apply_vacuum_to_slab
+from .core import apply_vacuum_to_slab, build_surface
 
 
 def build_cut_slabs(bulk_atoms, miller, layer_thickness_list, zbot, ztop, L, vacuum=15.0):
@@ -16,9 +15,10 @@ def build_cut_slabs(bulk_atoms, miller, layer_thickness_list, zbot, ztop, L, vac
     layer_thickness_list : list of int
         Slab thicknesses in bulk repeat units.
     zbot : float
-        Bottom cut z-coordinate (angstrom).
+        Bottom cut z-coordinate (angstrom), in the frame of
+        ``build_surface(bulk_atoms, miller)``.
     ztop : float
-        Top cut z-coordinate (angstrom).
+        Top cut z-coordinate (angstrom), same frame.
     L : float
         Lattice-plane spacing (angstrom).
     vacuum : float
@@ -31,7 +31,7 @@ def build_cut_slabs(bulk_atoms, miller, layer_thickness_list, zbot, ztop, L, vac
     """
     slabs = []
     for layer_thickness in layer_thickness_list:
-        surf_bulk_n = surface(bulk_atoms, miller, layers=layer_thickness + 2, vacuum=0.0)
+        surf_bulk_n = build_surface(bulk_atoms, miller, layers=layer_thickness + 2)
         zmin = zbot
         zmax = ztop + layer_thickness * L
         mask = [(zmin <= atom.position[2] <= zmax) for atom in surf_bulk_n]

@@ -3,6 +3,10 @@ from ase.data import atomic_numbers, chemical_symbols
 from ase.io import write
 
 from .core import (
+    _charges_to_list,
+    _finalize_slab,
+    _max_z_gap,
+    _tag_atom_indices,
     build_surface,
     compute_projection,
     identify_planes,
@@ -128,13 +132,13 @@ def generate_slabs_for_miller(
     bulk_name : str
         Label used in plot and output filenames.
     plane_tol : float or None
-        Tolerance (angstrom) for grouping atoms into planes.  ``None``
-        (default) uses adaptive z-gap clustering; a float forces a fixed
-        override.
+        Largest z-gap (angstrom) between neighbouring atoms of one plane
+        (single-linkage clustering).  ``None`` (default) uses 0.1 Å.
     charge_tol : float
         Tolerance for charge neutrality.
     dipole_tol : float
-        Threshold below which the dipole is considered zero (Tasker I/II).
+        Threshold below which the dipole is considered zero (Tasker I/II,
+        and for accepting Tasker III reconstructions).
     vacuum : float
         Vacuum to add (angstrom, per side).
     plot : bool
@@ -183,6 +187,11 @@ def generate_slabs_for_miller(
         - ``"plane_counts"`` -- element composition of the cut plane
         - ``"reconstruction"`` -- reconstruction metadata (or None)
         - ``"candidate"`` -- raw scoring dict
+
+        Every slab is checked to be stoichiometric, neutral, non-polar
+        and free of internal gaps; a :class:`SlabValidationError` is raised
+        otherwise.  A ``ValueError`` explains when no non-polar
+        reconstruction exists.
     """
     if candidates not in ("best", "all"):
         raise ValueError(f"candidates must be 'best' or 'all', got {candidates!r}")
@@ -210,24 +219,23 @@ def _generate_for_one_miller(
     bond_threshold, bond_distances,
     prefer_plane, candidates, savecandidates,
 ):
-    from .plotting import plot_unitcell_atoms
-    from .builder import build_cut_slabs
-    from .tasker3 import (
-        build_adjacency_matrix,
-        find_tasker3_candidates,
-        build_tasker3_slabs,
-        print_adjacency_matrix,
-        _midpoint,
-    )
-
     h, k, l = miller
 
     if verbose:
         print(f"\nGenerating Tasker slab for {bulk_name} with Miller index ({h}, {k}, {l})\n")
 
-    surf_bulk = build_surface(bulk_atoms, miller, layers=1, vacuum=0.0, verbose=verbose)
+    # Slabs are cut from an index-tagged copy of the bulk so every slab atom
+    # can be traced back to its bulk atom (charges, validation).
+    charges_list = _charges_to_list(bulk_atoms, charges)
+    if len(charges_list) != len(bulk_atoms):
+        raise ValueError(
+            f"Charges length ({len(charges_list)}) does not match atoms ({len(bulk_atoms)})."
+        )
+    bulk = _tag_atom_indices(bulk_atoms)
+
+    surf_bulk = build_surface(bulk, miller, layers=1, verbose=verbose)
     atoms_z_matrix, L = compute_projection(
-        bulk_atoms, surf_bulk, charges, miller, verbose=verbose
+        bulk, surf_bulk, charges, miller, verbose=verbose
     )
     planes = identify_planes(atoms_z_matrix, L, plane_tol=plane_tol, charge_tol=charge_tol)
     reduced_counts = compute_reduced_counts(atoms_z_matrix)
@@ -239,6 +247,13 @@ def _generate_for_one_miller(
 
     planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
     plane_names, plane_name_map = assign_plane_names(planes_sorted, atoms=surf_bulk)
+    validation = {
+        "charges_list": charges_list,
+        "reduced_counts": reduced_counts,
+        "charge_tol": charge_tol,
+        "dipole_tol": dipole_tol,
+        "max_gap": _max_z_gap(atoms_z_matrix[:, 1], period=L),
+    }
 
     if verbose:
         valid_sequences = [s for s in sequences if s["is_neutral"] and s["is_stoich"]]
@@ -258,12 +273,12 @@ def _generate_for_one_miller(
     # ---- Tasker I/II ----
     if best_seq["is_tasker_ii"]:
         return _tasker12_path(
-            bulk_atoms, charges, miller, layer_thickness_list, bulk_name,
+            bulk, charges, miller, layer_thickness_list, bulk_name,
             planes, planes_sorted, plane_names, plane_name_map,
             sequences, reduced_counts, atoms_z_matrix, L, surf_bulk,
             dipole_tol, vacuum, plane_tol,
             plot, plot_out_dir, verbose,
-            prefer_plane, candidates, savecandidates,
+            prefer_plane, candidates, savecandidates, validation,
         )
 
     # ---- Tasker III ----
@@ -274,13 +289,13 @@ def _generate_for_one_miller(
         )
 
     return _tasker3_path(
-        bulk_atoms, charges, miller, layer_thickness_list, bulk_name,
+        bulk, charges, miller, layer_thickness_list, bulk_name,
         planes, planes_sorted, plane_names, plane_name_map,
         reduced_counts, atoms_z_matrix, L, surf_bulk,
         vacuum, plane_tol, charge_tol,
         plot, plot_out_dir, verbose,
         bond_threshold, bond_distances,
-        prefer_plane, candidates, savecandidates,
+        prefer_plane, candidates, savecandidates, validation,
     )
 
 
@@ -290,17 +305,23 @@ def _tasker12_path(
     sequences, reduced_counts, atoms_z_matrix, L, surf_bulk,
     dipole_tol, vacuum, plane_tol,
     plot, plot_out_dir, verbose,
-    prefer_plane, candidates_mode, savecandidates,
+    prefer_plane, candidates_mode, savecandidates, validation,
 ):
     from .plotting import plot_unitcell_atoms
     from .builder import build_cut_slabs
 
     h, k, l = miller
 
-    zero_dipole = [
-        s for s in sequences
-        if s["is_neutral"] and s["is_stoich"] and abs(s["net_dipole"]) <= dipole_tol
-    ]
+    # One entry per zero-dipole bulk repeat unit (full period), in plane
+    # order; each gives slabs of exactly `lt` repeat units.
+    zero_dipole = sorted(
+        (
+            s for s in sequences
+            if s["is_neutral"] and s["is_stoich"] and s["is_full_period"]
+            and abs(s["net_dipole"]) <= dipole_tol
+        ),
+        key=lambda s: s["bottom_cut"],
+    )
 
     all_terminations = {}
     for tid, seq in enumerate(zero_dipole):
@@ -314,7 +335,8 @@ def _tasker12_path(
     filtered = _filter_by_prefer_plane(all_terminations, prefer_plane)
 
     if candidates_mode == "best" and filtered:
-        best_tid = min(filtered, key=lambda t: abs(filtered[t]["sequence"]["net_dipole"]))
+        # All have zero dipole; take the first in plane order (deterministic).
+        best_tid = min(filtered)
         selected = {best_tid: filtered[best_tid]}
     else:
         selected = filtered
@@ -360,6 +382,7 @@ def _tasker12_path(
             )
 
         for slab in slabs:
+            _finalize_slab(slab, **validation)
             slab.info["bulk_name"] = bulk_name
             slab.info["miller"] = miller
 
@@ -382,7 +405,7 @@ def _tasker3_path(
     vacuum, plane_tol, charge_tol,
     plot, plot_out_dir, verbose,
     bond_threshold, bond_distances,
-    prefer_plane, candidates_mode, savecandidates,
+    prefer_plane, candidates_mode, savecandidates, validation,
 ):
     from .plotting import plot_unitcell_atoms
     from .tasker3 import (
@@ -391,17 +414,18 @@ def _tasker3_path(
         build_tasker3_slabs,
         print_adjacency_matrix,
         _midpoint,
+        _select_tasker3_candidates,
     )
 
     h, k, l = miller
 
     adj = build_adjacency_matrix(
         surf_bulk, bond_threshold=bond_threshold, bond_distances=bond_distances,
-        bulk_atoms=bulk_atoms,
+        bulk_atoms=bulk_atoms, miller=miller,
     )
     if verbose:
         n_bonds = int(np.sum(adj)) // 2
-        print(f"Adjacency: {n_bonds} bonds_broken (threshold {bond_threshold})")
+        print(f"Adjacency: {n_bonds} bonds (threshold {bond_threshold})")
         print_adjacency_matrix(adj, surf_bulk)
 
     t3_prefer = None
@@ -417,8 +441,9 @@ def _tasker3_path(
         prefer_plane=t3_prefer,
         plane_names=plane_names,
     )
-    if not t3_candidates:
-        raise ValueError("No Tasker III reconstruction candidates found.")
+    t3_candidates = _select_tasker3_candidates(
+        t3_candidates, miller, validation["dipole_tol"], charge_tol
+    )
 
     all_terminations = {}
     for tid, cand in enumerate(t3_candidates):
@@ -474,6 +499,11 @@ def _tasker3_path(
         delete_info = compute_delete_info(
             cut_plane, cand["deletion_mask"], atoms_z_matrix, surf_bulk,
         )
+        frac = surf_bulk.get_scaled_positions()
+        cut_plane_frac = [
+            (int(atoms_z_matrix[idx, 0]), float(frac[idx, 0]) % 1.0, float(frac[idx, 1]) % 1.0)
+            for idx in cut_plane["indices"]
+        ]
 
         slabs = build_tasker3_slabs(
             bulk_atoms, miller, layer_thickness_list,
@@ -481,7 +511,7 @@ def _tasker3_path(
             deletion_mask=cand["deletion_mask"],
             planes_sorted=planes_sorted,
             atoms_z_matrix=atoms_z_matrix,
-            L=L, vacuum=vacuum, plane_tol=plane_tol,
+            L=L, vacuum=vacuum,
         )
 
         if verbose:
@@ -526,6 +556,7 @@ def _tasker3_path(
             )
 
         for slab in slabs:
+            _finalize_slab(slab, **validation)
             slab.info["bulk_name"] = bulk_name
             slab.info["miller"] = miller
 
@@ -537,6 +568,7 @@ def _tasker3_path(
             "reconstruction": {
                 "cut_plane_name": cut_plane_name,
                 "cut_plane_counts": dict(cut_plane["counts"]),
+                "cut_plane_frac": cut_plane_frac,
                 "delete_info": delete_info,
                 "plane_names": plane_names,
                 "plane_name_map": plane_name_map,

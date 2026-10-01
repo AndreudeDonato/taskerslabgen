@@ -2,11 +2,13 @@ import numpy as np
 from ase.io import read
 
 from .core import (
+    _INDEX_KEY,
     _charges_to_list,
+    _finalize_slab,
+    _find_plane_alignment,
+    _max_z_gap,
     identify_planes,
     compute_reduced_counts,
-    enumerate_cut_pairs,
-    compute_cut_positions,
     apply_vacuum_to_slab,
     assign_plane_names,
     is_stoichiometric_sequence,
@@ -44,13 +46,13 @@ def cutslab(
     axis : int
         Cartesian axis perpendicular to the surface (0, 1, or 2).
     plane_tol : float or None
-        Tolerance (angstrom) for grouping atoms into planes.  ``None``
-        (default) uses adaptive z-gap clustering; a float forces a fixed
-        override.
+        Largest z-gap (angstrom) between neighbouring atoms of one plane
+        (single-linkage clustering).  ``None`` (default) uses 0.1 Å.
     charge_tol : float
         Tolerance for charge neutrality.
     dipole_tol : float
-        Threshold below which the dipole is considered zero.
+        Threshold below which the dipole is considered zero.  Relaxed slabs
+        usually need a larger value.
     plot_out_dir : str
         Directory for output plots.
     plot : bool
@@ -58,10 +60,10 @@ def cutslab(
     verbose : bool or None
         Print detailed cut information.
     bond_threshold : tuple of float
-        ``(lo, hi)`` scaling factors for the adjacency matrix (only
-        used in Tasker III fallback path).
+        Unused; kept for backward compatibility (the Tasker III fallback
+        was removed: it treated the slab as a periodic bulk cell).
     bond_distances : dict or None
-        Per-pair bond reference distances.
+        Unused; kept for backward compatibility.
     reconstruction : dict or None
         Tasker III reconstruction pattern (the ``term["reconstruction"]``
         dict from :func:`generate_slabs_for_miller`).  When provided,
@@ -73,7 +75,7 @@ def cutslab(
 
         - ``"termination"`` (default): cut only at planes matching the
           thick slab's top/bottom plane types.
-        - ``"all"``: cut at any boundary that gives a stoichiometric,
+        - ``"all"``: cut at any plane that gives a stoichiometric,
           charge-neutral, zero-dipole sub-slab.
         - A plane name (e.g. ``"P0"``) or list of names: cut only at
           boundaries where those plane types are exposed.
@@ -87,12 +89,19 @@ def cutslab(
     Returns
     -------
     list of Atoms
-        Sub-slabs sorted from smallest to largest by atom count.
+        Sub-slabs sorted from smallest to largest by atom count.  Each one
+        is checked to be stoichiometric, neutral, non-polar and free of
+        internal gaps (:class:`SlabValidationError` otherwise).
         Each ``Atoms`` object has metadata in ``.info``:
         ``cut_bottom_plane``, ``cut_top_plane``, ``cut_bottom_idx``,
         ``cut_top_idx``, ``cut_n_planes``.
     """
     from .plotting import plot_unitcell_atoms
+
+    if cuts not in ("right", "left", "all"):
+        raise ValueError(
+            f"Unknown cuts mode: {cuts!r}. Must be 'right', 'left', or 'all'."
+        )
 
     # ---- Parse input ----
     if hasattr(input_structure, "positions"):
@@ -110,14 +119,12 @@ def cutslab(
         raise ValueError(
             f"Charges length ({len(charges_list)}) does not match atoms ({len(atoms)})."
         )
+    # Track input indices through slicing (charges for validation).
+    atoms.arrays[_INDEX_KEY] = np.arange(len(atoms))
 
     L = float(atoms.cell.lengths()[axis])
     if L <= 0.0:
         raise ValueError("Invalid cell length on selected axis.")
-
-    # Position-matching tolerance for reconstruction masks (clustering uses
-    # adaptive logic when plane_tol is None).
-    pos_tol = 0.05 if plane_tol is None else float(plane_tol)
 
     coords = atoms.positions[:, axis]
     atoms_z_matrix = np.array(
@@ -130,6 +137,14 @@ def cutslab(
     reduced_counts = compute_reduced_counts(atoms_z_matrix)
     planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
     n = len(planes_sorted)
+    validation = {
+        "charges_list": charges_list,
+        "reduced_counts": reduced_counts,
+        "charge_tol": charge_tol,
+        "dipole_tol": dipole_tol,
+        "max_gap": _max_z_gap(coords),
+        "axis": axis,
+    }
 
     vec = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
     miller = vec[axis]
@@ -139,9 +154,7 @@ def cutslab(
     else:
         miller_str = "".join(str(i) for i in miller)
 
-    plane_names, plane_name_map = assign_plane_names(
-        planes_sorted, atoms=atoms, axis=axis
-    )
+    plane_names, _ = assign_plane_names(planes_sorted, atoms=atoms, axis=axis)
 
     # Tasker III always requires termination-aware cutting
     if reconstruction is not None and cut_at == "all":
@@ -165,66 +178,12 @@ def cutslab(
             recon_del_counts[species] = recon_del_counts.get(species, 0) + 1
             recon_del_charge += charge_map.get(species, 0.0)
 
-    # ================================================================
-    # PATH C  –  cut_at="all": enumerate all zero-dipole cuts
-    # ================================================================
+    # ---- Planes allowed to become a surface ----
+    # A sub-slab is a contiguous run of planes [bottom, top] of the input
+    # slab; it never wraps through the vacuum.
     if cut_at == "all":
-        sequences = enumerate_cut_pairs(
-            planes, L, reduced_counts, charge_tol=charge_tol
-        )
-        zero_dipole = [
-            s for s in sequences
-            if s["is_stoich"]
-            and s["is_neutral"]
-            and abs(s["net_dipole"]) <= dipole_tol
-        ]
-        valid_sequences = _filter_sequences_by_cuts(zero_dipole, cuts)
-        valid_sequences.sort(key=lambda s: (s["bottom_cut"], s["top_cut"]))
-
-        if valid_sequences:
-            if plot:
-                plot_path = (
-                    f"{plot_out_dir}/{stem}_hkl_{miller_str}_planes.png"
-                )
-                plot_unitcell_atoms(
-                    atoms_z_matrix, L, miller,
-                    out_png=plot_path, plane_tol=plane_tol, planes=planes,
-                    zbot=None, ztop=None, dipole=0,
-                    plane_names=list(plane_names),
-                )
-
-            slab_atoms = _build_slabs_from_sequences(
-                atoms, planes_sorted, valid_sequences, L,
-                reconstruction, cut_plane_counts, delete_info,
-                {0, n - 1}, plane_tol, vacuum, axis, verbose,
-                plane_names=plane_names,
-            )
-            slab_atoms.sort(key=len)
-            return slab_atoms
-
-        # Tasker III fallback (independent discovery, only without
-        # user-provided reconstruction)
-        if reconstruction is None:
-            return _tasker3_fallback(
-                atoms, atoms_z_matrix, planes, planes_sorted,
-                reduced_counts, plane_names, plane_name_map,
-                L, axis, miller, stem, charges,
-                plane_tol, charge_tol, dipole_tol,
-                bond_threshold, bond_distances,
-                plot_out_dir, plot, verbose, vacuum,
-                plot_unitcell_atoms,
-                miller_str=miller_str,
-            )
-
-        raise ValueError(
-            "No valid cuts found in cut_at='all' mode "
-            "(even after accounting for reconstruction)."
-        )
-
-    # ================================================================
-    # PATH A  –  cut_at="termination" or specific plane name(s)
-    # ================================================================
-    if cut_at == "termination":
+        valid_boundary_names = set(plane_names)
+    elif cut_at == "termination":
         valid_boundary_names = {plane_names[0], plane_names[-1]}
     elif isinstance(cut_at, str):
         matched = {n for n in plane_names if plane_name_matches(cut_at, n)}
@@ -336,25 +295,16 @@ def cutslab(
 
     valid_cuts.sort(key=lambda c: c["n_planes"])
 
-    if cuts == "right" and valid_cuts:
+    if valid_cuts and cuts == "right":
         fixed_bot = min(c["bottom_plane"] for c in valid_cuts)
         valid_cuts = [
             c for c in valid_cuts if c["bottom_plane"] == fixed_bot
         ]
-    elif cuts == "left" and valid_cuts:
+    elif valid_cuts and cuts == "left":
         fixed_top = max(c["top_plane"] for c in valid_cuts)
         valid_cuts = [
             c for c in valid_cuts if c["top_plane"] == fixed_top
         ]
-    elif cuts == "all":
-        pass
-    else:
-        raise ValueError(
-            f"Unknown cuts mode: {cuts!r}. "
-            f"Must be 'right', 'left', or 'all'."
-        )
-
-    valid_cuts.sort(key=lambda c: c["n_planes"])
 
     if verbose:
         print(f"\nPlane stacking: {' '.join(plane_names)}")
@@ -374,9 +324,15 @@ def cutslab(
             )
 
     if not valid_cuts:
+        polar_hint = "" if reconstruction is not None else (
+            " If the slab is polar (Tasker III), build it with "
+            "generate_slabs_for_miller and pass reconstruction=term['reconstruction']."
+        )
         raise ValueError(
             "No stoichiometric, charge-neutral, zero-dipole cuts found "
-            f"matching cut_at={cut_at!r}."
+            f"matching cut_at={cut_at!r} (charge_tol={charge_tol}, "
+            f"dipole_tol={dipole_tol}). Relaxed slabs usually need a larger "
+            "dipole_tol, and rumpled planes a larger plane_tol." + polar_hint
         )
 
     # ---- Prepare plot names ----
@@ -392,6 +348,7 @@ def cutslab(
     z_s = np.array([p["z_center"] % L for p in planes_sorted])
 
     # ---- Build sub-slabs with optional reconstruction ----
+    reference_plane = reconstruction.get("cut_plane_frac") if reconstruction else None
     slab_atoms = []
     for cut_idx, cut in enumerate(valid_cuts):
         atom_indices = []
@@ -401,7 +358,8 @@ def cutslab(
         slab = atoms[atom_indices]
 
         if reconstruction and delete_info:
-            all_delete = []
+            position = {orig: k for k, orig in enumerate(atom_indices)}
+            to_delete = set()
             surface_pidxs = (
                 [cut["bottom_plane"]]
                 if cut["bottom_plane"] == cut["top_plane"]
@@ -410,25 +368,13 @@ def cutslab(
             for pidx in surface_pidxs:
                 if pidx not in recon_eligible:
                     continue
-                plane_z = planes_sorted[pidx]["z_center"]
-                surface_indices = [
-                    j for j in range(len(slab))
-                    if abs(slab.positions[j, axis] - plane_z) < pos_tol
-                ]
-                surface_counts = {}
-                for j in surface_indices:
-                    Z = int(slab.numbers[j])
-                    surface_counts[Z] = surface_counts.get(Z, 0) + 1
-                if surface_counts == cut_plane_counts:
-                    del_idx = _apply_reconstruction(
-                        slab, surface_indices, delete_info, axis=axis,
-                    )
-                    all_delete.extend(del_idx)
-            if all_delete:
-                keep = [
-                    i for i in range(len(slab)) if i not in set(all_delete)
-                ]
-                slab = slab[keep]
+                surface_indices = [position[j] for j in planes_sorted[pidx]["indices"]]
+                to_delete.update(_apply_reconstruction(
+                    slab, surface_indices, delete_info, axis=axis,
+                    reference_plane=reference_plane,
+                ))
+            if to_delete:
+                slab = slab[[i for i in range(len(slab)) if i not in to_delete]]
 
         apply_vacuum_to_slab(slab, vacuum=vacuum, axis=axis)
 
@@ -439,6 +385,7 @@ def cutslab(
         slab.info["cut_bottom_idx"] = cut["bottom_plane"]
         slab.info["cut_top_idx"] = cut["top_plane"]
         slab.info["cut_n_planes"] = cut["n_planes"]
+        _finalize_slab(slab, **validation)
 
         if plot:
             bi = cut["bottom_plane"]
@@ -468,220 +415,42 @@ def cutslab(
 
         slab_atoms.append(slab)
 
+    slab_atoms.sort(key=len)
     return slab_atoms
 
 
 # ---- Private helpers -------------------------------------------------------
 
 
-def _filter_sequences_by_cuts(zero_dipole, cuts):
-    """Apply the ``cuts`` mode filter to a list of zero-dipole sequences."""
-    if cuts == "all":
-        return list(zero_dipole)
-
-    if not zero_dipole:
-        return []
-
-    all_bot = sorted(set(s["bottom_cut"] for s in zero_dipole))
-    all_top = sorted(set(s["top_cut"] for s in zero_dipole), reverse=True)
-
-    if cuts == "right":
-        fixed_bot = all_bot[0]
-        return [s for s in zero_dipole if s["bottom_cut"] == fixed_bot]
-    elif cuts == "left":
-        fixed_top = all_top[0]
-        return [s for s in zero_dipole if s["top_cut"] == fixed_top]
-    elif cuts == "all":
-        return list(zero_dipole)
-    else:
-        raise ValueError(
-            f"Unknown cuts mode: {cuts!r}. "
-            f"Must be 'right', 'left', or 'all'."
-        )
-
-
-def _build_slabs_from_sequences(
-    atoms, planes_sorted, valid_sequences, L,
-    reconstruction, cut_plane_counts, delete_info,
-    endpoint_indices, plane_tol, vacuum, axis, verbose,
-    plane_names=None,
-):
-    """Build Atoms sub-slabs from validated sequences (``cut_at='all'`` path)."""
-    n = len(planes_sorted)
-
-    recon_eligible = set()
-    if reconstruction and cut_plane_counts:
-        for i, plane in enumerate(planes_sorted):
-            if plane["counts"] == cut_plane_counts and i not in endpoint_indices:
-                recon_eligible.add(i)
-
-    slab_atoms = []
-    for idx, seq in enumerate(valid_sequences, start=1):
-        zbot, ztop = compute_cut_positions(
-            sorted(
-                [p for p in [planes_sorted[i] for i in range(n)]],
-                key=lambda p: p["z_center"] % L,
-            ),
-            L, seq["bottom_cut"], seq["top_cut"],
-        )
-        atom_indices = []
-        for pidx in seq["plane_indices"]:
-            atom_indices.extend(planes_sorted[pidx]["indices"])
-        atom_indices = sorted(set(atom_indices))
-        slab = atoms[atom_indices]
-
-        if reconstruction and delete_info and recon_eligible:
-            pi_bot = seq["plane_indices"][0]
-            pi_top = seq["plane_indices"][-1]
-            all_delete = []
-            for pidx in [pi_bot, pi_top]:
-                if pidx not in recon_eligible:
-                    continue
-                plane_z = planes_sorted[pidx]["z_center"]
-                surface_indices = [
-                    j for j in range(len(slab))
-                    if abs(slab.positions[j, axis] - plane_z) < (
-                        0.05 if plane_tol is None else float(plane_tol)
-                    )
-                ]
-                surface_counts = {}
-                for j in surface_indices:
-                    Z = int(slab.numbers[j])
-                    surface_counts[Z] = surface_counts.get(Z, 0) + 1
-                if surface_counts == cut_plane_counts:
-                    del_idx = _apply_reconstruction(
-                        slab, surface_indices, delete_info, axis=axis,
-                    )
-                    all_delete.extend(del_idx)
-            if all_delete:
-                keep = [
-                    i for i in range(len(slab)) if i not in set(all_delete)
-                ]
-                slab = slab[keep]
-
-        apply_vacuum_to_slab(slab, vacuum=vacuum, axis=axis)
-
-        pi_bot_name = seq["plane_indices"][0]
-        pi_top_name = seq["plane_indices"][-1]
-        slab.info["cut_bottom_plane"] = (
-            plane_names[pi_bot_name] if plane_names else f"P{pi_bot_name}"
-        )
-        slab.info["cut_top_plane"] = (
-            plane_names[pi_top_name] if plane_names else f"P{pi_top_name}"
-        )
-        slab.info["cut_bottom_idx"] = pi_bot_name
-        slab.info["cut_top_idx"] = pi_top_name
-        slab.info["cut_n_planes"] = len(seq["plane_indices"])
-
-        slab_atoms.append(slab)
-
-        if verbose:
-            bottom_edge = (
-                f"{seq['bottom_cut']}"
-                f"-{(seq['bottom_cut'] + 1) % n}"
-            )
-            top_edge = (
-                f"{seq['top_cut']}"
-                f"-{(seq['top_cut'] + 1) % n}"
-            )
-            print(
-                f"{idx:3d}  bottom_cut={bottom_edge} top_cut={top_edge}  "
-                f"Q={seq['total_charge']:+.3f}  "
-                f"mu={seq['net_dipole']:+.4e}  "
-                f"z_center={seq['z_center']:.3f}"
-            )
-
-    return slab_atoms
-
-
-def _tasker3_fallback(
-    atoms, atoms_z_matrix, planes, planes_sorted,
-    reduced_counts, plane_names, plane_name_map,
-    L, axis, miller, stem, charges,
-    plane_tol, charge_tol, dipole_tol,
-    bond_threshold, bond_distances,
-    plot_out_dir, plot, verbose, vacuum,
-    plot_unitcell_atoms, miller_str="",
-):
-    """Tasker III independent discovery fallback for ``cut_at='all'``."""
-    if verbose:
-        print(
-            f"No Tasker I/II cut found for axis={axis}. "
-            f"Reconstructing Tasker III slab."
-        )
-
-    from .tasker3 import (
-        build_adjacency_matrix,
-        find_tasker3_candidates,
-        print_adjacency_matrix,
-        _midpoint,
-    )
-
-    adj = build_adjacency_matrix(
-        atoms, bond_threshold=bond_threshold, bond_distances=bond_distances,
-    )
-    if verbose:
-        n_bonds = int(np.sum(adj)) // 2
-        print(f"Adjacency: {n_bonds} bonds (threshold {bond_threshold})")
-        print_adjacency_matrix(adj, atoms)
-
-    candidates = find_tasker3_candidates(
-        planes_sorted, atoms_z_matrix, reduced_counts, adj, L,
-        surf_bulk=atoms, bond_distances=bond_distances,
-        charge_tol=charge_tol, verbose=verbose,
-        plane_names=plane_names,
-    )
-    if not candidates:
-        raise ValueError("No Tasker III reconstruction candidates found.")
-
-    best = candidates[0]
-    if verbose:
-        print(
-            f"\n-> Best Tasker III: plane {best['cut_plane_idx']}  "
-            f"mu={best['net_dipole']:+.4e}  "
-            f"bonds_broken={best['bond_score']}  "
-            f"distr={best['distribution_score']:+.4f}\n"
-        )
-
-    if plot:
-        z_s = np.array([p["z_center"] % L for p in planes_sorted])
-        bot_idx = (best["cut_plane_idx"] - 1) % len(planes_sorted)
-        top_idx = best["cut_plane_idx"]
-        zbot = _midpoint(z_s, L, bot_idx)
-        ztop = _midpoint(z_s, L, top_idx)
-        plot_path = f"{plot_out_dir}/{stem}_hkl_{miller_str}_tasker3.png"
-        plot_unitcell_atoms(
-            atoms_z_matrix, L, miller,
-            out_png=plot_path, plane_tol=plane_tol, planes=planes,
-            zbot=zbot, ztop=ztop, dipole=best["net_dipole"],
-        )
-
-    deleted_set = set(best["deletion_mask"])
-    keep = [i for i in range(len(atoms)) if i not in deleted_set]
-    slab = atoms[keep]
-    apply_vacuum_to_slab(slab, vacuum=vacuum, axis=axis)
-
-    cut_pi = best["cut_plane_idx"]
-    slab.info["cut_bottom_plane"] = plane_names[0]
-    slab.info["cut_top_plane"] = plane_names[-1]
-    slab.info["cut_bottom_idx"] = 0
-    slab.info["cut_top_idx"] = len(planes_sorted) - 1
-    slab.info["cut_n_planes"] = len(planes_sorted)
-
-    return [slab]
-
-
-def _apply_reconstruction(slab, plane_indices, delete_info, axis=2):
+def _apply_reconstruction(slab, plane_indices, delete_info, axis=2,
+                          reference_plane=None, tol=0.5):
     """
-    Apply a Tasker III reconstruction pattern to a set of atoms
-    identified as a surface plane.
+    Pick the atoms of a surface plane to delete for a Tasker III pattern.
+
+    *delete_info* lists ``(Z, fx, fy)`` of the deleted atoms in the
+    reference plane.  With *reference_plane* (all atoms of that plane as
+    ``(Z, fx, fy)``) the reference is first aligned onto the target plane
+    by an in-plane translation, so the same pattern is reproduced wherever
+    the plane copy sits; otherwise the atoms nearest to the stored
+    positions are taken.
 
     Returns list of atom indices (in *slab*) to delete.
     """
     frac = slab.get_scaled_positions()
     ab_axes = [i for i in range(3) if i != axis]
+    shift = np.zeros(2)
+    if reference_plane is not None:
+        target = [
+            (int(slab.numbers[j]), frac[j, ab_axes[0]], frac[j, ab_axes[1]])
+            for j in plane_indices
+        ]
+        cell2d = np.array(slab.cell)[np.ix_(ab_axes, ab_axes)]
+        match = _find_plane_alignment(reference_plane, target, cell2d, tol)
+        if match is not None:
+            shift = match[1]
     to_delete = set()
     for species, fx, fy in delete_info:
+        fx, fy = fx + shift[0], fy + shift[1]
         best_j = None
         best_d = np.inf
         for j in plane_indices:
@@ -689,8 +458,8 @@ def _apply_reconstruction(slab, plane_indices, delete_info, axis=2):
                 continue
             if slab.numbers[j] != species:
                 continue
-            dfx = abs((frac[j, ab_axes[0]] % 1.0) - fx)
-            dfy = abs((frac[j, ab_axes[1]] % 1.0) - fy)
+            dfx = abs((frac[j, ab_axes[0]] - fx) % 1.0)
+            dfy = abs((frac[j, ab_axes[1]] - fy) % 1.0)
             dfx = min(dfx, 1.0 - dfx)
             dfy = min(dfy, 1.0 - dfy)
             d = np.sqrt(dfx**2 + dfy**2)

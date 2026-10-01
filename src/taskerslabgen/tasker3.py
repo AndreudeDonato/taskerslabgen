@@ -2,10 +2,15 @@ import numpy as np
 from itertools import combinations
 from math import comb as math_comb
 
+from ase import Atoms
 from ase.data import atomic_numbers, covalent_radii, chemical_symbols
-from ase.build import surface
+from ase.neighborlist import neighbor_list
 
 from .core import (
+    _charges_to_list,
+    _finalize_slab,
+    _max_z_gap,
+    _tag_atom_indices,
     build_surface,
     compute_projection,
     identify_planes,
@@ -13,92 +18,82 @@ from .core import (
     assign_plane_names,
     apply_vacuum_to_slab,
     plane_name_matches,
+    surface_bulk_cell,
 )
 
 
 def build_adjacency_matrix(atoms, bond_threshold=(0.85, 1.15), bond_distances=None,
-                           bulk_atoms=None):
+                           bulk_atoms=None, miller=None):
     """
-    Build a boolean adjacency matrix using covalent radii and PBC.
+    Build a bond-count matrix using covalent radii and PBC.
 
-    Two atoms are bonded when their minimum-image distance falls within
-    ``[lo * d_ref, hi * d_ref]`` where ``d_ref`` is either the
-    user-supplied reference or the sum of covalent radii.
+    ``adj[i, j]`` is the number of periodic images of atom *j* bonded to
+    atom *i*: their distance falls within ``[lo * d_ref, hi * d_ref]`` where
+    ``d_ref`` is either the user-supplied reference or the sum of covalent
+    radii.  Counting images keeps bond counts right in small cells; use
+    ``adj > 0`` for a boolean view.
 
     Parameters
     ----------
     atoms : Atoms
-        The structure whose atom indices will label the adjacency matrix.
+        The structure whose atom indices will label the matrix.
     bond_threshold : tuple of float
         ``(lo, hi)`` scaling factors applied to the reference distance.
-    bulk_atoms : Atoms, optional
-        Original bulk cell.  When provided the **bulk** cell vectors are
-        used for the minimum-image distance calculation, which avoids
-        artifacts that arise when ``ase.build.surface`` produces a
-        c-vector that is not a true bulk repeat along the surface normal.
     bond_distances : dict, optional
         Per-pair reference distances.
         Keys: ``"Ce-O"`` style strings (order irrelevant) or tuples of
         atomic numbers.
         Values: ``float`` (scaled by *bond_threshold*) or ``None``
         (forbid that pair entirely).
+    bulk_atoms : Atoms, optional
+        Original bulk cell, for *atoms* built by
+        ``build_surface(bulk_atoms, miller)``.  Periodic images then follow
+        the true bulk lattice (:func:`surface_bulk_cell`) instead of the
+        surface cell, whose third vector is not a bulk lattice vector.
+    miller : tuple of int, optional
+        Miller index of *atoms*; required with *bulk_atoms*.
 
     Returns
     -------
-    ndarray, shape (N, N)
-        Boolean adjacency matrix.
+    ndarray of int, shape (N, N)
+        Symmetric bond-count matrix.
     """
-    from ase import Atoms as AseAtoms
-    from ase.data import atomic_numbers as ase_atomic_numbers
-
-    n = len(atoms)
-
     if bulk_atoms is not None:
-        temp = AseAtoms(
+        if miller is None:
+            raise ValueError(
+                "bulk_atoms requires miller: the bulk lattice must be rotated into "
+                "the surface frame (see surface_bulk_cell)."
+            )
+        atoms = Atoms(
             numbers=atoms.numbers,
             positions=atoms.get_positions(),
-            cell=bulk_atoms.cell[:],
-            pbc=[True, True, True],
+            cell=surface_bulk_cell(bulk_atoms, miller),
+            pbc=True,
         )
-        dists = temp.get_all_distances(mic=True)
-    else:
-        dists = atoms.get_all_distances(mic=True)
-    adj = np.zeros((n, n), dtype=bool)
+
+    n = len(atoms)
+    adj = np.zeros((n, n), dtype=int)
     lo, hi = bond_threshold
+    manual_map = _parse_bond_distances_map(bond_distances)
 
-    manual_map = {}
-    if bond_distances:
-        for key, d in bond_distances.items():
-            if isinstance(key, str):
-                parts = key.split("-")
-                if len(parts) != 2:
-                    raise ValueError(f"Bond key must be 'X-Y', got: {key!r}")
-                a_str, b_str = parts[0].strip(), parts[1].strip()
-                a = ase_atomic_numbers[a_str]
-                b = ase_atomic_numbers[b_str]
-            else:
-                a, b = key
-                if isinstance(a, str):
-                    a = ase_atomic_numbers[a]
-                if isinstance(b, str):
-                    b = ase_atomic_numbers[b]
-            manual_map[(min(a, b), max(a, b))] = d
+    species = sorted({int(z) for z in atoms.numbers})
+    slot = {z: k for k, z in enumerate(species)}
+    ref = np.full((len(species), len(species)), np.nan)
+    for za in species:
+        for zb in species:
+            pair = (min(za, zb), max(za, zb))
+            d = manual_map.get(pair, covalent_radii[za] + covalent_radii[zb])
+            if d is not None:
+                ref[slot[za], slot[zb]] = d
+    if np.all(np.isnan(ref)):
+        return adj
 
-    numbers = atoms.numbers
-    for i in range(n):
-        for j in range(i + 1, n):
-            zi, zj = int(numbers[i]), int(numbers[j])
-            pair = (min(zi, zj), max(zi, zj))
-            if pair in manual_map:
-                ref = manual_map[pair]
-                if ref is None:
-                    continue
-            else:
-                ref = covalent_radii[zi] + covalent_radii[zj]
-            if lo * ref <= dists[i, j] <= hi * ref:
-                adj[i, j] = True
-                adj[j, i] = True
-
+    i_idx, j_idx, dist = neighbor_list("ijd", atoms, hi * float(np.nanmax(ref)))
+    kinds = np.array([slot[int(z)] for z in atoms.numbers])
+    pair_ref = ref[kinds[i_idx], kinds[j_idx]]
+    with np.errstate(invalid="ignore"):
+        bonded = (dist >= lo * pair_ref) & (dist <= hi * pair_ref)
+    np.add.at(adj, (i_idx[bonded], j_idx[bonded]), 1)
     return adj
 
 
@@ -369,7 +364,10 @@ def find_tasker3_candidates(
         Candidates sorted by ``(prefer_match, abs_dipole, bond_score,
         distribution_score)``.  Each dict contains ``cut_plane_idx``,
         ``deletion_mask``, ``net_dipole``, ``bond_score``,
-        ``distribution_score``, ``plane_counts``, and more.
+        ``distribution_score``, ``plane_counts``, ``is_neutral``
+        (``|total_charge| <= charge_tol``), and more.  Polar candidates
+        are kept so they can be inspected; callers that build slabs keep
+        only neutral ones with ``|net_dipole| <= dipole_tol``.
     """
     n = len(planes_sorted)
     candidates = []
@@ -521,6 +519,7 @@ def find_tasker3_candidates(
                 "net_dipole": mu,
                 "abs_dipole": abs(mu),
                 "total_charge": total_q,
+                "is_neutral": abs(total_q) <= charge_tol,
                 "q_recon": q_recon,
                 "distribution_score": dist_score,
                 "matches_prefer_plane": matches_prefer,
@@ -562,9 +561,38 @@ def _midpoint(z_sorted, L, i):
     n = len(z_sorted)
     z0 = z_sorted[i]
     z1 = z_sorted[(i + 1) % n]
-    if z1 < z0:
+    if z1 <= z0:  # wraps (or a single plane: next copy is one L above)
         z1 += L
     return 0.5 * (z0 + z1)
+
+
+def _select_tasker3_candidates(candidates, miller, dipole_tol, charge_tol):
+    """
+    Keep the Tasker III candidates that give neutral, non-polar slabs.
+
+    Raises ``ValueError`` with an explanation when there are none.
+    """
+    if not candidates:
+        raise ValueError(
+            f"No Tasker III reconstruction candidates for {tuple(miller)}: in this "
+            "cell no plane can be made stoichiometric by removing the same atoms "
+            "from both surfaces (the excess per surface is an odd number of atoms). "
+            "An in-plane supercell, e.g. bulk_atoms * (2, 2, 1), usually fixes this."
+        )
+    valid = [
+        c for c in candidates
+        if abs(c["net_dipole"]) <= dipole_tol and abs(c["total_charge"]) <= charge_tol
+    ]
+    if not valid:
+        best = min(candidates, key=lambda c: c["abs_dipole"])
+        raise ValueError(
+            f"No non-polar Tasker III reconstruction found for {tuple(miller)}: "
+            "removing atoms symmetrically from one plane type leaves a dipole of "
+            f"at least {best['abs_dipole']:.4g} e*A per slab (dipole_tol={dipole_tol}). "
+            "This stacking needs different reconstructions on the two surfaces, "
+            "which taskerslabgen does not build."
+        )
+    return valid
 
 
 def build_tasker3_slabs(
@@ -582,9 +610,10 @@ def build_tasker3_slabs(
     """
     Build Tasker III slabs with symmetric surface reconstruction.
 
-    Cuts at the specified plane, then symmetrically deletes the same
-    atoms from both the top and bottom surface planes to restore
-    stoichiometry.
+    Cuts at the specified plane, then deletes the copies of the
+    *deletion_mask* atoms from both the bottom and the top copy of that
+    plane, so both surfaces carry the same (translation-related) pattern
+    and the slab is stoichiometric.
 
     Parameters
     ----------
@@ -597,7 +626,8 @@ def build_tasker3_slabs(
     cut_plane_idx : int
         Index into *planes_sorted* identifying the reconstruction plane.
     deletion_mask : tuple
-        Atom indices to delete from the reconstruction plane.
+        Indices (into the 1-layer cell / *atoms_z_matrix*) of the atoms to
+        delete from the reconstruction plane.
     planes_sorted : list of dict
         Planes sorted by z-centre.
     atoms_z_matrix : ndarray
@@ -607,89 +637,39 @@ def build_tasker3_slabs(
     vacuum : float
         Vacuum to add (angstrom, applied to each side).
     plane_tol : float or None
-        Tolerance for identifying surface planes by z-coordinate.
-        ``None`` uses ``0.05`` Å for position matching (clustering itself
-        is done upstream by :func:`identify_planes`).
+        Unused; kept for backward compatibility.  The surface planes are
+        located from the cut positions, not by a z tolerance.
 
     Returns
     -------
     list of Atoms
         One slab per requested thickness, sorted by atom count.
     """
-    cut_plane = planes_sorted[cut_plane_idx]
+    n_uc = len(atoms_z_matrix)
     n_planes = len(planes_sorted)
     z_sorted = np.array([p["z_center"] % L for p in planes_sorted])
 
-    bot_cut_idx = (cut_plane_idx - 1) % n_planes
-    top_cut_idx = cut_plane_idx
-    zbot = _midpoint(z_sorted, L, bot_cut_idx)
-    ztop = _midpoint(z_sorted, L, top_cut_idx)
-
-    ref_slab = surface(bulk_atoms, miller, layers=1, vacuum=0.0)
-    ref_slab.set_pbc((True, True, True))
-    frac_ref = ref_slab.get_scaled_positions()
-
-    deleted_set = set(deletion_mask)
-    delete_info = []
-    for idx in cut_plane["indices"]:
-        if idx in deleted_set:
-            species = int(atoms_z_matrix[idx, 0])
-            fx = frac_ref[idx, 0] % 1.0
-            fy = frac_ref[idx, 1] % 1.0
-            delete_info.append((species, fx, fy))
-
-    plane_z_uc = cut_plane["z_center"] % L
+    # The cut plane is the only plane between these two midpoints.
+    zbot = _midpoint(z_sorted, L, (cut_plane_idx - 1) % n_planes)
+    ztop = _midpoint(z_sorted, L, cut_plane_idx)
+    span = (ztop - zbot) % L
+    deleted = np.array(sorted(int(i) for i in deletion_mask), dtype=int)
 
     slabs = []
     for lt in layer_thickness_list:
-        slab_full = surface(bulk_atoms, miller, layers=lt + 4, vacuum=0.0)
-        slab_full.set_pbc((True, True, True))
+        n_layers = lt + 3
+        slab_full = build_surface(bulk_atoms, miller, layers=n_layers)
+        if not np.array_equal(slab_full.numbers, np.tile(bulk_atoms.numbers, n_layers)):
+            raise RuntimeError("Unexpected atom order from ase.build.surface.")
+        uc_index = np.arange(len(slab_full)) % n_uc
+        z = slab_full.positions[:, 2]
 
-        span = (ztop - zbot) % L
-        zmin = zbot
-        zmax = zbot + lt * L + span
+        keep = (z >= zbot) & (z <= zbot + lt * L + span)
+        bottom = (z >= zbot) & (z <= zbot + span)
+        top = (z >= zbot + lt * L) & (z <= zbot + lt * L + span)
+        remove = (bottom | top) & np.isin(uc_index, deleted)
 
-        keep_mask = [(zmin <= a.position[2] <= zmax) for a in slab_full]
-        slab = slab_full[keep_mask]
-
-        z_positions = slab.positions[:, 2]
-        frac_slab = slab.get_scaled_positions()
-
-        bottom_z = plane_z_uc
-        if bottom_z < zmin:
-            bottom_z += L * np.ceil((zmin - bottom_z) / L)
-        top_z = bottom_z + lt * L
-
-        pos_tol = 0.05 if plane_tol is None else float(plane_tol)
-        bottom_plane_mask = np.abs(z_positions - bottom_z) < pos_tol
-        top_plane_mask = np.abs(z_positions - top_z) < pos_tol
-
-        bottom_indices = np.where(bottom_plane_mask)[0]
-        top_indices = np.where(top_plane_mask)[0]
-
-        to_delete = set()
-        for target_indices in [bottom_indices, top_indices]:
-            for species, fx, fy in delete_info:
-                best_j = None
-                best_dist = np.inf
-                for j in target_indices:
-                    if j in to_delete:
-                        continue
-                    if slab.numbers[j] != species:
-                        continue
-                    dfx = abs((frac_slab[j, 0] % 1.0) - fx)
-                    dfy = abs((frac_slab[j, 1] % 1.0) - fy)
-                    dfx = min(dfx, 1.0 - dfx)
-                    dfy = min(dfy, 1.0 - dfy)
-                    d = dfx**2 + dfy**2
-                    if d < best_dist:
-                        best_dist = d
-                        best_j = j
-                if best_j is not None:
-                    to_delete.add(best_j)
-
-        keep = [i for i in range(len(slab)) if i not in to_delete]
-        slab = slab[keep]
+        slab = slab_full[keep & ~remove]
         slab.set_pbc((True, True, True))
         apply_vacuum_to_slab(slab, vacuum=vacuum, axis=2)
         slabs.append(slab)
@@ -734,8 +714,8 @@ def reconstruct_tasker_iii(
     bulk_name : str
         Label used in filenames.
     plane_tol : float or None
-        Tolerance for plane identification (angstrom).  ``None`` (default)
-        uses adaptive z-gap clustering.
+        Largest z-gap (angstrom) within one plane.  ``None`` (default)
+        uses 0.1 Å.
     charge_tol : float
         Tolerance for charge neutrality.
     dipole_tol : float
@@ -759,7 +739,13 @@ def reconstruct_tasker_iii(
     -------
     dict
         Contains ``"slab_atoms"``, ``"best_candidate"``,
-        ``"all_candidates"``, ``"tasker_type"``, and ``"plot"`` path.
+        ``"all_candidates"`` (including rejected polar ones),
+        ``"tasker_type"``, and ``"plot"`` path.
+
+    Raises
+    ------
+    ValueError
+        If no candidate gives a neutral, non-polar slab.
     """
     from .plotting import plot_unitcell_atoms
 
@@ -767,11 +753,11 @@ def reconstruct_tasker_iii(
     if verbose:
         print(f"\nTasker III reconstruction for {bulk_name} ({h},{k},{l})\n")
 
-    surf_bulk = build_surface(
-        bulk_atoms, miller, layers=1, vacuum=0.0, verbose=verbose
-    )
+    charges_list = _charges_to_list(bulk_atoms, charges)
+    bulk = _tag_atom_indices(bulk_atoms)
+    surf_bulk = build_surface(bulk, miller, layers=1, verbose=verbose)
     atoms_z_matrix, L = compute_projection(
-        bulk_atoms, surf_bulk, charges, miller, verbose=verbose
+        bulk, surf_bulk, charges, miller, verbose=verbose
     )
     planes = identify_planes(
         atoms_z_matrix, L, plane_tol=plane_tol, charge_tol=charge_tol
@@ -781,11 +767,11 @@ def reconstruct_tasker_iii(
 
     adj = build_adjacency_matrix(
         surf_bulk, bond_threshold=bond_threshold, bond_distances=bond_distances,
-        bulk_atoms=bulk_atoms,
+        bulk_atoms=bulk, miller=miller,
     )
     if verbose:
         n_bonds = int(np.sum(adj)) // 2
-        print(f"Planes: {len(planes_sorted)}, reduced: {reduced_counts}, bonds_broken: {n_bonds}\n")
+        print(f"Planes: {len(planes_sorted)}, reduced: {reduced_counts}, bonds: {n_bonds}\n")
         print_adjacency_matrix(adj, surf_bulk)
 
     plane_names, _ = assign_plane_names(planes_sorted, atoms=surf_bulk)
@@ -796,10 +782,7 @@ def reconstruct_tasker_iii(
         prefer_plane=prefer_plane,
         plane_names=plane_names,
     )
-    if not candidates:
-        raise ValueError("No Tasker III reconstruction candidates found.")
-
-    best = candidates[0]
+    best = _select_tasker3_candidates(candidates, miller, dipole_tol, charge_tol)[0]
     if verbose:
         print(
             f"\n→ Best: plane {best['cut_plane_idx']}  "
@@ -822,13 +805,16 @@ def reconstruct_tasker_iii(
         )
 
     slabs = build_tasker3_slabs(
-        bulk_atoms, miller, layer_thickness_list,
+        bulk, miller, layer_thickness_list,
         cut_plane_idx=best["cut_plane_idx"],
         deletion_mask=best["deletion_mask"],
         planes_sorted=planes_sorted,
         atoms_z_matrix=atoms_z_matrix,
-        L=L, vacuum=vacuum, plane_tol=plane_tol,
+        L=L, vacuum=vacuum,
     )
+    max_gap = _max_z_gap(atoms_z_matrix[:, 1], period=L)
+    for slab in slabs:
+        _finalize_slab(slab, charges_list, reduced_counts, charge_tol, dipole_tol, max_gap)
 
     return {
         "plot": plot_path,

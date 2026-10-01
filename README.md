@@ -12,13 +12,16 @@ ASE-native Tasker I/II→III workflow with scored reconstructions and a
 The library:
 
 - projects atoms along the surface normal for any Miller index
-- clusters atoms into planes
+- clusters atoms into planes (single-linkage on z, fixed 0.1 Å tolerance, as in pymatgen)
 - enumerates Tasker cut pairs with stoichiometry + charge neutrality + dipole checks
 - performs Tasker III surface reconstruction (symmetric deletion, bond scoring,
   Coulomb-like distribution scoring that favours checkerboard arrangements)
-- stacking-aware plane naming (composition + fractional-position fingerprints)
+- stacking-aware plane naming (composition + in-plane geometry, up to translation and
+  in-plane lattice symmetry)
 - cuts thick slabs into thinner sub-slabs preserving termination
 - per-cut plots with unique Miller-index-aware filenames
+- checks every returned slab: stoichiometric, neutral, non-polar, no internal gaps
+  (raises `SlabValidationError` otherwise)
 
 ## Diagram
 
@@ -98,6 +101,14 @@ but are not required for the standard workflow.
 
 Library defaults are quiet: `plot=False` and prints only when `verbose=True`.
 
+Every slab returned by `generate_slabs_for_miller`, `cutslab` and
+`reconstruct_tasker_iii` is checked to be stoichiometric, charge-neutral,
+non-polar and free of internal gaps; a `SlabValidationError` is raised
+otherwise.  When no slab can satisfy the conditions (for example a polar
+stacking that symmetric deletion cannot fix, or an odd excess that needs an
+in-plane supercell) a `ValueError` explains why instead of returning a polar
+or non-stoichiometric structure.
+
 ---
 
 ## Tandem genslab + cutslab workflow
@@ -114,9 +125,10 @@ When working with relaxed supercells, the recommended workflow is:
    pass the `reconstruction` dict from the genslab output so that
    newly exposed interior planes receive the same atomic deletion.
 
-Plane identification uses stacking-aware fingerprints (composition +
-fractional xy positions relative to the in-plane centroid) so that
-ABAB stacking patterns are correctly distinguished.
+Plane names compare composition and in-plane geometry up to an in-plane
+translation, so translated copies of a plane share a name, while variants
+related only by a rotation or mirror of the in-plane lattice (ABAB stacking)
+get different letters of the same type.
 
 ### Tasker III limitation
 
@@ -165,11 +177,11 @@ classifies each surface as Tasker I/II (zero dipole) or Tasker III
 | `bulk_atoms` | `Atoms` | *required* | Bulk unit cell (ASE `Atoms` object). |
 | `charges` | `dict` or `list` | *required* | Formal charges.  Dict maps element symbols (e.g. `{"Ce": 4.0, "O": -2.0}`) or atomic numbers to values; list gives per-atom charges. |
 | `millers` | `tuple` or `list[tuple]` | *required* | Single Miller index `(h, k, l)` or list of Miller indices. |
-| `layer_thickness_list` | `list[int]` | *required* | Slab thicknesses in bulk repeat units (e.g. `[2, 4, 6]`). |
+| `layer_thickness_list` | `list[int]` | *required* | Slab thicknesses in bulk repeat units (e.g. `[2, 4, 6]`); a Tasker I/II slab of thickness *n* contains exactly *n* bulk repeat units. |
 | `bulk_name` | `str` | `"slab"` | Label used in plot and output filenames. |
-| `plane_tol` | `float` or `None` | `None` | Tolerance (Å) for grouping atoms into planes. `None` = adaptive z-gap clustering; a float forces a fixed override. |
+| `plane_tol` | `float` or `None` | `None` | Largest z-gap (Å) between neighbouring atoms of one plane (single-linkage clustering). `None` = 0.1 Å. |
 | `charge_tol` | `float` | `1e-3` | Tolerance for charge neutrality of a cut sequence. |
-| `dipole_tol` | `float` | `1e-6` | Dipole threshold — below this the surface is considered Tasker I/II. |
+| `dipole_tol` | `float` | `1e-6` | Dipole threshold — below this the surface is considered Tasker I/II; Tasker III reconstructions must also stay below it. |
 | `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of the slab. |
 | `plot` | `bool` | `False` | Generate stacking-axis plots showing planes and cuts. |
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
@@ -206,7 +218,7 @@ bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
 
 | Value | Behaviour |
 |---|---|
-| `"best"` | Return only the single best candidate per Miller index (lowest `abs_dipole`, then `bond_score`, then `distribution_score`). |
+| `"best"` | Return only the single best candidate per Miller index. Tasker I/II: the first zero-dipole bulk repeat unit in stacking order (deterministic). Tasker III: lowest `abs_dipole`, then `bond_score`, then `distribution_score`. |
 | `"all"` | Return every valid candidate, generating a separate plot for each. |
 
 **Returns**
@@ -261,14 +273,14 @@ termination.
 | `input_structure` | `Atoms` or path | *required* | Thick slab to cut. |
 | `charges` | `dict` or `list` | *required* | Formal charges (same format as `generate_slabs_for_miller`). |
 | `axis` | `int` | `2` | Cartesian axis perpendicular to the surface (0=x, 1=y, 2=z). |
-| `plane_tol` | `float` or `None` | `None` | Tolerance (Å) for grouping atoms into planes. `None` = adaptive z-gap clustering; a float forces a fixed override. |
+| `plane_tol` | `float` or `None` | `None` | Largest z-gap (Å) between neighbouring atoms of one plane (single-linkage clustering). `None` = 0.1 Å. |
 | `charge_tol` | `float` | `1e-3` | Tolerance for charge neutrality. |
-| `dipole_tol` | `float` | `1e-6` | Dipole threshold for zero-dipole cuts. |
+| `dipole_tol` | `float` | `1e-6` | Dipole threshold for zero-dipole cuts; relaxed slabs usually need a larger value. |
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
 | `plot` | `bool` | `False` | Generate a stacking-axis plot for each sub-slab. |
 | `verbose` | `bool` or `None` | `None` | Print plane stacking and cut details. |
-| `bond_threshold` | `tuple[float, float]` | `(0.85, 1.15)` | Scaling factors for the adjacency matrix (Tasker III fallback only). |
-| `bond_distances` | `dict` or `None` | `None` | Per-pair bond reference distances. |
+| `bond_threshold` | `tuple[float, float]` | `(0.85, 1.15)` | Unused; kept for backward compatibility. |
+| `bond_distances` | `dict` or `None` | `None` | Unused; kept for backward compatibility. |
 | `reconstruction` | `dict` or `None` | `None` | Tasker III reconstruction dict from genslab output (`term["reconstruction"]`). When provided, newly exposed interior planes receive the same atomic deletion. Forces `cut_at="termination"` if `cut_at` was `"all"`. |
 | `cut_at` | `str` or `list[str]` | `"termination"` | Where to place cuts (see below). |
 | `cuts` | `str` | `"right"` | Direction of cuts (see below). |
@@ -279,7 +291,7 @@ termination.
 | Value | Behaviour |
 |---|---|
 | `"termination"` | Cut only at planes matching the thick slab's top/bottom plane types. |
-| `"all"` | Cut at any boundary that gives a stoichiometric, charge-neutral, zero-dipole sub-slab. Automatically forced to `"termination"` when `reconstruction` is provided. |
+| `"all"` | Cut at any plane that gives a stoichiometric, charge-neutral, zero-dipole sub-slab (contiguous runs of planes only, never across the vacuum). Automatically forced to `"termination"` when `reconstruction` is provided. |
 | `str` (e.g. `"P0"`) | Cut at boundaries whose plane label matches. `"P0"` selects every `P0*` variant; `"P0a"` selects that variant (and `P0a-recon` if present). |
 | `list[str]` (e.g. `["P0", "P1"]`) | Cut at boundaries matching any of the listed plane types/variants. |
 
@@ -293,7 +305,10 @@ termination.
 
 **Returns**
 
-`list[Atoms]` — sub-slabs sorted from smallest to largest by atom count.
+`list[Atoms]` — sub-slabs sorted from smallest to largest by atom count,
+each checked to be stoichiometric, neutral, non-polar and free of internal gaps.
+If no valid cut exists a `ValueError` says why; for a polar (Tasker III) slab,
+build it with `generate_slabs_for_miller` and pass `reconstruction=` instead.
 
 Each `Atoms` object carries metadata in `.info`:
 - `"cut_bottom_plane"` — plane type name of the bottom surface
@@ -316,19 +331,23 @@ adj = build_adjacency_matrix(
     bond_threshold=(0.85, 1.15),
     bond_distances=None,
     bulk_atoms=None,
+    miller=None,
 )
 ```
 
-Build a boolean adjacency matrix using covalent radii and PBC.
+Build a bond-count matrix using covalent radii and PBC: `adj[i, j]` is the
+number of periodic images of atom *j* bonded to atom *i* (use `adj > 0` for a
+boolean view).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `atoms` | `Atoms` | *required* | Structure to compute bonds for. |
 | `bond_threshold` | `tuple[float, float]` | `(0.85, 1.15)` | `(lo, hi)` scaling factors on the reference distance. |
 | `bond_distances` | `dict` or `None` | `None` | Per-pair reference distances. |
-| `bulk_atoms` | `Atoms` or `None` | `None` | Original bulk cell — uses bulk PBC for minimum-image distances. |
+| `bulk_atoms` | `Atoms` or `None` | `None` | Original bulk cell, for `atoms = build_surface(bulk_atoms, miller)`: periodic images then follow the true bulk lattice in the surface frame (`surface_bulk_cell`). |
+| `miller` | `tuple` or `None` | `None` | Miller index of `atoms`; required with `bulk_atoms`. |
 
-Returns an `(N, N)` boolean `ndarray`.
+Returns an `(N, N)` integer `ndarray` (symmetric bond counts).
 
 ---
 
@@ -337,16 +356,19 @@ Returns an `(N, N)` boolean `ndarray`.
 ```python
 from taskerslabgen import assign_plane_names
 
-names, name_map = assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.1)
+names, name_map = assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.5)
 ```
 
 Assign hierarchical labels ``P{n}{letter}`` (e.g. ``P0a``, ``P0b``):
 
-- **Type** ``P{n}`` — same composition and in-plane geometry congruent under
-  D4 (90° rotations and mirrors).  Example: IrO₂ (001) diagonal vs
-  anti-diagonal IrO₂ planes share type ``P0`` as ``P0a`` / ``P0b``.
-- **Variant letter** — exact fingerprint match reuses the same full name;
-  D4-congruent but not identical gets the next letter along the stack.
+- **Type** ``P{n}`` — same composition, and in-plane geometry related by a
+  point-group operation of the in-plane lattice plus a translation (8
+  operations for a square lattice, 12 hexagonal, 4 rectangular, 2 oblique).
+  Example: IrO₂ (001) diagonal vs anti-diagonal IrO₂ planes share type
+  ``P0`` as ``P0a`` / ``P0b``.
+- **Variant letter** — planes related by a pure in-plane translation share the
+  full name; congruent but not translation-related planes get the next letter
+  along the stack.
 
 Helpers: `plane_name_base("P0a-recon") == "P0"`;
 `plane_name_matches("P0", "P0a")` is True.  Use these semantics in
@@ -357,7 +379,7 @@ Helpers: `plane_name_base("P0a-recon") == "P0"`;
 | `planes_sorted` | `list[dict]` | *required* | Planes sorted by z-centre. |
 | `atoms` | `Atoms` or `None` | `None` | Provide to enable spatial fingerprinting. |
 | `axis` | `int` | `2` | Stacking axis. |
-| `xy_tol` | `float` | `0.1` | Tolerance (fractional coordinates) for fingerprint comparison. |
+| `xy_tol` | `float` | `0.5` | Matching tolerance (Å, in-plane) for corresponding atoms. |
 
 Returns `(names, name_map)` where `names[i]` is the name of
 `planes_sorted[i]` and `name_map` is `{name: counts_dict}`.
@@ -392,7 +414,9 @@ Returns a dict with `"slab_atoms"`, `"best_candidate"`,
 |---|---|
 | `build_surface(bulk_atoms, miller, layers, vacuum, verbose)` | Build an ASE surface slab from a bulk structure. |
 | `compute_projection(bulk, surf_bulk, charges, miller, verbose)` | Compute `[Z, z, q]` matrix and lattice-plane spacing *L*. |
-| `identify_planes(atoms_z, L, plane_tol, charge_tol)` | Cluster atoms into atomic planes (`plane_tol=None` = adaptive z-gap clustering). |
+| `identify_planes(atoms_z, L, plane_tol, charge_tol)` | Cluster atoms into atomic planes (single-linkage; `plane_tol=None` = 0.1 Å). |
+| `surface_bulk_cell(bulk_atoms, miller)` | True bulk lattice in the frame of `build_surface` (its third vector stacks one layer onto the next). |
+| `validate_slab(slab, charges, reduced_counts, ...)` | Check stoichiometry, neutrality, dipole and internal gaps; raises `SlabValidationError`. |
 | `compute_reduced_counts(atoms_z)` | Compute reduced (primitive) stoichiometry. |
 | `is_stoichiometric_sequence(sequence_counts, reduced_counts)` | Check if a sequence is a whole-number multiple of bulk formula. |
 | `enumerate_cut_pairs(planes, L, reduced_counts, charge_tol)` | Enumerate all contiguous plane sequences with charge/dipole info. |
