@@ -198,6 +198,13 @@ raise.
 - cutslab warns when it returns only the input slab because its surface
   planes occur nowhere inside it (a Tasker III slab without
   ``reconstruction=``).
+- **cutslab bulk matching on relaxed calculations:** ``bulk_atoms`` may be
+  a supercell of the cell the slab was built from (a relaxed 2×2×2 bulk)
+  and differ from it by a few per cent of strain; the slab's period along
+  the normal is fitted on its interior; when relaxation splits every plane
+  (thin rutile (001) slabs), single atoms are registered instead of planes.
+  Tested on 48 relaxed FHI-aims slabs of rutile, anatase and fluorite
+  oxides, all of which failed or gave partial series before.
 - Anatase (101), reported against 0.3.1 (charged Ti₁₄O₂₆ slabs), gives
   stoichiometric, neutral slabs; regression test added
   (``bulk_files/TiO2_anatase.cif``).

@@ -968,12 +968,13 @@ def _bulk_plane_catalog(bulk_atoms, miller, plane_tol=None):
     return catalog, L, np.array(surf.cell[:2, :2])
 
 
-def _supercell_matrix(bulk_cell2d, cell2d):
-    """Integer matrix ``M`` with ``cell2d = M @ bulk_cell2d`` (in-plane rows)."""
+def _supercell_matrix(bulk_cell2d, cell2d, atol=0.02):
+    """Integer matrix ``M`` with ``cell2d = M @ bulk_cell2d`` (in-plane rows),
+    allowing a strain of about *atol* between the two cells."""
     M = np.asarray(cell2d, dtype=float) @ np.linalg.inv(bulk_cell2d)
     M_int = np.round(M).astype(int)
     det = int(round(np.linalg.det(M_int)))
-    if not np.allclose(M, M_int, atol=1e-3) or det == 0:
+    if not np.allclose(M, M_int, atol=atol) or det == 0:
         raise ValueError(
             "The slab's in-plane cell is not an integer supercell of the bulk "
             "surface cell; check bulk_atoms and miller."
@@ -1059,6 +1060,64 @@ def _plane_rmsd(ref, tgt, cell2d):
     return best
 
 
+def _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, site_tol=0.3):
+    """
+    Express the bulk plane catalog in the slab's in-plane cell *cell2d*, in
+    place: tiled when the slab cell is a supercell of the bulk surface cell,
+    folded (and relabelled) when *bulk_atoms* is a supercell of the cell the
+    slab was built from.  A few per cent of strain between the cells is
+    accepted.
+    """
+    M = np.asarray(cell2d, dtype=float) @ np.linalg.inv(bulk_cell2d)
+    if np.allclose(M, np.round(M), atol=0.02) and round(np.linalg.det(np.round(M))) != 0:
+        for entry in catalog:
+            entry["atoms"] = _tile_plane(entry["atoms"], bulk_cell2d, cell2d)
+            entry["counts"] = dict(Counter(a[0] for a in entry["atoms"]))
+        return
+    K = np.linalg.inv(M)  # bulk surface cell = K @ slab cell
+    K_int = np.round(K).astype(int)
+    copies = abs(int(round(np.linalg.det(K_int))))
+    if not np.allclose(K, K_int, atol=0.02) or copies == 0:
+        raise ValueError(
+            "The slab's in-plane cell is not an integer supercell of the bulk surface "
+            "cell, nor the other way round; check bulk_atoms and miller."
+        )
+    for entry in catalog:
+        sites = []
+        for Z, fx, fy, dz in entry["atoms"]:
+            f = (np.array([fx, fy]) @ K_int) % 1.0
+            for site in sites:
+                if site[0][0] == Z and _frac_distance(site[0][1:3], f, cell2d) < site_tol:
+                    site[1] += 1
+                    break
+            else:
+                sites.append([(Z, f[0], f[1], dz), 1])
+        if any(c != copies for _, c in sites):
+            raise ValueError(
+                "bulk_atoms is not periodic with the slab's in-plane cell; pass the bulk "
+                "cell the slab was built from."
+            )
+        entry["atoms"] = [a for a, _ in sites]
+        entry["counts"] = dict(Counter(a[0] for a in entry["atoms"]))
+    # Labels count atoms per cell: recompute them in the slab's cell.
+    from ase import Atoms
+
+    numbers, scaled, planes, start = [], [], [], 0
+    for entry in catalog:
+        for Z, fx, fy, dz in entry["atoms"]:
+            numbers.append(Z)
+            scaled.append([fx, fy, ((entry["z"] + dz) / L) % 1.0])
+        planes.append({"indices": list(range(start, len(numbers))), "counts": entry["counts"]})
+        start = len(numbers)
+    cell = np.zeros((3, 3))
+    cell[:2, :2] = cell2d
+    cell[2, 2] = L
+    folded = Atoms(numbers=numbers, scaled_positions=scaled, cell=cell, pbc=True)
+    labels, _ = assign_plane_names(planes, atoms=folded)
+    for entry, label in zip(catalog, labels):
+        entry["label"] = label
+
+
 def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
                       charge_tol=1e-3, deform_tol=0.3):
     """
@@ -1077,9 +1136,7 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
     """
     catalog, L, bulk_cell2d = _bulk_plane_catalog(bulk_atoms, miller, plane_tol)
     cell2d = np.array(atoms.cell[:2, :2])
-    for entry in catalog:
-        entry["atoms"] = _tile_plane(entry["atoms"], bulk_cell2d, cell2d)
-        entry["counts"] = dict(Counter(a[0] for a in entry["atoms"]))
+    _catalog_in_cell(catalog, bulk_cell2d, cell2d, L)
 
     numbers = atoms.numbers
     z = atoms.positions[:, 2]
@@ -1101,11 +1158,26 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
         (p["z_center"] - b["z"]) % L
         for p in middle for b in catalog if b["counts"] == p["counts"]
     ]
-    if not candidates:
+    # Atoms of the middle half of the slab, for registering single atoms when
+    # relaxation split every plane (no slab plane has a bulk composition).
+    span = z.max() - z.min()
+    inner = np.flatnonzero(np.abs(z - (z.min() + 0.5 * span)) <= 0.25 * span + 1e-9)
+    species_planes = {
+        int(Zi): np.array([b["z"] for b in catalog if int(Zi) in b["counts"]])
+        for Zi in set(numbers.tolist())
+    }
+    if any(len(v) == 0 for v in species_planes.values()):
         raise ValueError(
-            f"The slab's planes do not match the {tuple(miller)} planes of the bulk; "
-            "check bulk_atoms and miller."
+            f"The slab contains elements absent from the {tuple(miller)} planes of the "
+            "bulk; check bulk_atoms and miller."
         )
+
+    def atom_cost(offset):
+        """Summed distance of the inner atoms to the nearest bulk plane of their species."""
+        return float(sum(
+            np.min(np.abs(((z[i] - species_planes[int(numbers[i])] - offset + 0.5 * L) % L) - 0.5 * L))
+            for i in inner
+        ))
 
     frac = atoms.get_scaled_positions()
 
@@ -1128,14 +1200,36 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
         good = [(len(slab_planes[k]["indices"]), r) for k, _, r in matched(offset) if r <= deform_tol]
         return (sum(n for n, _ in good), -sum(r for _, r in good))
 
-    candidates = sorted({round(c, 4) for c in candidates})
-    offset = max(candidates, key=score)
-    in_middle = {id(p) for p in middle}
-    pairs = [
-        (slab_planes[k], b) for k, b, r in matched(offset)
-        if r <= deform_tol and id(slab_planes[k]) in in_middle
-    ] or [(slab_planes[k], b) for k, b, _ in matched(offset)]
-    offset = offset + float(np.mean([wrap(p["z_center"] - b["z"] - offset) for p, b in pairs]))
+    if candidates:
+        candidates = sorted({round(c, 4) for c in candidates})
+        offset = max(candidates, key=score)
+        in_middle = {id(p) for p in middle}
+        pairs = [
+            (slab_planes[k], b) for k, b, r in matched(offset)
+            if r <= deform_tol and id(slab_planes[k]) in in_middle
+        ] or [(slab_planes[k], b) for k, b, _ in matched(offset)]
+        z_ref = [b["z"] for _, b in pairs]
+        z_slab = np.array([p["z_center"] for p, _ in pairs])
+    else:
+        candidates = sorted({
+            round((z[i] - zb) % L, 4) for i in inner for zb in species_planes[int(numbers[i])]
+        })
+        offset = min(candidates, key=atom_cost)
+        z_ref = []
+        for i in inner:
+            zb = species_planes[int(numbers[i])]
+            d = ((z[i] - zb - offset + 0.5 * L) % L) - 0.5 * L
+            z_ref.append(float(zb[np.argmin(np.abs(d))]))
+        z_slab = z[inner]
+    # z_slab = offset + scale * z_bulk, fitted on the bulk-like interior: the
+    # slab may be strained along the normal relative to bulk_atoms (e.g.
+    # built from another calculation), which adds up over many layers.
+    z_ref = np.asarray(z_ref, dtype=float)
+    z_bulk = z_ref + L * np.round((z_slab - z_ref - offset) / L)
+    if np.ptp(z_bulk) > 0.5 * L:
+        scale, offset = (float(v) for v in np.polyfit(z_bulk, z_slab, 1))
+    else:
+        scale, offset = 1.0, float(np.mean(z_slab - z_bulk))
 
     # Species-aware nearest bulk plane for every atom.
     groups = {}
@@ -1143,8 +1237,8 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
         options = [k for k, b in enumerate(catalog) if int(Zi) in b["counts"]] or range(len(catalog))
         best = None
         for k in options:
-            m = int(np.round((zi - catalog[k]["z"] - offset) / L))
-            dist = abs(zi - (catalog[k]["z"] + offset + m * L))
+            m = int(np.round(((zi - offset) / scale - catalog[k]["z"]) / L))
+            dist = abs(zi - (offset + scale * (catalog[k]["z"] + m * L)))
             if best is None or dist < best[0]:
                 best = (dist, k, m)
         groups.setdefault((best[1], best[2]), []).append(i)

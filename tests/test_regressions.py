@@ -1025,3 +1025,45 @@ def test_cutslab_warns_when_surface_planes_never_occur_inside(recwarn):
     slab = next(iter(res[(0, 0, 1)].values()))["atoms"][0]
     with pytest.warns(UserWarning, match="reconstruction="):
         assert len(cutslab(slab, Q_CEO2)) == 1
+
+
+# ------------------------------------------------------------------
+# cutslab bulk matching with supercell bulks, strain and split planes
+# (relaxed FHI-aims slabs of rutile/anatase/fluorite oxides failed)
+# ------------------------------------------------------------------
+def test_bulk_matching_with_supercell_bulk(ceo2_111_slab):
+    """A relaxed bulk is often a supercell of the cell the slab was cut from."""
+    from taskerslabgen import cutslab
+
+    supercell = read((BULK_DIR / "CeO2_fluorite_supercell2x2x2.cif").as_posix())
+    subs = cutslab(ceo2_111_slab, Q_CEO2, bulk_atoms=supercell)
+    assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
+    assert {s.info["cut_bottom_plane"] for s in subs} == {"O4"}
+
+
+def test_bulk_matching_tolerates_small_strain():
+    """Slab built from a lattice 0.6% larger than bulk_atoms (another calculation)."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    strained = CEO2.copy()
+    strained.set_cell(CEO2.cell * 1.006, scale_atoms=True)
+    slab = next(iter(generate_slabs_for_miller(strained, Q_CEO2, (1, 1, 1), [6])[(1, 1, 1)].values()))["atoms"][0]
+    subs = cutslab(slab, Q_CEO2, bulk_atoms=CEO2)
+    assert [s.get_chemical_formula() for s in subs] == [f"Ce{4 * m}O{8 * m}" for m in range(1, 7)]
+
+
+def test_bulk_matching_when_relaxation_splits_every_plane():
+    """No slab plane has a bulk composition: register single atoms instead."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    slab = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, (0, 0, 1), [4])[(0, 0, 1)].values()))["atoms"][0]
+    split = slab.copy()
+    oxygens = np.flatnonzero(split.numbers == 8)
+    # Within each layer, one O moves up and one down: every IrO2 plane
+    # splits into O / Ir / O at plane_tol = 0.1 A, without a dipole.
+    order = oxygens[np.lexsort((split.positions[oxygens, 0], np.round(split.positions[oxygens, 2], 1)))]
+    split.positions[order[0::2], 2] += 0.12
+    split.positions[order[1::2], 2] -= 0.12
+    subs = cutslab(split, Q_IRO2, bulk_atoms=IRO2, dipole_tol=0.3)
+    assert [len(s) for s in subs] == [3 * m for m in range(1, 9)]
+    assert {s.info["cut_bottom_plane"].rstrip("'") for s in subs} <= {"IrO2-a", "IrO2-b"}

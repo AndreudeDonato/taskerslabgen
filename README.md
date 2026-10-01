@@ -308,7 +308,7 @@ termination.
 | `cut_at` | `str` or `list[str]` | `"termination"` | Where to place cuts (see below). |
 | `cuts` | `str` | `"right"` | Direction of cuts (see below). |
 | `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of every sub-slab. |
-| `bulk_atoms` | `Atoms` or `None` | `None` | Bulk the slab was built from. Each atom is assigned to the nearest bulk plane (registry learned from the slab interior), so relaxed surface planes that rumple or shift stay whole; each plane gets its bulk label (`O4`), or a primed label (`O4'`) if it deviates by more than `deform_tol` or its composition changed. Recommended for relaxed slabs. |
+| `bulk_atoms` | `Atoms` or `None` | `None` | Bulk the slab was built from: its unit cell or a supercell of it (e.g. a relaxed bulk calculation), up to a few per cent of strain. Each atom is assigned to the nearest bulk plane (registry learned from the slab interior), so relaxed surface planes that rumple or shift stay whole; each plane gets its bulk label (`O4`), or a primed label (`O4'`) if it deviates by more than `deform_tol` or its composition changed. Recommended for relaxed slabs. |
 | `miller` | `tuple` or `None` | `None` | Miller index of the slab, needed with `bulk_atoms`; defaults to `slab.info["miller"]` (set by genslab). |
 | `deform_tol` | `float` | `0.3` | RMSD (Å, after the best rigid shift) up to which a slab plane still counts as its bulk plane. |
 

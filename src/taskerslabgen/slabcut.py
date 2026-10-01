@@ -113,14 +113,16 @@ def cutslab(
     vacuum : float
         Vacuum to add (angstrom, per side) to each sub-slab.
     bulk_atoms : Atoms or None
-        Bulk unit cell the slab was built from.  When given, every atom is
-        assigned to the nearest plane of the bulk (the registry is learned
-        from the slab's interior), so relaxed surface planes that rumple or
-        shift stay whole, and each plane is labelled by its bulk plane: the
-        bulk label (e.g. ``O4``) if it matches within *deform_tol*, a primed
-        label (``O4'``) if it is more deformed or has a different
-        composition.  Without it, planes come from z-clustering and are
-        labelled from the slab alone.
+        Bulk the slab was built from: its unit cell or a supercell of it
+        (e.g. a relaxed bulk calculation), up to a few per cent of strain.
+        When given, every atom is assigned to the nearest plane of the bulk
+        (the registry and the period along the normal are learned from the
+        slab's interior, from single atoms if relaxation split every plane),
+        so relaxed surface planes that rumple or shift stay whole, and each
+        plane is labelled by its bulk plane: the bulk label (e.g. ``O4``) if
+        it matches within *deform_tol*, a primed label (``O4'``) if it is
+        more deformed or has a different composition.  Without it, planes
+        come from z-clustering and are labelled from the slab alone.
     miller : tuple of int or None
         Miller index of the slab, needed with *bulk_atoms*; defaults to
         ``input_structure.info["miller"]`` (set by genslab).
