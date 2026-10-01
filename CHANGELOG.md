@@ -60,6 +60,17 @@ raise.
   With ``reconstruction=``, cutslab labels reconstructed surfaces
   ``<label>-recon`` like genslab.  ``prefer_plane="P0"``-style filters must be
   rewritten (e.g. ``"O4"``, ``"IrO2"``).
+- **``dipole_tol`` per formula unit (C8, N2) — breaking:** ``dipole_tol`` is now
+  the largest |dipole| per formula unit (e·Å) treated as zero, default 0.05
+  (was 1e-6 e·Å per cell).  It is applied the same way to the bulk repeat
+  unit (classification), Tasker III reconstructions (thick-slab value),
+  every ``cutslab`` cut and the final validation.  The old default rejected
+  real inputs: IrO₂ (110) from a CIF with 4-decimal coordinates has a
+  6e-4 e·Å noise dipole and was classified Tasker III.  The old absolute
+  per-cut check in ``cutslab`` also rejected thick cuts of relaxed slabs
+  first.  Polar repeat units are ~1–6 e·Å per formula unit; relaxed
+  structures typically need ~0.3.  Sequences carry a new ``dipole_per_fu``
+  field, Tasker III candidates too.
 - **Errors (C9):** ``cutslab`` validates ``cuts`` up front; an empty result
   no longer reports "Unknown cuts mode".
 - Single-plane cells: cut midpoints no longer coincide with the plane.

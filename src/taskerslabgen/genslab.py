@@ -100,7 +100,7 @@ def generate_slabs_for_miller(
     bulk_name="slab",
     plane_tol=None,
     charge_tol=1e-3,
-    dipole_tol=1e-6,
+    dipole_tol=0.05,
     vacuum=15.0,
     plot=False,
     plot_out_dir=".",
@@ -137,8 +137,11 @@ def generate_slabs_for_miller(
     charge_tol : float
         Tolerance for charge neutrality.
     dipole_tol : float
-        Threshold below which the dipole is considered zero (Tasker I/II,
-        and for accepting Tasker III reconstructions).
+        Largest |dipole| per formula unit (e·Å) still treated as zero
+        (default 0.05).  Genuinely polar repeat units are ~1-6 e·Å per
+        formula unit; relaxed structures may need ~0.3.
+        Used to classify Tasker I/II and to accept Tasker III
+        reconstructions.
     vacuum : float
         Vacuum to add (angstrom, per side).
     plot : bool
@@ -261,7 +264,7 @@ def _generate_for_one_miller(
         valid_sequences = [s for s in sequences if s["is_neutral"] and s["is_stoich"]]
         print("\nValid stoichiometry sequences (charge-neutral, reduced formula):")
         for i, seq in enumerate(valid_sequences):
-            tasker_tag = "Tasker II" if abs(seq["net_dipole"]) <= dipole_tol else "Tasker III"
+            tasker_tag = "Tasker II" if seq["dipole_per_fu"] <= dipole_tol else "Tasker III"
             bottom_edge = f"{seq['bottom_cut']}-{(seq['bottom_cut'] + 1) % len(planes)}"
             top_edge = f"{seq['top_cut']}-{(seq['top_cut'] + 1) % len(planes)}"
             print(
@@ -320,7 +323,7 @@ def _tasker12_path(
         (
             s for s in sequences
             if s["is_neutral"] and s["is_stoich"] and s["is_full_period"]
-            and abs(s["net_dipole"]) <= dipole_tol
+            and s["dipole_per_fu"] <= dipole_tol
         ),
         key=lambda s: s["bottom_cut"],
     )

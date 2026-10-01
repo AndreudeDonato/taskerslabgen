@@ -22,7 +22,7 @@ def cutslab(
     axis=2,
     plane_tol=None,
     charge_tol=1e-3,
-    dipole_tol=1e-6,
+    dipole_tol=0.05,
     plot_out_dir=".",
     plot=False,
     verbose=None,
@@ -51,8 +51,9 @@ def cutslab(
     charge_tol : float
         Tolerance for charge neutrality.
     dipole_tol : float
-        Threshold below which the dipole is considered zero.  Relaxed slabs
-        usually need a larger value.
+        Largest |dipole| per formula unit (e·Å) still treated as zero
+        (default 0.05).  Genuinely polar repeat units are ~1-6 e·Å per
+        formula unit; relaxed structures may need ~0.3.
     plot_out_dir : str
         Directory for output plots.
     plot : bool
@@ -293,7 +294,7 @@ def cutslab(
                     q_adj[-1] -= recon_del_charge
             mu = float(np.sum(q_adj * (z_seq - z_center)))
 
-            if abs(mu) > dipole_tol:
+            if abs(mu) > dipole_tol * stoich_k:
                 continue
 
             valid_cuts.append({
@@ -345,8 +346,8 @@ def cutslab(
         raise ValueError(
             "No stoichiometric, charge-neutral, zero-dipole cuts found "
             f"matching cut_at={cut_at!r} (charge_tol={charge_tol}, "
-            f"dipole_tol={dipole_tol}). Relaxed slabs usually need a larger "
-            "dipole_tol, and rumpled planes a larger plane_tol." + polar_hint
+            f"dipole_tol={dipole_tol} per formula unit). Relaxed slabs usually "
+            "need dipole_tol~0.3, and rumpled planes a larger plane_tol." + polar_hint
         )
 
     # ---- Prepare plot names ----

@@ -365,12 +365,17 @@ def find_tasker3_candidates(
         distribution_score)``.  Each dict contains ``cut_plane_idx``,
         ``deletion_mask``, ``net_dipole``, ``bond_score``,
         ``distribution_score``, ``plane_counts``, ``is_neutral``
-        (``|total_charge| <= charge_tol``), and more.  Polar candidates
-        are kept so they can be inspected; callers that build slabs keep
-        only neutral ones with ``|net_dipole| <= dipole_tol``.
+        (``|total_charge| <= charge_tol``), ``dipole_per_fu`` (|dipole|
+        per formula unit of thick slabs), and more.  Polar candidates are
+        kept so they can be inspected; callers that build slabs keep only
+        neutral ones with ``dipole_per_fu <= dipole_tol``.
     """
     n = len(planes_sorted)
     candidates = []
+    # Formula units per bulk repeat unit.  A slab of lt repeat units has
+    # dipole lt * net_dipole, so net_dipole / fu_per_unit is its dipole per
+    # formula unit for thick slabs (the strictest value).
+    fu_per_unit = len(atoms_z_matrix) / sum(reduced_counts.values())
 
     frac_all = surf_bulk.get_scaled_positions() if surf_bulk is not None else None
 
@@ -518,6 +523,7 @@ def find_tasker3_candidates(
                 "broken_bottom": broken_bottom,
                 "net_dipole": mu,
                 "abs_dipole": abs(mu),
+                "dipole_per_fu": abs(mu) / fu_per_unit,
                 "total_charge": total_q,
                 "is_neutral": abs(total_q) <= charge_tol,
                 "q_recon": q_recon,
@@ -581,14 +587,15 @@ def _select_tasker3_candidates(candidates, miller, dipole_tol, charge_tol):
         )
     valid = [
         c for c in candidates
-        if abs(c["net_dipole"]) <= dipole_tol and abs(c["total_charge"]) <= charge_tol
+        if c["dipole_per_fu"] <= dipole_tol and abs(c["total_charge"]) <= charge_tol
     ]
     if not valid:
-        best = min(candidates, key=lambda c: c["abs_dipole"])
+        best = min(candidates, key=lambda c: c["dipole_per_fu"])
         raise ValueError(
             f"No non-polar Tasker III reconstruction found for {tuple(miller)}: "
             "removing atoms symmetrically from one plane type leaves a dipole of "
-            f"at least {best['abs_dipole']:.4g} e*A per slab (dipole_tol={dipole_tol}). "
+            f"at least {best['dipole_per_fu']:.4g} e*A per formula unit "
+            f"(dipole_tol={dipole_tol}). "
             "This stacking needs different reconstructions on the two surfaces, "
             "which taskerslabgen does not build."
         )
@@ -686,7 +693,7 @@ def reconstruct_tasker_iii(
     bulk_name,
     plane_tol=None,
     charge_tol=1e-3,
-    dipole_tol=1e-6,
+    dipole_tol=0.05,
     vacuum=15.0,
     plot=False,
     plot_out_dir=".",
@@ -719,7 +726,9 @@ def reconstruct_tasker_iii(
     charge_tol : float
         Tolerance for charge neutrality.
     dipole_tol : float
-        Threshold below which dipole is considered zero.
+        Largest |dipole| per formula unit (e·Å) still treated as zero
+        (default 0.05).  Genuinely polar repeat units are ~1-6 e·Å per
+        formula unit; relaxed structures may need ~0.3.
     vacuum : float
         Vacuum to add (angstrom, per side).
     plot : bool

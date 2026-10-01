@@ -153,7 +153,7 @@ result = generate_slabs_for_miller(
     bulk_name="slab",
     plane_tol=None,
     charge_tol=1e-3,
-    dipole_tol=1e-6,
+    dipole_tol=0.05,
     vacuum=15.0,
     plot=False,
     plot_out_dir=".",
@@ -181,7 +181,7 @@ classifies each surface as Tasker I/II (zero dipole) or Tasker III
 | `bulk_name` | `str` | `"slab"` | Label used in plot and output filenames. |
 | `plane_tol` | `float` or `None` | `None` | Largest z-gap (Å) between neighbouring atoms of one plane (single-linkage clustering). `None` = 0.1 Å. |
 | `charge_tol` | `float` | `1e-3` | Tolerance for charge neutrality of a cut sequence. |
-| `dipole_tol` | `float` | `1e-6` | Dipole threshold — below this the surface is considered Tasker I/II; Tasker III reconstructions must also stay below it. |
+| `dipole_tol` | `float` | `0.05` | Largest \|dipole\| per formula unit (e·Å) treated as zero: below it the surface is Tasker I/II, and Tasker III reconstructions must also stay below it. Polar repeat units are ~1–6 e·Å per formula unit; relaxed bulks may need ~0.3. |
 | `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of the slab. |
 | `plot` | `bool` | `False` | Generate stacking-axis plots showing planes and cuts. |
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
@@ -250,7 +250,7 @@ sub_slabs = cutslab(
     axis=2,
     plane_tol=None,
     charge_tol=1e-3,
-    dipole_tol=1e-6,
+    dipole_tol=0.05,
     plot_out_dir=".",
     plot=False,
     verbose=None,
@@ -275,7 +275,7 @@ termination.
 | `axis` | `int` | `2` | Cartesian axis perpendicular to the surface (0=x, 1=y, 2=z). |
 | `plane_tol` | `float` or `None` | `None` | Largest z-gap (Å) between neighbouring atoms of one plane (single-linkage clustering). `None` = 0.1 Å. |
 | `charge_tol` | `float` | `1e-3` | Tolerance for charge neutrality. |
-| `dipole_tol` | `float` | `1e-6` | Dipole threshold for zero-dipole cuts; relaxed slabs usually need a larger value. |
+| `dipole_tol` | `float` | `0.05` | Largest \|dipole\| per formula unit (e·Å) of a sub-slab treated as zero; relaxed slabs usually need ~0.3. |
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
 | `plot` | `bool` | `False` | Generate a stacking-axis plot for each sub-slab. |
 | `verbose` | `bool` or `None` | `None` | Print plane stacking and cut details. |
@@ -395,7 +395,7 @@ from taskerslabgen import reconstruct_tasker_iii
 
 result = reconstruct_tasker_iii(
     bulk_atoms, charges, miller, layer_thickness_list, bulk_name,
-    plane_tol=None, charge_tol=1e-3, dipole_tol=1e-6,
+    plane_tol=None, charge_tol=1e-3, dipole_tol=0.05,
     vacuum=15.0, plot=False, plot_out_dir=".",
     verbose=None, bond_threshold=(0.85, 1.15),
     bond_distances=None, prefer_plane=None,
@@ -422,7 +422,7 @@ Returns a dict with `"slab_atoms"`, `"best_candidate"`,
 | `compute_reduced_counts(atoms_z)` | Compute reduced (primitive) stoichiometry. |
 | `is_stoichiometric_sequence(sequence_counts, reduced_counts)` | Check if a sequence is a whole-number multiple of bulk formula. |
 | `enumerate_cut_pairs(planes, L, reduced_counts, charge_tol)` | Enumerate all contiguous plane sequences with charge/dipole info. |
-| `select_best_sequence(sequences, dipole_tol)` | Select the best zero-dipole stoichiometric sequence. |
+| `select_best_sequence(sequences, dipole_tol)` | Select the best full-period stoichiometric sequence (dipole per formula unit). |
 | `compute_cut_positions(planes, L, bottom_cut_index, top_cut_index)` | Compute z-coordinates for bottom and top cuts. |
 | `apply_vacuum_to_slab(atoms, vacuum, axis)` | Add vacuum above and below a slab. |
 | `compute_delete_info(cut_plane, deletion_mask, atoms_z_matrix, surf_bulk)` | Extract reconstruction deletion pattern as `(Z, fx, fy)` tuples. |

@@ -130,8 +130,11 @@ PLANE_TOL_CUTSLAB = 0.05
 THICK_LAYERS = 6
 VACUUM = 15.0
 OUTPUT_EXT = "in"
-DIPOLE_TOL_GENSLAB = 9e-1
-DIPOLE_TOL_CUTSLAB = 1e-1
+# dipole_tol is |dipole| per formula unit (e*A); polar repeat units are ~1-6.
+# Ideal CIF bulks need only the default 0.05; DFT-relaxed bulks may carry
+# small symmetry-breaking noise, hence the looser value here.
+DIPOLE_TOL_GENSLAB = 0.3
+DIPOLE_TOL_CUTSLAB = 0.3
 VERBOSE = False
 
 

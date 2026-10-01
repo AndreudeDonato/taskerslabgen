@@ -340,8 +340,10 @@ def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3):
     list of dict
         Each entry describes a cut sequence with keys ``bottom_cut``,
         ``top_cut``, ``plane_indices``, ``total_charge``, ``net_dipole``,
-        ``is_neutral``, ``is_stoich``, ``stoich_k``, ``is_full_period``
-        (the sequence spans one whole bulk repeat unit), etc.
+        ``is_neutral``, ``is_stoich``, ``stoich_k``, ``dipole_per_fu``
+        (|dipole| per formula unit, ``None`` if not stoichiometric),
+        ``is_full_period`` (the sequence spans one whole bulk repeat unit),
+        etc.
     """
     if len(planes) == 0:
         return []
@@ -400,6 +402,7 @@ def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3):
                     "is_neutral": abs(total_q) <= charge_tol,
                     "is_stoich": is_stoich,
                     "stoich_k": stoich_k,
+                    "dipole_per_fu": abs(mu_btt) / stoich_k if is_stoich else None,
                     "is_full_period": len(seq_indices_btt) == n,
                 }
             )
@@ -408,7 +411,7 @@ def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3):
     return sequences
 
 
-def select_best_sequence(sequences, dipole_tol=1e-6):
+def select_best_sequence(sequences, dipole_tol=0.05):
     """
     Select the best stoichiometric, charge-neutral sequence (lowest dipole).
 
@@ -424,7 +427,8 @@ def select_best_sequence(sequences, dipole_tol=1e-6):
     sequences : list of dict
         Output of :func:`enumerate_cut_pairs`.
     dipole_tol : float
-        Threshold below which the dipole is considered zero (Tasker I/II).
+        Largest |dipole| per formula unit (e·Å) of the repeat unit that is
+        still considered zero (Tasker I/II).
 
     Returns
     -------
@@ -440,11 +444,11 @@ def select_best_sequence(sequences, dipole_tol=1e-6):
         return None
 
     def key(s):
-        mu = abs(s["net_dipole"])
-        return (0.0 if mu <= dipole_tol else mu, s["bottom_cut"])
+        d = s["dipole_per_fu"]
+        return (0.0 if d <= dipole_tol else d, s["bottom_cut"])
 
     best = dict(min(valid, key=key))
-    best["is_tasker_ii"] = abs(best["net_dipole"]) <= dipole_tol
+    best["is_tasker_ii"] = best["dipole_per_fu"] <= dipole_tol
     return best
 
 
@@ -512,7 +516,7 @@ def apply_vacuum_to_slab(atoms, vacuum=15.0, axis=2):
 
 
 def validate_slab(slab, charges, reduced_counts, axis=2, charge_tol=1e-3,
-                  dipole_tol=1e-6, max_gap=None):
+                  dipole_tol=0.05, max_gap=None):
     """
     Check that *slab* satisfies the conditions the generators promise.
 

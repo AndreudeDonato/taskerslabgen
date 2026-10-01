@@ -365,6 +365,41 @@ def test_cutslab_on_polar_slab_points_to_reconstruction():
         cutslab(polar, Q_CEO2, cut_at="all")
 
 
+# ------------------------------------------------------------------
+# C8 / N2: dipole_tol is per formula unit (default 0.05)
+# ------------------------------------------------------------------
+def test_cif_rounded_coordinates_stay_non_polar():
+    """4-decimal CIF coordinates give a ~6e-4 e*A noise dipole (failed 1e-6)."""
+    rounded = IRO2.copy()
+    rounded.set_scaled_positions(np.round(rounded.get_scaled_positions() + 0.123456, 4))
+    assert _tasker_type(rounded, Q_IRO2, (1, 1, 0)) == "I/II"
+
+
+def test_dipole_tol_is_per_formula_unit():
+    from taskerslabgen import select_best_sequence
+
+    def seq(mu, k):
+        return {"is_neutral": True, "is_stoich": True, "is_full_period": True,
+                "net_dipole": mu, "stoich_k": k, "dipole_per_fu": abs(mu) / k,
+                "bottom_cut": 0}
+
+    assert select_best_sequence([seq(0.16, 4)])["is_tasker_ii"]       # 0.04 per f.u.
+    assert not select_best_sequence([seq(0.16, 2)])["is_tasker_ii"]   # 0.08 per f.u.
+
+
+def test_cutslab_relaxed_slab_keeps_thick_cuts(ceo2_111_slab):
+    """Relaxation dipoles do not grow with thickness; per-f.u. tolerance keeps the series."""
+    from taskerslabgen import cutslab
+
+    relaxed = ceo2_111_slab.copy()
+    z = relaxed.positions[:, 2]
+    relaxed.positions[z < z.min() + 1.0, 2] += 0.10   # outer planes relax inward
+    relaxed.positions[z > z.max() - 1.0, 2] -= 0.10
+    relaxed.positions[:, 2] += np.random.default_rng(0).normal(0.0, 0.01, len(relaxed))
+    subs = cutslab(relaxed, Q_CEO2, dipole_tol=0.3)
+    assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
+
+
 def test_no_ase_future_warnings():
     from taskerslabgen import generate_slabs_for_miller
 
