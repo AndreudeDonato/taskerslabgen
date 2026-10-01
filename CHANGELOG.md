@@ -2,7 +2,7 @@
 
 ## 0.4.0
 
-Bug-fix pass from the 0.3.1 review (see `REVIEW_NOTES.md`).  Several
+Bug-fix pass from a review of 0.3.1.  Several
 defaults produced wrong or invalid slabs without an error; results for the
 same input can change, and some calls that used to return invalid slabs now
 raise.
