@@ -78,6 +78,20 @@ raise.
   bulk origin (e.g. albite (001) picked the Si cut for one origin and the
   O cut for others; the Si cut breaks 4 bonds, the O cut 9).  Candidates
   report ``broken_bonds`` and ``surface_density``.
+- **cutslab surface descriptor matched to the bulk (new ``bulk_atoms=``,
+  ``miller=``, ``deform_tol=``):** with the bulk given, every atom of the slab
+  is assigned to the nearest bulk plane (registry learned from the bulk-like
+  interior, species-aware), so relaxed surface planes that rumple or shift
+  stay whole.  Planes get their bulk label (``O4``) when they match the bulk
+  plane within ``deform_tol`` (RMSD after the best rigid shift, default
+  0.3 Å) and a primed label (``O4'``) when they are more deformed or changed
+  composition; termination matching ignores the prime.  Integer in-plane
+  supercells of the bulk cell are supported.  Without the bulk, a 0.15 Å
+  rumpling split the surface plane and cutslab returned only the full slab.
+- **cutslab checks every cut on the real atoms:** stoichiometry, charge and
+  dipole are computed from the actual (possibly relaxed) atoms of the
+  sub-slab after reconstruction deletions, instead of plane centres and
+  bookkeeping of deleted charges.
 - **Errors (C9):** ``cutslab`` validates ``cuts`` up front; an empty result
   no longer reports "Unknown cuts mode".
 - Single-plane cells: cut midpoints no longer coincide with the plane.

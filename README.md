@@ -125,10 +125,14 @@ When working with relaxed supercells, the recommended workflow is:
    pass the `reconstruction` dict from the genslab output so that
    newly exposed interior planes receive the same atomic deletion.
 
-Plane names compare composition and in-plane geometry up to an in-plane
-translation, so translated copies of a plane share a name, while variants
-related only by a rotation or mirror of the in-plane lattice (ABAB stacking)
-get different letters of the same type.
+**Relaxed slabs.** Pass the bulk: `cutslab(relaxed, Q, bulk_atoms=bulk,
+dipole_tol=0.3)`.  Planes are then matched to the bulk planes, so rumpled or
+shifted surface planes stay whole and keep their bulk label; a surface that
+deviates more than `deform_tol` (or changed composition) is labelled with a
+prime (`O4'`) and still counts as an `O4` termination.  Stoichiometry, charge
+and dipole of every cut are evaluated on the actual relaxed atoms, so a cut
+that keeps one relaxed surface can be rejected as polar; relaxed slabs
+usually need `dipole_tol≈0.3`.
 
 ### Tasker III limitation
 
@@ -260,6 +264,9 @@ sub_slabs = cutslab(
     cut_at="termination",
     cuts="right",
     vacuum=15.0,
+    bulk_atoms=None,
+    miller=None,
+    deform_tol=0.3,
 )
 ```
 
@@ -285,6 +292,9 @@ termination.
 | `cut_at` | `str` or `list[str]` | `"termination"` | Where to place cuts (see below). |
 | `cuts` | `str` | `"right"` | Direction of cuts (see below). |
 | `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of every sub-slab. |
+| `bulk_atoms` | `Atoms` or `None` | `None` | Bulk the slab was built from. Each atom is assigned to the nearest bulk plane (registry learned from the slab interior), so relaxed surface planes that rumple or shift stay whole; each plane gets its bulk label (`O4`), or a primed label (`O4'`) if it deviates by more than `deform_tol` or its composition changed. Recommended for relaxed slabs. |
+| `miller` | `tuple` or `None` | `None` | Miller index of the slab, needed with `bulk_atoms`; defaults to `slab.info["miller"]` (set by genslab). |
+| `deform_tol` | `float` | `0.3` | RMSD (Å, after the best rigid shift) up to which a slab plane still counts as its bulk plane. |
 
 **`cut_at` options**
 
@@ -370,7 +380,8 @@ bulk cell (genslab), in slabs cut from it (cutslab) and for any bulk origin.
   diagonal vs anti-diagonal planes are ``IrO2-a`` / ``IrO2-b``.  Letters
   follow a translation-invariant key of the geometry, not stacking order.
 - Reconstructed planes get ``-recon`` (e.g. ``O4-recon``), added by
-  genslab/cutslab.
+  genslab/cutslab; with `cutslab(bulk_atoms=...)`, planes that deviate from
+  their bulk plane get a prime (``O4'``).
 
 Helpers: `plane_name_base("IrO2-a-recon") == "IrO2"`;
 `plane_name_matches("IrO2", "IrO2-a")` is True.  Use these semantics in

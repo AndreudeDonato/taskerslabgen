@@ -441,6 +441,102 @@ def test_terminations_ranked_by_broken_bonds():
     assert ranked[0]["plane_type"] == "Si"   # the Si cut breaks 4 bonds, the O cut 9
 
 
+# ------------------------------------------------------------------
+# Step 4: cutslab surface descriptor matched to the bulk (bulk_atoms=)
+# ------------------------------------------------------------------
+def _relax_surfaces(slab, kind):
+    """Distort the four O of each surface plane of a CeO2(111) slab."""
+    out = slab.copy()
+    z = out.positions[:, 2]
+    oxygens = np.flatnonzero(out.numbers == 8)
+    for top in (False, True):
+        order = np.argsort(z[oxygens])
+        idx = oxygens[order[-4:]] if top else oxygens[order[:4]]
+        if kind == "rumpled":            # 2 of 4 O move outwards by 0.15 A
+            out.positions[idx[:2], 2] += 0.15 if top else -0.15
+        elif kind == "shifted":          # 2 of 4 O shift in-plane by 1.0 A
+            out.positions[idx[:2], 0] += 1.0
+        elif kind == "outward":          # whole plane relaxes outwards by 0.2 A
+            out.positions[idx, 2] += 0.2 if top else -0.2
+    return out
+
+
+def test_bulk_matching_keeps_rumpled_surface_plane_whole(ceo2_111_slab):
+    from taskerslabgen import cutslab
+
+    rumpled = _relax_surfaces(ceo2_111_slab, "rumpled")
+    subs = cutslab(rumpled, Q_CEO2, bulk_atoms=CEO2, dipole_tol=0.3)
+    assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
+    assert {(s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in subs} == {("O4", "O4")}
+
+
+def test_deformed_surface_plane_gets_primed_label(ceo2_111_slab):
+    from taskerslabgen import cutslab
+
+    shifted = _relax_surfaces(ceo2_111_slab, "shifted")
+    subs = cutslab(shifted, Q_CEO2, bulk_atoms=CEO2)
+    assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
+    surfaces = [(s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in subs]
+    assert surfaces == [("O4'", "O4"), ("O4'", "O4"), ("O4'", "O4'")]
+
+
+def test_cut_dipoles_use_relaxed_positions(ceo2_111_slab):
+    """The thinnest cut keeps one relaxed surface: 0.4 e*A per formula unit."""
+    from taskerslabgen import cutslab
+
+    relaxed = _relax_surfaces(ceo2_111_slab, "outward")
+    subs = cutslab(relaxed, Q_CEO2, bulk_atoms=CEO2, dipole_tol=0.3)
+    assert [s.get_chemical_formula() for s in subs] == ["Ce8O16", "Ce12O24"]
+
+
+@pytest.mark.parametrize("hkl", [(0, 0, 1), (1, 1, 0)], ids=["IrO2001", "IrO2110"])
+def test_bulk_matched_labels_agree_with_genslab(hkl):
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    for term in generate_slabs_for_miller(IRO2, Q_IRO2, hkl, [3], candidates="all")[hkl].values():
+        subs = cutslab(term["atoms"][0], Q_IRO2, bulk_atoms=IRO2)
+        assert {s.info["cut_bottom_plane"] for s in subs} == {term["plane_type"]}
+
+
+def test_bulk_matching_in_plane_supercell(ceo2_111_slab):
+    from taskerslabgen import cutslab
+
+    subs = cutslab(ceo2_111_slab * (2, 2, 1), Q_CEO2, bulk_atoms=CEO2)
+    assert [s.get_chemical_formula() for s in subs] == ["Ce16O32", "Ce32O64", "Ce48O96"]
+
+
+def test_bulk_matching_with_tasker3_reconstruction():
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    res = generate_slabs_for_miller(
+        CEO2, Q_CEO2, (0, 0, 1), [4], prefer_plane="O", bond_distances=BOND_DISTS_CEO2
+    )
+    term = next(iter(res[(0, 0, 1)].values()))
+    subs = cutslab(term["atoms"][0], Q_CEO2, reconstruction=term["reconstruction"], bulk_atoms=CEO2)
+    assert [s.get_chemical_formula() for s in subs] == [f"Ce{2 * m}O{4 * m}" for m in range(1, 9)]
+    assert {s.info["cut_bottom_plane"] for s in subs} == {"O4-recon"}
+
+
+def test_bulk_matching_needs_miller(ceo2_111_slab):
+    from taskerslabgen import cutslab
+
+    slab = ceo2_111_slab.copy()
+    slab.info.pop("miller", None)
+    with pytest.raises(ValueError, match="Miller"):
+        cutslab(slab, Q_CEO2, bulk_atoms=CEO2)
+
+
+def test_primed_label_matching():
+    from taskerslabgen import plane_name_base, plane_name_matches
+
+    assert plane_name_base("O4'") == "O4"
+    assert plane_name_base("IrO2-a'") == "IrO2"
+    assert plane_name_matches("O4", "O4'")
+    assert plane_name_matches("IrO2-a", "IrO2-a'")
+    assert plane_name_matches("IrO2", "IrO2-b'")
+    assert not plane_name_matches("O4'", "O4")
+
+
 def test_no_ase_future_warnings():
     from taskerslabgen import generate_slabs_for_miller
 

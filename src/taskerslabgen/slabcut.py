@@ -7,6 +7,7 @@ from .core import (
     _finalize_slab,
     _find_plane_translation,
     _max_z_gap,
+    _planes_from_bulk,
     identify_planes,
     compute_reduced_counts,
     apply_vacuum_to_slab,
@@ -32,9 +33,16 @@ def cutslab(
     cut_at="termination",
     cuts="right",
     vacuum=15.0,
+    bulk_atoms=None,
+    miller=None,
+    deform_tol=0.3,
 ):
     """
     Cut an existing slab into thinner sub-slabs.
+
+    Stoichiometry, charge and dipole of every candidate cut are evaluated
+    on the actual (possibly relaxed) atoms of the sub-slab, after any
+    reconstruction deletions.
 
     Parameters
     ----------
@@ -74,8 +82,9 @@ def cutslab(
     cut_at : str or list[str]
         Controls where cuts are placed:
 
-        - ``"termination"`` (default): cut only at planes matching the
-          thick slab's top/bottom plane types.
+        - ``"termination"`` (default): cut only at planes with the labels
+          of the thick slab's top/bottom planes (a deformed, primed
+          surface plane such as ``O4'`` stands for ``O4``).
         - ``"all"``: cut at any plane that gives a stoichiometric,
           charge-neutral, zero-dipole sub-slab.
         - A plane label (e.g. ``"O4"``, or a genslab ``plane_type``) or a
@@ -86,6 +95,21 @@ def cutslab(
         ``"all"`` -- keep every valid cut.
     vacuum : float
         Vacuum to add (angstrom, per side) to each sub-slab.
+    bulk_atoms : Atoms or None
+        Bulk unit cell the slab was built from.  When given, every atom is
+        assigned to the nearest plane of the bulk (the registry is learned
+        from the slab's interior), so relaxed surface planes that rumple or
+        shift stay whole, and each plane is labelled by its bulk plane: the
+        bulk label (e.g. ``O4``) if it matches within *deform_tol*, a primed
+        label (``O4'``) if it is more deformed or has a different
+        composition.  Without it, planes come from z-clustering and are
+        labelled from the slab alone.
+    miller : tuple of int or None
+        Miller index of the slab, needed with *bulk_atoms*; defaults to
+        ``input_structure.info["miller"]`` (set by genslab).
+    deform_tol : float
+        RMSD (angstrom, after the best rigid shift) up to which a slab
+        plane still counts as its bulk plane (default 0.3).
 
     Returns
     -------
@@ -132,11 +156,32 @@ def cutslab(
         [[num, z, q] for num, z, q in zip(atoms.numbers, coords, charges_list)]
     )
 
-    planes = identify_planes(
-        atoms_z_matrix, L, plane_tol=plane_tol, charge_tol=charge_tol
-    )
-    reduced_counts = compute_reduced_counts(atoms_z_matrix)
-    planes_sorted = sorted(planes, key=lambda p: p["z_center"] % L)
+    vec = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    input_miller = miller if miller is not None else atoms.info.get("miller")
+    plot_miller = tuple(input_miller) if input_miller is not None else vec[axis]
+    miller_str = "".join(str(i) for i in plot_miller)
+
+    # ---- Planes and their labels ----
+    if bulk_atoms is not None:
+        if axis != 2:
+            raise ValueError("Matching to bulk_atoms needs the surface normal along z (axis=2).")
+        if input_miller is None:
+            raise ValueError(
+                "bulk_atoms needs the slab's Miller index: pass miller=, or use a slab "
+                "from generate_slabs_for_miller (it stores slab.info['miller'])."
+            )
+        planes_sorted, plane_names, reduced_counts = _planes_from_bulk(
+            atoms, charges_list, bulk_atoms, tuple(input_miller),
+            plane_tol=plane_tol, charge_tol=charge_tol, deform_tol=deform_tol,
+        )
+    else:
+        planes_sorted = sorted(
+            identify_planes(atoms_z_matrix, L, plane_tol=plane_tol, charge_tol=charge_tol),
+            key=lambda p: p["z_center"] % L,
+        )
+        plane_names, _ = assign_plane_names(planes_sorted, atoms=atoms, axis=axis)
+        reduced_counts = compute_reduced_counts(atoms_z_matrix)
+    planes = planes_sorted
     n = len(planes_sorted)
     validation = {
         "charges_list": charges_list,
@@ -147,51 +192,31 @@ def cutslab(
         "axis": axis,
     }
 
-    vec = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
-    miller = vec[axis]
-    input_miller = atoms.info.get("miller")
-    if input_miller is not None:
-        miller_str = "".join(str(i) for i in input_miller)
-    else:
-        miller_str = "".join(str(i) for i in miller)
-
-    plane_names, _ = assign_plane_names(planes_sorted, atoms=atoms, axis=axis)
-
     # Tasker III always requires termination-aware cutting
     if reconstruction is not None and cut_at == "all":
         cut_at = "termination"
 
-    # ---- Parse reconstruction metadata ----
-    cut_plane_counts = None
-    delete_info = None
-    recon_del_counts = {}
-    recon_del_charge = 0.0
-    if reconstruction is not None:
-        cut_plane_counts = reconstruction["cut_plane_counts"]
-        delete_info = reconstruction["delete_info"]
-        charge_map = {}
-        for Z_val in set(int(atoms.numbers[j]) for j in range(len(atoms))):
-            for j in range(len(atoms)):
-                if int(atoms.numbers[j]) == Z_val:
-                    charge_map[Z_val] = charges_list[j]
-                    break
-        for species, _, _ in delete_info:
-            recon_del_counts[species] = recon_del_counts.get(species, 0) + 1
-            recon_del_charge += charge_map.get(species, 0.0)
-
+    # ---- Reconstruction metadata ----
     # Reconstructed surfaces carry genslab's label (e.g. "O4-recon"): the
     # thick slab's outer planes if they are already reconstructed, and any
     # plane that gets reconstructed when a cut exposes it.
+    delete_info = reconstruction["delete_info"] if reconstruction is not None else None
     recon_label = None
+    recon_eligible = set()
     if reconstruction is not None:
+        cut_plane_counts = reconstruction["cut_plane_counts"]
         recon_label = f"{reconstruction['cut_plane_name']}-recon"
-        recon_counts = {
-            Z: c - recon_del_counts.get(Z, 0) for Z, c in cut_plane_counts.items()
-        }
+        recon_counts = dict(cut_plane_counts)
+        for species, _, _ in delete_info:
+            recon_counts[species] = recon_counts.get(species, 0) - 1
         recon_counts = {Z: c for Z, c in recon_counts.items() if c > 0}
         for i in {0, n - 1}:
             if planes_sorted[i]["counts"] == recon_counts:
                 plane_names[i] = recon_label
+        recon_eligible = {
+            i for i, plane in enumerate(planes_sorted)
+            if plane["counts"] == cut_plane_counts and i not in (0, n - 1)
+        }
 
     # ---- Planes allowed to become a surface ----
     # A sub-slab is a contiguous run of planes [bottom, top] of the input
@@ -199,9 +224,11 @@ def cutslab(
     if cut_at == "all":
         valid_boundary_names = set(plane_names)
     elif cut_at == "termination":
-        valid_boundary_names = {plane_names[0], plane_names[-1]}
+        # A deformed (primed) surface plane stands for its bulk plane type.
+        ends = {plane_names[0].rstrip("'"), plane_names[-1].rstrip("'")}
+        valid_boundary_names = {name for name in plane_names if name.rstrip("'") in ends}
     elif isinstance(cut_at, str):
-        matched = {n for n in plane_names if plane_name_matches(cut_at, n)}
+        matched = {name for name in plane_names if plane_name_matches(cut_at, name)}
         if not matched:
             raise ValueError(
                 f"Plane name {cut_at!r} not found. "
@@ -211,10 +238,10 @@ def cutslab(
     elif isinstance(cut_at, list):
         valid_boundary_names = set()
         unknown = []
-        for q in cut_at:
-            matched = {n for n in plane_names if plane_name_matches(q, n)}
+        for query in cut_at:
+            matched = {name for name in plane_names if plane_name_matches(query, name)}
             if not matched:
-                unknown.append(q)
+                unknown.append(query)
             else:
                 valid_boundary_names |= matched
         if unknown:
@@ -227,84 +254,65 @@ def cutslab(
             f"Invalid cut_at={cut_at!r}. Must be 'all', 'termination', "
             f"a plane name, or list of plane names."
         )
+    boundary_indices = sorted(
+        {i for i in range(n) if plane_names[i] in valid_boundary_names} | recon_eligible
+    )
 
-    boundary_indices = [
-        i for i in range(n) if plane_names[i] in valid_boundary_names
-    ]
+    # ---- Evaluate every candidate cut on the actual atoms ----
+    reference_plane = reconstruction.get("cut_plane_frac") if reconstruction else None
+    deletions = {
+        p: set(_apply_reconstruction(
+            atoms, planes_sorted[p]["indices"], delete_info, axis=axis,
+            reference_plane=reference_plane,
+        ))
+        for p in recon_eligible
+    }
+    q_all = np.asarray(charges_list, dtype=float)
+    species = sorted({int(Z) for Z in atoms.numbers} | {int(Z) for Z in reduced_counts})
+    column = {Z: k for k, Z in enumerate(species)}
 
-    endpoint_indices = {0, n - 1}
+    def aggregate(indices):
+        """[n, sum q, sum z, sum q*z] and element counts of a set of atoms."""
+        idx = np.fromiter(indices, dtype=int)
+        counts = np.zeros(len(species), dtype=int)
+        np.add.at(counts, [column[int(Z)] for Z in atoms.numbers[idx]], 1)
+        q, z = q_all[idx], coords[idx]
+        return np.array([len(idx), q.sum(), z.sum(), (q * z).sum()]), counts
 
-    recon_eligible = set()
-    if reconstruction and cut_plane_counts:
-        for i, plane in enumerate(planes_sorted):
-            if plane["counts"] == cut_plane_counts and i not in endpoint_indices:
-                recon_eligible.add(i)
-        boundary_indices = sorted(set(boundary_indices) | recon_eligible)
-
-    z_arr = np.array([p["z_center"] for p in planes_sorted])
-    q_arr = np.array([p["q_total"] for p in planes_sorted])
+    plane_sums = [aggregate(p["indices"]) for p in planes_sorted]
+    prefix = np.vstack([np.zeros(4), np.cumsum([s for s, _ in plane_sums], axis=0)])
+    prefix_counts = np.vstack(
+        [np.zeros(len(species), dtype=int), np.cumsum([c for _, c in plane_sums], axis=0)]
+    )
+    deleted_sums = {p: aggregate(d) for p, d in deletions.items()}
 
     valid_cuts = []
     for bi in boundary_indices:
         for ti in boundary_indices:
             if ti < bi:
                 continue
-
-            seq_indices = list(range(bi, ti + 1))
-            seq_counts = {}
-            for pi in seq_indices:
-                for Z, c in planes_sorted[pi]["counts"].items():
-                    seq_counts[Z] = seq_counts.get(Z, 0) + c
-
-            adj_counts = dict(seq_counts)
-            adj_q_offset = 0.0
-            n_recon_surfaces = 0
-            if bi == ti:
-                if bi in recon_eligible:
-                    n_recon_surfaces = 1
-            else:
-                if bi in recon_eligible:
-                    n_recon_surfaces += 1
-                if ti in recon_eligible:
-                    n_recon_surfaces += 1
-            for Z, nd in recon_del_counts.items():
-                adj_counts[Z] = adj_counts.get(Z, 0) - nd * n_recon_surfaces
-            adj_q_offset = recon_del_charge * n_recon_surfaces
-
-            is_stoich, stoich_k = is_stoichiometric_sequence(
-                adj_counts, reduced_counts
-            )
-            if not is_stoich:
+            sums = prefix[ti + 1] - prefix[bi]
+            counts = prefix_counts[ti + 1] - prefix_counts[bi]
+            for p in {bi, ti} & set(deleted_sums):
+                sums = sums - deleted_sums[p][0]
+                counts = counts - deleted_sums[p][1]
+            count_map = {Z: int(c) for Z, c in zip(species, counts) if c > 0}
+            is_stoich, stoich_k = is_stoichiometric_sequence(count_map, reduced_counts)
+            if not is_stoich or set(count_map) - set(reduced_counts):
                 continue
-
-            total_q = float(np.sum(q_arr[seq_indices])) - adj_q_offset
+            n_atoms, total_q, sum_z, sum_qz = sums
             if abs(total_q) > charge_tol:
                 continue
-
-            z_seq = z_arr[seq_indices]
-            z_center = 0.5 * (z_seq[0] + z_seq[-1])
-            q_adj = np.array(q_arr[seq_indices], dtype=float)
-            if bi == ti:
-                if bi in recon_eligible:
-                    q_adj[0] -= recon_del_charge
-            else:
-                if bi in recon_eligible:
-                    q_adj[0] -= recon_del_charge
-                if ti in recon_eligible:
-                    q_adj[-1] -= recon_del_charge
-            mu = float(np.sum(q_adj * (z_seq - z_center)))
-
+            mu = float(sum_qz - total_q * sum_z / n_atoms)  # about the mean height
             if abs(mu) > dipole_tol * stoich_k:
                 continue
-
             valid_cuts.append({
                 "bottom_plane": bi,
                 "top_plane": ti,
-                "plane_indices": seq_indices,
-                "n_planes": len(seq_indices),
-                "total_charge": total_q,
+                "plane_indices": list(range(bi, ti + 1)),
+                "n_planes": ti - bi + 1,
+                "total_charge": float(total_q),
                 "net_dipole": mu,
-                "z_center": z_center,
                 "stoich_k": stoich_k,
             })
 
@@ -347,7 +355,8 @@ def cutslab(
             "No stoichiometric, charge-neutral, zero-dipole cuts found "
             f"matching cut_at={cut_at!r} (charge_tol={charge_tol}, "
             f"dipole_tol={dipole_tol} per formula unit). Relaxed slabs usually "
-            "need dipole_tol~0.3, and rumpled planes a larger plane_tol." + polar_hint
+            "need dipole_tol~0.3, and rumpled planes a larger plane_tol or "
+            "bulk_atoms=." + polar_hint
         )
 
     # ---- Prepare plot names ----
@@ -358,49 +367,27 @@ def cutslab(
 
     z_s = np.array([p["z_center"] % L for p in planes_sorted])
 
-    # ---- Build sub-slabs with optional reconstruction ----
-    reference_plane = reconstruction.get("cut_plane_frac") if reconstruction else None
+    # ---- Build sub-slabs ----
     slab_atoms = []
     for cut_idx, cut in enumerate(valid_cuts):
-        atom_indices = []
-        for pidx in cut["plane_indices"]:
-            atom_indices.extend(planes_sorted[pidx]["indices"])
-        atom_indices = sorted(set(atom_indices))
+        bi, ti = cut["bottom_plane"], cut["top_plane"]
+        drop = set().union(*(deletions.get(p, set()) for p in {bi, ti}))
+        atom_indices = sorted(
+            {i for pidx in cut["plane_indices"] for i in planes_sorted[pidx]["indices"]} - drop
+        )
         slab = atoms[atom_indices]
-
-        if reconstruction and delete_info:
-            position = {orig: k for k, orig in enumerate(atom_indices)}
-            to_delete = set()
-            surface_pidxs = (
-                [cut["bottom_plane"]]
-                if cut["bottom_plane"] == cut["top_plane"]
-                else [cut["bottom_plane"], cut["top_plane"]]
-            )
-            for pidx in surface_pidxs:
-                if pidx not in recon_eligible:
-                    continue
-                surface_indices = [position[j] for j in planes_sorted[pidx]["indices"]]
-                to_delete.update(_apply_reconstruction(
-                    slab, surface_indices, delete_info, axis=axis,
-                    reference_plane=reference_plane,
-                ))
-            if to_delete:
-                slab = slab[[i for i in range(len(slab)) if i not in to_delete]]
-
         apply_vacuum_to_slab(slab, vacuum=vacuum, axis=axis)
 
-        bp = plot_names[cut["bottom_plane"]]
-        tp = plot_names[cut["top_plane"]]
+        bp = plot_names[bi]
+        tp = plot_names[ti]
         slab.info["cut_bottom_plane"] = bp
         slab.info["cut_top_plane"] = tp
-        slab.info["cut_bottom_idx"] = cut["bottom_plane"]
-        slab.info["cut_top_idx"] = cut["top_plane"]
+        slab.info["cut_bottom_idx"] = bi
+        slab.info["cut_top_idx"] = ti
         slab.info["cut_n_planes"] = cut["n_planes"]
         _finalize_slab(slab, **validation)
 
         if plot:
-            bi = cut["bottom_plane"]
-            ti = cut["top_plane"]
             zbot_mid = 0.5 * (
                 z_s[(bi - 1) % n] + z_s[bi]
             ) if bi > 0 else z_s[bi] * 0.5
@@ -412,7 +399,7 @@ def cutslab(
                 f"_cut_{cut_idx}_{bp}_{tp}.png"
             )
             plot_unitcell_atoms(
-                atoms_z_matrix, L, miller,
+                atoms_z_matrix, L, plot_miller,
                 out_png=plot_path, plane_tol=plane_tol, planes=planes,
                 zbot=zbot_mid, ztop=ztop_mid, dipole=cut["net_dipole"],
                 matched_planes=highlight_set,

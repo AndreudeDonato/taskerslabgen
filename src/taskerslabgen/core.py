@@ -1,3 +1,4 @@
+from collections import Counter
 from math import gcd
 
 import numpy as np
@@ -722,6 +723,7 @@ def plane_name_base(name):
     if not name:
         return name
     core = name[:-6] if name.endswith("-recon") else name
+    core = core.rstrip("'")
     head, sep, tail = core.rpartition("-")
     if sep and len(tail) == 1 and tail.isalpha() and tail.islower():
         return head
@@ -736,12 +738,15 @@ def plane_name_matches(query, name):
 
     - exact equality (``O4-recon`` ↔ ``O4-recon``)
     - query equals name without ``-recon`` (``O4`` ↔ ``O4-recon``)
+    - query equals name without the deformation prime (``O4`` ↔ ``O4'``)
     - query equals the composition (``IrO2`` ↔ ``IrO2-a``, ``IrO2-b``,
-      ``IrO2-a-recon``)
+      ``IrO2-a-recon``, ``IrO2-b'``)
     """
     if query == name:
         return True
     if name.endswith("-recon") and query == name[:-6]:
+        return True
+    if query == name.rstrip("'"):
         return True
     return query == plane_name_base(name)
 
@@ -786,6 +791,214 @@ def _find_plane_translation(ref, tgt, cell2d, tol):
         else:
             return t % 1.0
     return None
+
+
+def _bulk_plane_catalog(bulk_atoms, miller, plane_tol=None):
+    """
+    Planes of one bulk repeat unit in the frame of :func:`build_surface`.
+
+    Returns ``(catalog, L, cell2d)`` where each catalog entry has the
+    plane ``label`` (as genslab names it), ``counts``, ``z`` (centre, mod L)
+    and ``atoms``: ``(Z, fx, fy, dz)`` with *dz* the height relative to the
+    plane centre.
+    """
+    surf = build_surface(bulk_atoms, miller, layers=1)
+    L = float(surf.cell[2, 2])
+    z = surf.positions[:, 2]
+    atoms_z = np.column_stack([surf.numbers, z, np.zeros(len(surf))])
+    planes = sorted(identify_planes(atoms_z, L, plane_tol=plane_tol), key=lambda p: p["z_center"])
+    labels, _ = assign_plane_names(planes, atoms=surf)
+    frac = surf.get_scaled_positions()
+    catalog = []
+    for plane, label in zip(planes, labels):
+        zc = plane["z_center"]
+        catalog.append({
+            "label": label,
+            "counts": dict(plane["counts"]),
+            "z": zc,
+            "atoms": [
+                (int(surf.numbers[i]), frac[i, 0], frac[i, 1],
+                 ((z[i] - zc + 0.5 * L) % L) - 0.5 * L)
+                for i in plane["indices"]
+            ],
+        })
+    return catalog, L, np.array(surf.cell[:2, :2])
+
+
+def _tile_plane(plane_atoms, bulk_cell2d, cell2d):
+    """Express plane atoms ``(Z, fx, fy, dz)`` of in-plane cell *bulk_cell2d*
+    in the integer in-plane supercell *cell2d*."""
+    M = np.asarray(cell2d, dtype=float) @ np.linalg.inv(bulk_cell2d)
+    M_int = np.round(M)
+    n_img = abs(int(round(np.linalg.det(M_int))))
+    if not np.allclose(M, M_int, atol=1e-3) or n_img < 1:
+        raise ValueError(
+            "The slab's in-plane cell is not an integer supercell of the bulk "
+            "surface cell; check bulk_atoms and miller."
+        )
+    if n_img == 1 and np.allclose(M_int, np.eye(2)):
+        return list(plane_atoms)
+    reach = int(np.abs(M_int).sum()) + 1
+    to_frac = np.linalg.inv(cell2d)
+    tiled, seen = [], set()
+    for Z, fx, fy, dz in plane_atoms:
+        for i in range(-reach, reach + 1):
+            for j in range(-reach, reach + 1):
+                f = ((np.array([fx + i, fy + j]) @ bulk_cell2d) @ to_frac) % 1.0
+                key = (Z, round(f[0], 5) % 1.0, round(f[1], 5) % 1.0)
+                if key not in seen:
+                    seen.add(key)
+                    tiled.append((Z, f[0], f[1], dz))
+    return tiled
+
+
+def _plane_rmsd(ref, tgt, cell2d):
+    """
+    RMSD (angstrom) between planes ``[(Z, fx, fy, dz), ...]`` after the best
+    rigid in-plane shift (and removal of the mean height); ``inf`` if the
+    compositions differ.
+    """
+    ref_Z = np.array([a[0] for a in ref], dtype=int)
+    tgt_Z = np.array([a[0] for a in tgt], dtype=int)
+    species, counts = np.unique(ref_Z, return_counts=True)
+    tgt_species, tgt_counts = np.unique(tgt_Z, return_counts=True)
+    if len(ref) != len(tgt) or not (
+        np.array_equal(species, tgt_species) and np.array_equal(counts, tgt_counts)
+    ):
+        return float("inf")
+    ref_f = np.array([[a[1], a[2]] for a in ref], dtype=float)
+    tgt_f = np.array([[a[1], a[2]] for a in tgt], dtype=float)
+    ref_dz = np.array([a[3] for a in ref], dtype=float)
+    tgt_dz = np.array([a[3] for a in tgt], dtype=float)
+    ref_dz, tgt_dz = ref_dz - ref_dz.mean(), tgt_dz - tgt_dz.mean()
+    cell2d = np.asarray(cell2d, dtype=float)
+    groups = [(np.flatnonzero(ref_Z == Z), np.flatnonzero(tgt_Z == Z)) for Z in species]
+    anchor = int(np.flatnonzero(ref_Z == species[np.argmin(counts)])[0])
+
+    def residuals(t):
+        res = []
+        for r_idx, t_idx in groups:
+            d = tgt_f[t_idx][None, :, :] - (ref_f[r_idx] + t)[:, None, :]
+            d -= np.round(d)
+            cost = np.linalg.norm(d @ cell2d, axis=-1) ** 2
+            rows, cols = linear_sum_assignment(cost)
+            for r, c in zip(rows, cols):
+                res.append((d[r, c], tgt_dz[t_idx[c]] - ref_dz[r_idx[r]]))
+        return res
+
+    best = float("inf")
+    for b in np.flatnonzero(tgt_Z == species[np.argmin(counts)]):
+        t = tgt_f[b] - ref_f[anchor]
+        for _ in range(2):  # refine the shift by the mean residual
+            res = residuals(t)
+            t = t + np.mean([d for d, _ in res], axis=0)
+        res = residuals(t)
+        msd = np.mean([np.sum((d @ cell2d) ** 2) + dz ** 2 for d, dz in res])
+        best = min(best, float(np.sqrt(msd)))
+    return best
+
+
+def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
+                      charge_tol=1e-3, deform_tol=0.3):
+    """
+    Assign the atoms of a slab to the planes of its bulk and label them.
+
+    The vertical registry between slab and bulk is learned from the slab's
+    bulk-like interior; every atom then goes to the nearest bulk plane that
+    contains its species, so rumpled or relaxed surface planes stay whole.
+    A plane gets the bulk label (e.g. ``O4``) when it matches its bulk plane
+    within *deform_tol* (RMSD in angstrom after the best rigid shift) and a
+    primed label (``O4'``) when it is more deformed or has a different
+    composition.
+
+    Returns ``(planes_sorted, labels, reduced_counts)`` with planes in the
+    format of :func:`identify_planes`.
+    """
+    catalog, L, bulk_cell2d = _bulk_plane_catalog(bulk_atoms, miller, plane_tol)
+    cell2d = np.array(atoms.cell[:2, :2])
+    for entry in catalog:
+        entry["atoms"] = _tile_plane(entry["atoms"], bulk_cell2d, cell2d)
+        entry["counts"] = dict(Counter(a[0] for a in entry["atoms"]))
+
+    numbers = atoms.numbers
+    z = atoms.positions[:, 2]
+    q = np.asarray(charges_list, dtype=float)
+    atoms_z = np.column_stack([numbers, z, q])
+    slab_planes = sorted(
+        identify_planes(atoms_z, float(atoms.cell[2, 2]), plane_tol=plane_tol),
+        key=lambda p: p["z_center"],
+    )
+
+    def wrap(dz):
+        return ((dz + 0.5 * L) % L) - 0.5 * L
+
+    # Registry offset: z_slab = z_bulk + offset (mod L), scored on all planes,
+    # candidates taken from the bulk-like middle of the slab.
+    n_sp = len(slab_planes)
+    middle = slab_planes[n_sp // 4: n_sp - n_sp // 4] or slab_planes
+    candidates = [
+        (p["z_center"] - b["z"]) % L
+        for p in middle for b in catalog if b["counts"] == p["counts"]
+    ]
+    if not candidates:
+        raise ValueError(
+            f"The slab's planes do not match the {tuple(miller)} planes of the bulk; "
+            "check bulk_atoms and miller."
+        )
+
+    frac = atoms.get_scaled_positions()
+
+    def geometry(idx, zc):
+        return [(int(numbers[i]), frac[i, 0], frac[i, 1], z[i] - zc) for i in idx]
+
+    slab_geoms = [geometry(p["indices"], p["z_center"]) for p in slab_planes]
+
+    def matched(offset):
+        """(slab plane, bulk plane, rmsd) pairs aligned by this offset."""
+        return [
+            (k, b, _plane_rmsd(b["atoms"], slab_geoms[k], cell2d))
+            for k, p in enumerate(slab_planes) for b in catalog
+            if b["counts"] == p["counts"] and abs(wrap(p["z_center"] - b["z"] - offset)) < 0.3
+        ]
+
+    def score(offset):
+        # Atoms in planes that match their bulk plane geometrically; planes of
+        # equal composition (e.g. mirror variants) are told apart this way.
+        good = [(len(slab_planes[k]["indices"]), r) for k, _, r in matched(offset) if r <= deform_tol]
+        return (sum(n for n, _ in good), -sum(r for _, r in good))
+
+    candidates = sorted({round(c, 4) for c in candidates})
+    offset = max(candidates, key=score)
+    in_middle = {id(p) for p in middle}
+    pairs = [
+        (slab_planes[k], b) for k, b, r in matched(offset)
+        if r <= deform_tol and id(slab_planes[k]) in in_middle
+    ] or [(slab_planes[k], b) for k, b, _ in matched(offset)]
+    offset = offset + float(np.mean([wrap(p["z_center"] - b["z"] - offset) for p, b in pairs]))
+
+    # Species-aware nearest bulk plane for every atom.
+    groups = {}
+    for i, (Zi, zi) in enumerate(zip(numbers, z)):
+        options = [k for k, b in enumerate(catalog) if int(Zi) in b["counts"]] or range(len(catalog))
+        best = None
+        for k in options:
+            m = int(np.round((zi - catalog[k]["z"] - offset) / L))
+            dist = abs(zi - (catalog[k]["z"] + offset + m * L))
+            if best is None or dist < best[0]:
+                best = (dist, k, m)
+        groups.setdefault((best[1], best[2]), []).append(i)
+
+    keyed = sorted(groups.items(), key=lambda kv: catalog[kv[0][0]]["z"] + kv[0][1] * L)
+    planes_sorted, labels = [], []
+    for (k, _), idx in keyed:
+        plane = _make_plane(idx, float(np.mean(z[idx])), atoms_z, charge_tol)
+        rmsd = _plane_rmsd(catalog[k]["atoms"], geometry(idx, plane["z_center"]), cell2d)
+        planes_sorted.append(plane)
+        labels.append(catalog[k]["label"] + ("" if rmsd <= deform_tol else "'"))
+
+    bulk_numbers = np.asarray(bulk_atoms.numbers, dtype=float)
+    reduced = compute_reduced_counts(np.column_stack([bulk_numbers, bulk_numbers * 0, bulk_numbers * 0]))
+    return planes_sorted, labels, reduced
 
 
 def compute_delete_info(cut_plane, deletion_mask, atoms_z_matrix, surf_bulk):
