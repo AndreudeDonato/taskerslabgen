@@ -499,16 +499,12 @@ def find_tasker3_candidates(
             else:
                 dist_score = 0.0
 
-            recon_counts = dict(plane["counts"])
-            for idx in mask:
-                Z = int(atoms_z_matrix[idx, 0])
-                recon_counts[Z] = recon_counts.get(Z, 0) - 1
-
             matches_prefer = False
             if prefer_plane is not None:
-                present_Zs = {
-                    Z for Z, c in recon_counts.items() if c > 0
-                }
+                # Elements of the cut plane, as in genslab's prefer_plane
+                # filter (symmetric deletion removes at most half of each
+                # element, so the reconstructed plane has the same ones).
+                present_Zs = {Z for Z, c in plane["counts"].items() if c > 0}
                 if isinstance(prefer_plane, str):
                     if plane_names is not None and any(
                         plane_name_matches(prefer_plane, n) for n in plane_names

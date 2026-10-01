@@ -146,6 +146,7 @@ def cutslab(
         )
     # Track input indices through slicing (charges for validation).
     atoms.arrays[_INDEX_KEY] = np.arange(len(atoms))
+    _put_vacuum_at_boundary(atoms, axis)
 
     L = float(atoms.cell.lengths()[axis])
     if L <= 0.0:
@@ -418,6 +419,25 @@ def cutslab(
 
 
 # ---- Private helpers -------------------------------------------------------
+
+
+def _put_vacuum_at_boundary(atoms, axis):
+    """
+    Make a slab contiguous along *axis*, with its largest gap (the vacuum) at
+    the cell boundary, e.g. for slabs centred at the origin and wrapped.
+
+    Atoms move by whole lattice vectors plus one rigid shift of the whole
+    structure, so the slab itself is unchanged.
+    """
+    if len(atoms) < 2:
+        return
+    frac = atoms.get_scaled_positions(wrap=False)
+    f = frac[:, axis] % 1.0
+    ordered = np.sort(f)
+    gaps = np.diff(np.append(ordered, ordered[0] + 1.0))
+    start = ordered[(int(np.argmax(gaps)) + 1) % len(ordered)]
+    frac[:, axis] = (f - start) % 1.0
+    atoms.set_scaled_positions(frac)
 
 
 def _apply_reconstruction(slab, plane_indices, delete_info, axis=2,

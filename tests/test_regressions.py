@@ -566,6 +566,19 @@ def test_broken_bonds_reported_by_pair():
     assert cand["broken_bonds_by_pair"] == {"O-Sr": 4, "O-Ti": 1}
 
 
+# ------------------------------------------------------------------
+# M9: cutslab on a slab that straddles the cell boundary
+# ------------------------------------------------------------------
+def test_cutslab_handles_slab_wrapped_across_cell_boundary(ceo2_111_slab):
+    from taskerslabgen import cutslab
+
+    centred = ceo2_111_slab.copy()
+    centred.positions[:, 2] -= centred.positions[:, 2].mean()
+    centred.wrap()
+    subs = cutslab(centred, Q_CEO2)
+    assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
+
+
 def test_no_ase_future_warnings():
     from taskerslabgen import generate_slabs_for_miller
 

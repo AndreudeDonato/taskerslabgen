@@ -102,6 +102,10 @@ raise.
   covalent-radius rule is kept because some oxides have genuine metal–metal
   bonds (rutile IrO₂), but it also counts non-bonded cation contacts (Ce–Ce
   in CeO₂); the breakdown shows when to set ``bond_distances``.
+- **cutslab on wrapped slabs (M9):** a slab that straddles the cell
+  boundary along the normal (e.g. centred at z = 0 and wrapped) is first
+  shifted so its vacuum sits at the cell boundary; before, planes were
+  ordered from the middle of the slab and the series was incomplete.
 - **Errors (C9):** ``cutslab`` validates ``cuts`` up front; an empty result
   no longer reports "Unknown cuts mode".
 - Single-plane cells: cut midpoints no longer coincide with the plane.
