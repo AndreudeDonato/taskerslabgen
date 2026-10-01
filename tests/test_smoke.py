@@ -63,13 +63,12 @@ def _stoich_ratio(atoms, reduced):
 # 1. Import check
 # ------------------------------------------------------------------
 def test_import_public_api():
-    from taskerslabgen import (
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+    from taskerslabgen.advanced import (
         assign_plane_names,
         build_adjacency_matrix,
         build_surface,
         compute_reduced_counts,
-        cutslab,
-        generate_slabs_for_miller,
         identify_planes,
     )
 
@@ -239,12 +238,12 @@ def test_cutslab_produces_subslabs(ceo2_bulk):
 # 5. assign_plane_names fingerprinting (stacking alternation for 110)
 # ------------------------------------------------------------------
 def test_assign_plane_names_110_alternation(ceo2_bulk):
-    from taskerslabgen import (
+    from taskerslabgen import plane_name_base
+    from taskerslabgen.advanced import (
         assign_plane_names,
         build_surface,
         compute_projection,
         identify_planes,
-        plane_name_base,
     )
 
     surf = build_surface(ceo2_bulk, (1, 1, 0), layers=1, vacuum=0.0)
@@ -267,12 +266,12 @@ def test_assign_plane_names_110_alternation(ceo2_bulk):
 
 
 def test_iro2_001_plane_variants(iro2_bulk):
-    from taskerslabgen import (
+    from taskerslabgen import plane_name_base
+    from taskerslabgen.advanced import (
         assign_plane_names,
         build_surface,
         compute_projection,
         identify_planes,
-        plane_name_base,
     )
 
     surf = build_surface(iro2_bulk, (0, 0, 1), layers=1, vacuum=0.0)
@@ -291,7 +290,7 @@ def test_iro2_001_plane_variants(iro2_bulk):
 
 
 def test_iro2_001_fixed_plane_tol_override(iro2_bulk):
-    from taskerslabgen import build_surface, compute_projection, identify_planes
+    from taskerslabgen.advanced import build_surface, compute_projection, identify_planes
 
     surf = build_surface(iro2_bulk, (0, 0, 1), layers=1, vacuum=0.0)
     atoms_z, L = compute_projection(iro2_bulk, surf, IRO2_CHARGES, (0, 0, 1))
@@ -300,7 +299,7 @@ def test_iro2_001_fixed_plane_tol_override(iro2_bulk):
 
 
 def test_albite_001_stays_finely_cut(albite_bulk):
-    from taskerslabgen import build_surface, compute_projection, identify_planes
+    from taskerslabgen.advanced import build_surface, compute_projection, identify_planes
 
     surf = build_surface(albite_bulk, (0, 0, 1), layers=1, vacuum=0.0)
     atoms_z, L = compute_projection(albite_bulk, surf, ALBITE_CHARGES, (0, 0, 1))
@@ -390,11 +389,8 @@ def test_prefer_plane_exclusive_element_matching(ceo2_bulk):
 # 7. Stoichiometry helpers
 # ------------------------------------------------------------------
 def test_reduced_counts_and_stoichiometry(ceo2_bulk):
-    from taskerslabgen import (
-        compute_reduced_counts,
-        generate_slabs_for_miller,
-        is_stoichiometric_sequence,
-    )
+    from taskerslabgen import generate_slabs_for_miller
+    from taskerslabgen.advanced import compute_reduced_counts, is_stoichiometric_sequence
     from collections import Counter
 
     atoms_z = np.array(

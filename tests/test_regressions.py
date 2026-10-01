@@ -38,7 +38,7 @@ BOND_DISTS_CEO2 = {"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
 # helpers (independent of the library internals)
 # ------------------------------------------------------------------
 def _tasker_type(atoms, charges, hkl, plane_tol=None):
-    from taskerslabgen import (
+    from taskerslabgen.advanced import (
         build_surface,
         compute_projection,
         compute_reduced_counts,
@@ -273,7 +273,7 @@ def _reference_bond_counts(atoms, hkl, lo=0.85, hi=1.15, n_layers=5):
     ids=["CeO2110", "CeO2111", "CeO2001", "IrO2110", "IrO2101"],
 )
 def test_adjacency_matches_true_bulk_bonding(atoms, hkl):
-    from taskerslabgen import build_adjacency_matrix, build_surface
+    from taskerslabgen.advanced import build_adjacency_matrix, build_surface
 
     surf = build_surface(atoms, hkl, layers=1)
     adj = build_adjacency_matrix(surf, bulk_atoms=atoms, miller=hkl)
@@ -281,7 +281,7 @@ def test_adjacency_matches_true_bulk_bonding(atoms, hkl):
 
 
 def test_adjacency_with_bulk_requires_miller():
-    from taskerslabgen import build_adjacency_matrix, build_surface
+    from taskerslabgen.advanced import build_adjacency_matrix, build_surface
 
     surf = build_surface(CEO2, (1, 1, 1), layers=1)
     with pytest.raises(ValueError, match="miller"):
@@ -292,7 +292,7 @@ def test_adjacency_with_bulk_requires_miller():
 # C6: plane names must not depend on in-plane translation
 # ------------------------------------------------------------------
 def test_translated_identical_planes_share_a_name(ceo2_111_slab):
-    from taskerslabgen import assign_plane_names, identify_planes
+    from taskerslabgen.advanced import assign_plane_names, identify_planes
     from taskerslabgen.core import _charges_to_list
 
     slab = ceo2_111_slab
@@ -371,7 +371,7 @@ def _plane_descriptor(atoms, indices):
 
 
 def _bottom_plane_descriptor(slab):
-    from taskerslabgen import identify_planes
+    from taskerslabgen.advanced import identify_planes
 
     atoms_z = np.column_stack([slab.numbers, slab.positions[:, 2], np.zeros(len(slab))])
     planes = sorted(identify_planes(atoms_z, slab.cell[2, 2]), key=lambda p: p["z_center"])
@@ -386,7 +386,12 @@ def _bottom_plane_descriptor(slab):
 def test_every_plane_label_follows_its_geometry(atoms, charges, hkl):
     """L1/SW4: planes straddling the cell boundary of ase.build.surface had a
     sheared geometry, so variant letters changed with the bulk origin."""
-    from taskerslabgen import assign_plane_names, build_surface, compute_projection, identify_planes
+    from taskerslabgen.advanced import (
+        assign_plane_names,
+        build_surface,
+        compute_projection,
+        identify_planes,
+    )
 
     def labels(bulk_atoms):
         surf = build_surface(bulk_atoms, hkl, layers=1)
@@ -440,7 +445,7 @@ def test_cif_rounded_coordinates_stay_non_polar():
 
 
 def test_dipole_tol_is_per_formula_unit():
-    from taskerslabgen import select_best_sequence
+    from taskerslabgen.advanced import select_best_sequence
 
     def seq(mu, k):
         return {"is_neutral": True, "is_stoich": True, "is_full_period": True,
@@ -788,7 +793,7 @@ def test_charges_read_from_atoms(ceo2_111_slab):
 
 def test_oriented_bulk_layers_are_consistent_copies():
     """L1: copy m of every atom sits m*L above copy 0, and no plane straddles z=0."""
-    from taskerslabgen import build_surface
+    from taskerslabgen.advanced import build_surface
 
     hkl = (0, 0, 1)
     for f in ALBITE.get_scaled_positions()[::4, 2]:
@@ -890,7 +895,8 @@ def test_tasker3_bond_score_counts_dangling_bonds(atoms, charges, hkl):
 
 def test_surface_supercell_keeps_the_facet():
     """T4: bulk * (2, 2, 1) changes the facet; surface_supercell does not."""
-    from taskerslabgen import build_surface, generate_slabs_for_miller
+    from taskerslabgen import generate_slabs_for_miller
+    from taskerslabgen.advanced import build_surface
 
     prim = bulk("MgO", "rocksalt", a=4.21)
     with pytest.raises(ValueError, match="surface_supercell"):
@@ -1104,7 +1110,13 @@ def test_symmetry_equivalent_patterns_are_one_termination():
 def test_symmetry_reduction_keeps_the_scores():
     """Every distinct score of the full enumeration survives the reduction."""
     import taskerslabgen.tasker3 as t3
-    from taskerslabgen import assign_plane_names, build_surface, compute_projection, compute_reduced_counts, identify_planes
+    from taskerslabgen.advanced import (
+        assign_plane_names,
+        build_surface,
+        compute_projection,
+        compute_reduced_counts,
+        identify_planes,
+    )
 
     def candidates(identity_only):
         surf = build_surface(MGO, (1, 1, 1), layers=1)
@@ -1135,3 +1147,20 @@ def test_max_masks_guard():
 
     with pytest.raises(ValueError, match="max_masks"):
         generate_slabs_for_miller(CEO2, Q_CEO2, (0, 0, 1), [2], max_masks=10)
+
+
+# ------------------------------------------------------------------
+# S4: public API is the workflow; lower-level helpers in .advanced
+# ------------------------------------------------------------------
+def test_public_api_and_deprecated_names(ceo2_111_slab):
+    import taskerslabgen
+    from taskerslabgen import advanced
+
+    assert {"generate_slabs_for_miller", "cutslab", "reconstruct_tasker_iii"} <= set(taskerslabgen.__all__)
+    assert not set(taskerslabgen.__all__) & set(advanced.__all__)
+    with pytest.warns(DeprecationWarning, match="taskerslabgen.advanced.build_surface"):
+        assert taskerslabgen.build_surface is advanced.build_surface
+    with pytest.raises(AttributeError, match="removed"):
+        taskerslabgen.extract_termination
+    with pytest.warns(DeprecationWarning, match="bond_threshold"):
+        taskerslabgen.cutslab(ceo2_111_slab, Q_CEO2, bond_threshold=(0.8, 1.2))

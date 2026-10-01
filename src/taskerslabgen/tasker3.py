@@ -1,6 +1,8 @@
-import numpy as np
+import warnings
 from itertools import combinations, product
 from math import comb
+
+import numpy as np
 
 from ase import Atoms
 from ase.data import atomic_numbers, covalent_radii, chemical_symbols
@@ -533,9 +535,10 @@ def find_tasker3_candidates(
         ``[Z, z, q]`` matrix.
     reduced_counts : dict
         Reduced bulk stoichiometry.
-    adj : ndarray or None
-        Unused; kept for backward compatibility (bonds are counted
-        geometrically, see *bulk_atoms*).
+    adj : None
+        Deprecated and ignored (bonds are counted geometrically, see
+        *bulk_atoms*); kept in its position so the arguments after it do
+        not shift.  Passing a matrix warns.
     L : float
         Lattice-plane spacing (angstrom).
     surf_bulk : Atoms or None
@@ -586,6 +589,9 @@ def find_tasker3_candidates(
         ``multiplicity``, ``plane_counts`` and more.  Invalid candidates are kept so they can
         be inspected; callers that build slabs keep the valid ones.
     """
+    if adj is not None:
+        warnings.warn("find_tasker3_candidates ignores adj; pass None.",
+                      DeprecationWarning, stacklevel=2)
     n = len(planes_sorted)
     q = np.asarray(atoms_z_matrix[:, 2], dtype=float)
     z = np.asarray(atoms_z_matrix[:, 1], dtype=float)
@@ -871,15 +877,18 @@ def build_tasker3_slabs(
         Lattice-plane spacing (angstrom).
     vacuum : float
         Vacuum to add (angstrom, applied to each side).
-    plane_tol : float or None
-        Unused; kept for backward compatibility.  The surface planes are
-        located from the cut positions, not by a z tolerance.
+    plane_tol : None
+        Deprecated and ignored (the surface planes are located from the cut
+        positions); passing it warns.
 
     Returns
     -------
     list of Atoms
         One slab per requested thickness, sorted by atom count.
     """
+    if plane_tol is not None:
+        warnings.warn("build_tasker3_slabs ignores plane_tol; it will be removed.",
+                      DeprecationWarning, stacklevel=2)
     n_uc = len(atoms_z_matrix)
     n_planes = len(planes_sorted)
 

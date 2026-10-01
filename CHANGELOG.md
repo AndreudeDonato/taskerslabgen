@@ -222,6 +222,20 @@ raise.
   ``reconstruct_tasker_iii`` and ``find_tasker3_candidates`` raises before
   enumerating more patterns than that.
 
+### API (S2, S4)
+- The top-level package exports the workflow: ``generate_slabs_for_miller``,
+  ``cutslab``, ``reconstruct_tasker_iii``, ``validate_slab``,
+  ``SlabValidationError``, ``plane_name_matches``, ``plane_name_base`` and
+  ``parse_hirshfeld_fhi_aims``.  Lower-level helpers moved to
+  ``taskerslabgen.advanced``; their old top-level names still import, with
+  a ``DeprecationWarning``.
+- Removed the unused ``extract_termination`` and ``plane_match_score``.
+- Ignored parameters warn when passed: ``cutslab(bond_threshold=,
+  bond_distances=)``, ``build_tasker3_slabs(plane_tol=)``,
+  ``find_tasker3_candidates(adj=)``.
+- ``reconstruct_tasker_iii`` uses the same Tasker III steps as
+  ``generate_slabs_for_miller`` and also returns ``"reconstruction"``.
+
 ### Compatibility
 - ``ase.build.surface`` is no longer called with ``vacuum=0`` (deprecated in
   ASE 3.29, slated to raise); ``build_surface`` without vacuum keeps atom

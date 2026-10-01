@@ -1,88 +1,57 @@
 """
-taskerslabgen public API.
+taskerslabgen: non-polar oxide slabs, chosen automatically.
 
-Primary entry points (start here)
----------------------------------
-- :func:`generate_slabs_for_miller` — classify Tasker I/II vs III and build slabs
-- :func:`cutslab` — peel a thick slab into a thickness series
+Workflow
+--------
+- :func:`generate_slabs_for_miller` — classify a surface as Tasker I/II or
+  III, pick the best termination (or reconstruction) and build slabs
+- :func:`cutslab` — cut a thick (relaxed) slab into a thickness series with
+  the same terminations
+- :func:`reconstruct_tasker_iii` — the Tasker III path on its own
 
-Common helpers
---------------
-- :func:`build_adjacency_matrix` — bonding graph for Tasker III scoring
-- :func:`assign_plane_names` — composition labels (``O4``, ``IrO2-a``, …)
-- :func:`reconstruct_tasker_iii` — Tasker III-only path (also used internally)
-
-Advanced / lower-level helpers are also re-exported for power users; prefer the
-primary API unless you are extending the pipeline.
+Also here: :func:`validate_slab` / :class:`SlabValidationError`, the label
+helpers :func:`plane_name_matches` / :func:`plane_name_base`, and
+:func:`parse_hirshfeld_fhi_aims`.  Lower-level steps (plane clustering, cut
+enumeration, bonding, Tasker III candidates, builders) are in
+:mod:`taskerslabgen.advanced`.
 """
 
-from .core import (
-    SlabValidationError,
-    apply_vacuum_to_slab,
-    assign_plane_names,
-    build_surface,
-    compute_cut_positions,
-    compute_delete_info,
-    compute_projection,
-    compute_reduced_counts,
-    enumerate_cut_pairs,
-    extract_termination,
-    identify_planes,
-    is_stoichiometric_sequence,
-    plane_match_score,
-    plane_name_base,
-    plane_name_matches,
-    select_best_sequence,
-    surface_bulk_cell,
-    validate_slab,
-)
+import warnings
+
+from . import advanced
+from .chargeparsers import parse_hirshfeld_fhi_aims
+from .core import SlabValidationError, plane_name_base, plane_name_matches, validate_slab
 from .genslab import generate_slabs_for_miller
 from .slabcut import cutslab
-from .plotting import plot_unitcell_atoms
-from .builder import build_cut_slabs
-from .chargeparsers import parse_hirshfeld_fhi_aims
-from .tasker3 import (
-    build_adjacency_matrix,
-    build_tasker3_slabs,
-    find_tasker3_candidates,
-    print_adjacency_matrix,
-    reconstruct_tasker_iii,
-)
+from .tasker3 import reconstruct_tasker_iii
 
-# Primary API (stable workflow surface)
-_PRIMARY = (
+__all__ = [
     "generate_slabs_for_miller",
     "cutslab",
-    "build_adjacency_matrix",
-    "assign_plane_names",
     "reconstruct_tasker_iii",
-)
-
-# Advanced helpers (still public, but lower-level)
-_ADVANCED = (
-    "build_surface",
-    "compute_projection",
-    "identify_planes",
-    "compute_reduced_counts",
-    "enumerate_cut_pairs",
-    "select_best_sequence",
-    "compute_cut_positions",
-    "compute_delete_info",
-    "extract_termination",
-    "plane_match_score",
-    "plane_name_base",
-    "plane_name_matches",
-    "apply_vacuum_to_slab",
-    "is_stoichiometric_sequence",
-    "plot_unitcell_atoms",
-    "build_cut_slabs",
-    "parse_hirshfeld_fhi_aims",
-    "print_adjacency_matrix",
-    "find_tasker3_candidates",
-    "build_tasker3_slabs",
-    "surface_bulk_cell",
     "validate_slab",
     "SlabValidationError",
-)
+    "plane_name_matches",
+    "plane_name_base",
+    "parse_hirshfeld_fhi_aims",
+]
 
-__all__ = list(_PRIMARY) + list(_ADVANCED)
+_REMOVED = {
+    "extract_termination": "use cutslab(cut_at='termination') or the plane labels",
+    "plane_match_score": "use plane_name_matches on the plane labels",
+}
+
+
+def __getattr__(name):
+    # Names that used to be exported here: still importable, with a warning.
+    if name in advanced.__all__:
+        warnings.warn(
+            f"taskerslabgen.{name} moved to taskerslabgen.advanced.{name}; "
+            "the top-level name will be removed in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return getattr(advanced, name)
+    if name in _REMOVED:
+        raise AttributeError(f"taskerslabgen.{name} was removed: {_REMOVED[name]}.")
+    raise AttributeError(f"module 'taskerslabgen' has no attribute {name!r}")

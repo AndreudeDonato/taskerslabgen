@@ -35,7 +35,7 @@ def cutslab(
     plot_out_dir=".",
     plot=False,
     verbose=None,
-    bond_threshold=(0.85, 1.15),
+    bond_threshold=None,
     bond_distances=None,
     reconstruction=None,
     cut_at="termination",
@@ -80,11 +80,9 @@ def cutslab(
         Generate stacking-axis plots for each sub-slab (default ``False``).
     verbose : bool or None
         Print detailed cut information.
-    bond_threshold : tuple of float
-        Unused; kept for backward compatibility (the Tasker III fallback
-        was removed: it treated the slab as a periodic bulk cell).
-    bond_distances : dict or None
-        Unused; kept for backward compatibility.
+    bond_threshold, bond_distances
+        Deprecated and ignored (used by a removed Tasker III fallback that
+        treated the slab as a periodic bulk cell); passing them warns.
     reconstruction : dict or None
         Tasker III reconstruction pattern (the ``term["reconstruction"]``
         dict from :func:`generate_slabs_for_miller`, also after a JSON round
@@ -142,6 +140,12 @@ def cutslab(
     """
     from .plotting import plot_unitcell_atoms
 
+    if bond_threshold is not None or bond_distances is not None:
+        warnings.warn(
+            "cutslab ignores bond_threshold and bond_distances; they will be removed.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     if cuts not in ("right", "left", "all"):
         raise ValueError(
             f"Unknown cuts mode: {cuts!r}. Must be 'right', 'left', or 'all'."

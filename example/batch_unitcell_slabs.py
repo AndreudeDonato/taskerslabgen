@@ -23,12 +23,8 @@ import numpy as np
 from ase.data import atomic_numbers
 from ase.io import read, write
 
-from taskerslabgen import (
-    compute_reduced_counts,
-    cutslab,
-    generate_slabs_for_miller,
-    is_stoichiometric_sequence,
-)
+from taskerslabgen import cutslab, generate_slabs_for_miller
+from taskerslabgen.advanced import compute_reduced_counts, is_stoichiometric_sequence
 
 # -----------------------------------------------------------------------------
 # Miller indices per crystal type

@@ -60,4 +60,4 @@ include = ["taskerslabgen*"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 # Surface upstream API deprecations (e.g. ASE) before they become errors.
-filterwarnings = ["error::FutureWarning"]
+filterwarnings = ["error::FutureWarning", "error:taskerslabgen\\.:DeprecationWarning"]

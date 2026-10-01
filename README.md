@@ -96,9 +96,12 @@ Start with these two functions:
 | `generate_slabs_for_miller` | Classify Tasker I/II vs III and build slabs |
 | `cutslab` | Peel a thick slab into a thickness series |
 
-Also commonly useful: `build_adjacency_matrix`, `assign_plane_names`,
-`reconstruct_tasker_iii`. Lower-level helpers are re-exported for power users
-but are not required for the standard workflow.
+Also at the top level: `reconstruct_tasker_iii` (the Tasker III path on its
+own), `validate_slab` / `SlabValidationError`, the label helpers
+`plane_name_matches` / `plane_name_base`, and `parse_hirshfeld_fhi_aims`.
+Lower-level steps (plane clustering, cut enumeration, bonding, Tasker III
+candidates, builders) are in `taskerslabgen.advanced`; importing them from
+`taskerslabgen` still works but is deprecated.
 
 Library defaults are quiet: `plot=False` and prints only when `verbose=True`.
 
@@ -352,7 +355,7 @@ Supports single-plane slabs (1 atomic plane thick).
 ### `build_adjacency_matrix`
 
 ```python
-from taskerslabgen import build_adjacency_matrix
+from taskerslabgen.advanced import build_adjacency_matrix
 
 adj = build_adjacency_matrix(
     atoms,
@@ -382,7 +385,7 @@ Returns an `(N, N)` integer `ndarray` (symmetric bond counts).
 ### `assign_plane_names`
 
 ```python
-from taskerslabgen import assign_plane_names
+from taskerslabgen.advanced import assign_plane_names
 
 names, name_map = assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.5)
 ```
@@ -441,6 +444,9 @@ Returns a dict with `"slab_atoms"`, `"best_candidate"`,
 
 ### Advanced helpers
 
+Import these from `taskerslabgen.advanced` (except `validate_slab` and
+`parse_hirshfeld_fhi_aims`, which are top-level).
+
 | Function | Description |
 |---|---|
 | `build_surface(bulk_atoms, miller, layers, vacuum, verbose)` | Build an ASE surface slab from a bulk structure. |
@@ -455,8 +461,6 @@ Returns a dict with `"slab_atoms"`, `"best_candidate"`,
 | `compute_cut_positions(planes, L, bottom_cut_index, top_cut_index)` | Compute z-coordinates for bottom and top cuts. |
 | `apply_vacuum_to_slab(atoms, vacuum, axis)` | Add vacuum above and below a slab. |
 | `compute_delete_info(cut_plane, deletion_mask, atoms_z_matrix, surf_bulk)` | Extract reconstruction deletion pattern as `(Z, fx, fy)` tuples. |
-| `extract_termination(reference, charges, axis, plane_tol, charge_tol)` | Extract termination fingerprints from a reference slab. |
-| `plane_match_score(plane, ref_fingerprint, atoms, axis)` | Score how well a plane matches a reference fingerprint (Hungarian RMSD). |
 | `build_cut_slabs(bulk_atoms, miller, layer_thickness_list, zbot, ztop, L, vacuum)` | Build Tasker I/II slabs at various thicknesses. |
 | `plot_unitcell_atoms(atoms_z, L, miller, ...)` | Stacking-axis plot with plane annotations. |
 | `parse_hirshfeld_fhi_aims(output_path)` | Parse the last Hirshfeld charges of an FHI-aims output file (`atoms.set_initial_charges(...)`, then `charges=None`). |
