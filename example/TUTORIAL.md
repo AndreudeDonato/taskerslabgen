@@ -67,7 +67,7 @@ sub_slabs = cutslab(
     input_structure=thick,
     charges=charges,
     cut_at="termination",
-    cuts="right",
+    cuts="top",
     reconstruction=term.get("reconstruction"),
     vacuum=15.0,
 )
@@ -81,7 +81,7 @@ for slab in sub_slabs:
     )
 ```
 
-`cuts="right"` fixes the bottom termination and peels from the top; every
+`cuts="top"` keeps the bottom termination and cuts from the top; every
 sub-slab keeps the input's bottom and top planes (section 7).
 Each returned `Atoms` object carries cut metadata in `.info`, and every
 sub-slab is checked to be stoichiometric, neutral and non-polar.
@@ -105,7 +105,7 @@ sub_slabs = cutslab(
     bulk_atoms=bulk,        # unit cell or supercell, may be relaxed too
     miller=(0, 0, 1),
     reconstruction=term.get("reconstruction"),
-    dipole_tol=0.3,         # relaxed surfaces carry small dipoles
+    dipole_tol=0.05,        # a cut over a relaxed surface carries a small dipole
 )
 ```
 
@@ -160,21 +160,18 @@ label.  Their **absolute** phase (as seen in the slab) alternates.
 both selections of every case to one trajectory,
 `output_phases/plane_phases.traj` (frame table printed;
 open with `--view`, `ase gui <file>` for the top view along the normal or
-`ase gui -R -90x <file>` for a side view), and a picture of every cut in
-`output_phases/<case>/<selection>/`: the input slab from the side with the
-sub-slab in colour, and its planes coloured by what the selection allowed
-as the bottom (red) and top (blue) surface.
+`ase gui -R -90x <file>` for a side view), and a plot of every cut in
+`output_phases/<case>/<selection>/`: the planes the selection allowed as
+bottom surface are red, as top surface blue.
 
 1. **Same arrangement, different relative phase (a vs a').**  Anatase
    (101) has four O₂ planes per repeat unit.  Over the correct termination
    the top O sits 0.73 Å above the Ti; over another phase of the same O₂
    plane only 0.15 Å.  `selection="relative"` keeps the termination
-   through the whole thickness series; `"shape"` mixes both.  The thinnest
-   mixed slab, `O2 Ti2 O2'` (6 atoms), is missing even with `"shape"`: its
-   two different surfaces give it a dipole of 2.3 e·Å, 1.16 per formula
-   unit, above `dipole_tol=0.3`.  The same dipole spread over more formula
-   units passes from 30 atoms on (0.23 per formula unit), so the dipole
-   check alone cannot keep a termination: the phase has to.
+   through the whole thickness series; `"shape"` mixes both.  The mixed
+   slabs, from `O2 Ti2 O2'` (6 atoms) up, have a polarity of 0.022 /Å at
+   every thickness, which passes the `dipole_tol=0.05` that relaxed slabs
+   need: the dipole check cannot keep the termination, the phase does.
 2. **Same relative phase, different absolute phase (a---a vs a---a').**
    Rutile IrO₂ (110): the top bridging-O row lies exactly over the bottom one
    for 1, 3, 5 layers (`cut_phase_overlap` = 1) and half a cell off for 2,

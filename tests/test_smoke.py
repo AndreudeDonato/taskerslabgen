@@ -219,7 +219,7 @@ def test_cutslab_produces_subslabs(ceo2_bulk):
         axis=2,
         plot=False,
         cut_at="termination",
-        cuts="right",
+        cuts="top",
         vacuum=15.0,
     )
 

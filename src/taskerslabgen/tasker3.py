@@ -9,7 +9,10 @@ from ase.data import atomic_numbers, covalent_radii, chemical_symbols
 from ase.neighborlist import neighbor_list
 
 from .core import (
+    DEFAULT_DIPOLE_TOL,
     PolarSurfaceError,
+    _charge_scale,
+    _surface_area,
     _gauss_reduce_basis,
     _lattice_point_ops,
     _formula_label,
@@ -346,17 +349,20 @@ def _dangling_bonds(mask, terms):
     return int(cut - cross0[m].sum() + inward[m].sum() - inside)
 
 
-def _tasker3_slab_moments(q, r, plane_idx, mask, L, atoms_per_fu, min_layers=1):
+def _tasker3_slab_moments(q, r, plane_idx, mask, L, atoms_per_fu, min_layers=1,
+                          max_layers=None, area=1.0):
     """
     Exact charge and dipole of the Tasker III slab, from atom positions.
 
     The slab of ``lt`` repeat units holds the cell's atoms at heights
     ``r + m L`` (``m < lt``) plus the cut plane at ``r + lt L``, without the
     *mask* atoms of its bottom (``m = 0``) and top (``m = lt``) copies; *r*
-    are heights above the bottom cut.  Returns ``(dipole, charge,
-    dipole_per_fu, charge_per_fu)``: dipole (e·Å, about the mean height) and
-    net charge of the ``min_layers`` slab, and the largest |dipole| and
-    |charge| per formula unit over every thickness ``lt >= min_layers``.
+    are heights above the bottom cut and *q* the charges (normalised by the
+    caller).  Returns ``(dipole, charge, dipole_per_area, charge_per_fu)``:
+    dipole (about the mean height) and net charge of the ``min_layers``
+    slab, the largest |dipole| / *area* and the largest |charge| per formula
+    unit over every thickness from *min_layers* to *max_layers* (or a
+    spread of thicknesses up to ``10 * min_layers`` if not given).
     """
     q = np.asarray(q, dtype=float)
     r = np.asarray(r, dtype=float)
@@ -373,17 +379,17 @@ def _tasker3_slab_moments(q, r, plane_idx, mask, L, atoms_per_fu, min_layers=1):
         Q = lt * Qu + QP - 2 * QM
         mu = qz - Q * z / n
         k = n / atoms_per_fu
-        return mu, Q, abs(mu) / k, abs(Q) / k
+        return mu, Q, abs(mu) / area, abs(Q) / k
 
-    lts = sorted({min_layers, min_layers + 1, min_layers + 3, 10 * min_layers})
+    if max_layers is None:
+        lts = sorted({min_layers, min_layers + 1, min_layers + 3, 10 * min_layers})
+    else:
+        lts = range(min_layers, max(min_layers, max_layers) + 1)
     values = [moments(lt) for lt in lts]
-    # Thick-slab limits (the quadratic terms of the dipole cancel).
-    k_unit = Nu / atoms_per_fu
-    slope = Du - Qu * Ru / Nu + L * (QP - QM - Qu * (NP - NM) / Nu)
     mu0, Q0 = values[0][0], values[0][1]
-    dipole_per_fu = max([v[2] for v in values] + [abs(slope) / k_unit])
-    charge_per_fu = max([v[3] for v in values] + [abs(Qu) / k_unit])
-    return float(mu0), float(Q0), float(dipole_per_fu), float(charge_per_fu)
+    dipole_per_area = max(v[2] for v in values)
+    charge_per_fu = max([v[3] for v in values] + [abs(Qu) / (Nu / atoms_per_fu)])
+    return float(mu0), float(Q0), float(dipole_per_area), float(charge_per_fu)
 
 
 def _prefer_matches(prefer_plane, label, counts):
@@ -463,12 +469,13 @@ def find_tasker3_candidates(
     verbose=None,
     prefer_plane=None,
     plane_names=None,
-    dipole_tol=0.05,
+    dipole_tol=DEFAULT_DIPOLE_TOL,
     bulk_atoms=None,
     miller=None,
     bond_threshold=(0.85, 1.15),
     min_layers=1,
     max_masks=200000,
+    max_layers=None,
 ):
     """
     Enumerate and score Tasker III reconstruction candidates.
@@ -478,9 +485,11 @@ def find_tasker3_candidates(
     of the plane) is scored:
 
     - **dipole and charge** of the slab, exactly from the atom positions
-      after the deletions; a candidate is valid when its |dipole| and
-      |charge| per formula unit stay within *dipole_tol* / *charge_tol* for
-      every thickness of at least *min_layers* repeat units;
+      after the deletions, with the charges divided by their mean absolute
+      value; a candidate is valid when its polarity (|dipole| per surface
+      area) and its |charge| per formula unit stay within *dipole_tol* /
+      *charge_tol* for every thickness from *min_layers* to *max_layers*
+      repeat units;
     - **bond score**: bulk bonds of the kept atoms that end at missing atoms
       (vacuum or deleted), counted per surface cell over periodic images of
       the true bulk lattice (needs *bulk_atoms* and *miller*);
@@ -514,7 +523,8 @@ def find_tasker3_candidates(
         Per-pair reference distances (same format as
         :func:`build_adjacency_matrix`).
     charge_tol : float
-        Largest |net charge| per formula unit (e) treated as neutral.
+        Largest |net charge| per formula unit, in units of the mean absolute
+        charge per atom, treated as neutral.
     verbose : bool or None
         Print candidate table.
     prefer_plane : str, list[str], or None
@@ -524,7 +534,8 @@ def find_tasker3_candidates(
     plane_names : list of str or None
         Plane labels from :func:`assign_plane_names`.
     dipole_tol : float
-        Largest |dipole| per formula unit (e·Å) treated as zero.
+        Largest polarity (dipole per surface area, charges normalised, 1/Å)
+        treated as zero.
     bulk_atoms : Atoms or None
         Bulk cell *surf_bulk* was built from; with *miller*, bonds follow
         the true bulk lattice (:func:`surface_bulk_cell`).  Without it the
@@ -534,8 +545,10 @@ def find_tasker3_candidates(
         Miller index of *surf_bulk*.
     bond_threshold : tuple of float
         ``(lo, hi)`` scaling of the reference bond distances.
-    min_layers : int
-        Thinnest slab (repeat units) the candidate must be valid for.
+    min_layers, max_layers : int
+        Thinnest and thickest slabs (repeat units) the candidate must be
+        valid for (*max_layers* defaults to a spread up to ``10 *
+        min_layers``).
     max_masks : int
         Largest number of deletion patterns (before symmetry reduction) to
         enumerate; above it a ``ValueError`` is raised instead of running
@@ -549,8 +562,8 @@ def find_tasker3_candidates(
         deterministic; IDs in rank order.  Each dict contains
         ``cut_plane_idx``, ``recon_label`` (e.g. ``"O4-recon"``),
         ``deletion_mask``, ``net_dipole`` and ``total_charge`` (of the
-        *min_layers* slab), ``dipole_per_fu`` and ``charge_per_fu`` (largest
-        over thicknesses), ``is_neutral``, ``is_valid``, ``bond_score``
+        *min_layers* slab), ``dipole_per_area`` and ``charge_per_fu``
+        (largest over thicknesses, charges normalised), ``is_neutral``, ``is_valid``, ``bond_score``
         (``broken_top + broken_bottom``), ``distribution_score``,
         ``multiplicity``, ``plane_counts`` and more.  Invalid candidates are kept so they can
         be inspected; callers that build slabs keep the valid ones.
@@ -560,6 +573,8 @@ def find_tasker3_candidates(
                       DeprecationWarning, stacklevel=2)
     n = len(planes_sorted)
     q = np.asarray(atoms_z_matrix[:, 2], dtype=float)
+    q = q / _charge_scale(q)
+    area = _surface_area(surf_bulk.cell) if surf_bulk is not None else 1.0
     z = np.asarray(atoms_z_matrix[:, 1], dtype=float)
     atoms_per_fu = float(sum(reduced_counts.values()))
     if plane_names is None:
@@ -639,8 +654,9 @@ def find_tasker3_candidates(
         plane_charge = float(q[plane["indices"]].sum())
 
         for mask, multiplicity in masks:
-            mu, total_q, dipole_per_fu, charge_per_fu = _tasker3_slab_moments(
-                q, r_bot, plane["indices"], mask, L, atoms_per_fu, min_layers
+            mu, total_q, dipole_per_area, charge_per_fu = _tasker3_slab_moments(
+                q, r_bot, plane["indices"], mask, L, atoms_per_fu, min_layers,
+                max_layers, area,
             )
             if bonds is not None:
                 broken_bottom = _dangling_bonds(mask, terms_bot)
@@ -667,11 +683,11 @@ def find_tasker3_candidates(
                 "broken_bottom": broken_bottom,
                 "net_dipole": mu,
                 "abs_dipole": abs(mu),
-                "dipole_per_fu": dipole_per_fu,
+                "dipole_per_area": dipole_per_area,
                 "total_charge": total_q,
                 "charge_per_fu": charge_per_fu,
                 "is_neutral": is_neutral,
-                "is_valid": is_neutral and dipole_per_fu <= dipole_tol,
+                "is_valid": is_neutral and dipole_per_area <= dipole_tol,
                 "q_recon": plane_charge - float(q[list(mask)].sum()),
                 "distribution_score": dist_score,
                 "multiplicity": multiplicity,
@@ -682,7 +698,7 @@ def find_tasker3_candidates(
         return (
             not c["matches_prefer_plane"] if prefer_plane is not None else False,
             not c["is_valid"],
-            0.0 if c["is_valid"] else c["dipole_per_fu"],
+            0.0 if c["is_valid"] else c["dipole_per_area"],
             c["bond_score"],
             round(c["distribution_score"], 8),
             c["recon_label"],
@@ -695,7 +711,7 @@ def find_tasker3_candidates(
         print(f"\nTasker III reconstruction candidates: {len(candidates)}")
         print(
             f"{'#':>4s}  {'plane':>12s}  {'del':>3s}  {'excess':<16s}  {'Q/fu':>8s}  "
-            f"{'mu/fu':>10s}  {'brkn':>5s}  {'(top':>5s}  {'bot)':>5s}  {'distr':>8s}  valid"
+            f"{'mu/area':>10s}  {'brkn':>5s}  {'(top':>5s}  {'bot)':>5s}  {'distr':>8s}  valid"
         )
         for rank, c in enumerate(candidates):
             excess_str = ", ".join(
@@ -703,7 +719,7 @@ def find_tasker3_candidates(
             )
             print(
                 f"{rank:4d}  {c['recon_label']:>12s}  {c['n_deleted']:3d}  {excess_str:<16s}  "
-                f"{c['charge_per_fu']:8.4f}  {c['dipole_per_fu']:10.4e}  "
+                f"{c['charge_per_fu']:8.4f}  {c['dipole_per_area']:10.4e}  "
                 f"{c['bond_score']:5d}  {c['broken_top']:5d}  {c['broken_bottom']:5d}  "
                 f"{c['distribution_score']:+8.4f}  {c['is_valid']}"
             )
@@ -727,7 +743,7 @@ def _select_tasker3_candidates(candidates, miller, dipole_tol, charge_tol):
             "or (2, 2) (not bulk_atoms * (2, 2, 1), which changes the facet unless "
             "the surface normal is along c)."
         )
-    valid = [c for c in candidates if c["is_neutral"] and c["dipole_per_fu"] <= dipole_tol]
+    valid = [c for c in candidates if c["is_neutral"] and c["dipole_per_area"] <= dipole_tol]
     if valid:
         return valid
     neutral = [c for c in candidates if c["is_neutral"]]
@@ -735,21 +751,23 @@ def _select_tasker3_candidates(candidates, miller, dipole_tol, charge_tol):
         best = min(candidates, key=lambda c: c["charge_per_fu"])
         raise ValueError(
             f"No charge-neutral Tasker III reconstruction found for {tuple(miller)}: "
-            f"the best leaves {best['charge_per_fu']:.4g} e per formula unit "
+            f"the best leaves {best['charge_per_fu']:.4g} per formula unit (in units of "
+            "the mean absolute charge) "
             f"(charge_tol={charge_tol}).  Check that the charges sum to zero over "
             "the bulk cell; computed charges may need a larger charge_tol."
         )
-    best = min(neutral, key=lambda c: c["dipole_per_fu"])
+    best = min(neutral, key=lambda c: c["dipole_per_area"])
     raise PolarSurfaceError(
         f"No non-polar Tasker III reconstruction found for {tuple(miller)}: "
         "removing atoms symmetrically from one plane type leaves a dipole of "
-        f"at least {best['dipole_per_fu']:.4g} e*A per formula unit "
+        f"a polarity of at least {best['dipole_per_area']:.4g} /A (dipole per surface "
+        "area, charges normalised) "
         f"(dipole_tol={dipole_tol}). "
         "This stacking needs different reconstructions on the two surfaces, "
         "which taskerslabgen does not build.  If the bulk is only slightly "
         "distorted (e.g. relaxed), generate_slabs_for_miller(dipole_tol_max=...) "
         "retries with the smallest tolerance that gives a slab.",
-        best["dipole_per_fu"],
+        best["dipole_per_area"],
     )
 
 
@@ -900,7 +918,7 @@ def reconstruct_tasker_iii(
     bulk_name,
     plane_tol=None,
     charge_tol=1e-3,
-    dipole_tol=0.05,
+    dipole_tol=DEFAULT_DIPOLE_TOL,
     vacuum=15.0,
     plot=False,
     plot_out_dir=".",
@@ -933,11 +951,12 @@ def reconstruct_tasker_iii(
         Largest z-gap (angstrom) within one plane.  ``None`` (default)
         uses 0.1 Å.
     charge_tol : float
-        Largest |net charge| per formula unit (e) treated as neutral.
+        Largest |net charge| per formula unit, in units of the mean absolute
+        charge per atom, treated as neutral.
     dipole_tol : float
-        Largest |dipole| per formula unit (e·Å) still treated as zero
-        (default 0.05).  Genuinely polar repeat units are ~1-6 e·Å per
-        formula unit; relaxed structures may need ~0.3.
+        Largest polarity (dipole per surface area, charges normalised, 1/Å)
+        still treated as zero (default 1e-3).  See
+        :func:`generate_slabs_for_miller`.
     vacuum : float
         Vacuum to add (angstrom, per side).
     plot : bool

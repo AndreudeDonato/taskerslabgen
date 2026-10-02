@@ -148,15 +148,17 @@ OUTPUT_DIR = REPO_ROOT / "X1output_slabs"
 THICK_LAYERS = 6
 VACUUM = 15.0
 OUTPUT_EXT = "in"
-# dipole_tol is |dipole| per formula unit (e*A); polar repeat units are ~1-6.
-# Ideal CIF bulks need only the default 0.05; DFT-relaxed bulks may carry
-# small symmetry-breaking noise, hence the looser value here.
-DIPOLE_TOL_GENSLAB = 0.3
-DIPOLE_TOL_CUTSLAB = 0.3
+# dipole_tol is the polarity: |dipole| per surface area with the charges
+# divided by their mean absolute value (1/A), the same at any thickness and
+# for any scale of charges.  Ideal CIF bulks need only the default 1e-3; a
+# sub-slab cut from a relaxed slab keeps one relaxed surface (up to ~0.04).
+DIPOLE_TOL_GENSLAB = 0.05
+DIPOLE_TOL_CUTSLAB = 0.05
 # Facets with no slab within DIPOLE_TOL_GENSLAB are rebuilt with the smallest
-# tolerance that works, up to this cap, with a warning (e.g. dimerised MoO2
-# needs ~0.45).  Genuinely polar facets need ~1-6, so they still fail.
-DIPOLE_TOL_MAX = 1.0
+# tolerance that works, up to this cap, with a warning.  Dipoles of a polar
+# stacking add up with the thickness: at THICK_LAYERS = 6, dimerised MoO2
+# needs up to 0.28 ((100)); genuinely polar wurtzite ZnO (0001) 0.81 fails.
+DIPOLE_TOL_MAX = 0.3
 # How cutslab keeps the termination of the thick slab: "relative" cuts only at
 # copies of its surface planes (same arrangement and phase in the crystal);
 # "shape" also at the same arrangement shifted or rotated, which adds the
@@ -294,7 +296,7 @@ def process_miller(
         reconstruction=term.get("reconstruction"),
         plane_tol=plane_tol,
         vacuum=VACUUM,
-        cuts="right",
+        cuts="top",
         selection=SELECTION,
         verbose=VERBOSE,
     )

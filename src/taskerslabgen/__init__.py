@@ -10,7 +10,8 @@ Workflow
 - :func:`reconstruct_tasker_iii` — the Tasker III path on its own
 
 Also here: :func:`validate_slab` / :class:`SlabValidationError`,
-:class:`PolarSurfaceError`, the label
+:class:`PolarSurfaceError`, :func:`dipole_per_area` (the polarity
+``dipole_tol`` is compared with), the label
 helpers :func:`plane_name_matches` / :func:`plane_name_base` /
 :func:`plane_name_for_filename`, and
 :func:`parse_hirshfeld_fhi_aims`.  Lower-level steps (plane clustering, cut
@@ -27,6 +28,7 @@ from .chargeparsers import parse_hirshfeld_fhi_aims
 from .core import (
     PolarSurfaceError,
     SlabValidationError,
+    dipole_per_area,
     plane_name_base,
     plane_name_for_filename,
     plane_name_matches,
@@ -43,6 +45,7 @@ __all__ = [
     "validate_slab",
     "SlabValidationError",
     "PolarSurfaceError",
+    "dipole_per_area",
     "plane_name_matches",
     "plane_name_base",
     "plane_name_for_filename",

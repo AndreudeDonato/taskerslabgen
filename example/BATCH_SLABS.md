@@ -75,7 +75,7 @@ For each bulk file:
    (`THICK_LAYERS = 6` formula units) with the best non-polar termination
    for each Miller index.
 2. **cutslab** — cuts the thick slab with `cut_at="termination"` and
-   `cuts="right"`, preserving the surface termination (including Tasker III
+   `cuts="top"`, preserving the surface termination (including Tasker III
    reconstruction when needed).
 
 Output files follow:
@@ -97,17 +97,21 @@ All in the top of `batch_unitcell_slabs.py`:
 - `PLANE_TOL` — per-facet plane tolerance, used for both genslab and cutslab.
   The default 0.1 Å absorbs relaxation noise; PtO2 marcasite (001) uses
   0.05 Å because its two O planes 0.07 Å apart allow a better Tasker II cut.
-- `DIPOLE_TOL_*` — 0.3 e·Å per formula unit, for relaxed bulks.
+- `DIPOLE_TOL_*` — 0.05, for relaxed bulks: the polarity (dipole per surface
+  area, charges divided by their mean absolute value, 1/Å), which does not
+  depend on the thickness or on the scale of the charges.
 - `SELECTION` — `"relative"` (default) keeps the thick slab's surface planes
   exactly (same arrangement and phase); `"shape"` also cuts at shifted or
   rotated copies, adding the slabs that end half a repeat unit off.  See the
   plane phases section of `example/TUTORIAL.md`.
-- `DIPOLE_TOL_MAX` — facets with no slab within 0.3 are rebuilt with the
-  smallest tolerance that works, up to 1.0, with a warning; cutslab then uses
+- `DIPOLE_TOL_MAX` — facets with no slab within 0.05 are rebuilt with the
+  smallest tolerance that works, up to 0.3, with a warning; cutslab then uses
   the same tolerance.
 
-MoO2 forms Mo–Mo dimers, so a rutile-cell MoO2 has no clean planes: (100),
-(010) and (111) need dipole_tol ≈ 0.45 and go through the fallback.
+MoO2 forms Mo–Mo dimers, so a rutile-cell MoO2 has no clean planes, and the
+small dipole of its stacking adds up over the six repeat units: (110), (111)
+and (100) need 0.08, 0.14 and 0.28 and go through the fallback (genuinely
+polar wurtzite ZnO (0001) would need 0.81).
 
 ## Troubleshooting
 

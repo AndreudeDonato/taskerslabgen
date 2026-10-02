@@ -15,11 +15,9 @@ Three cases, each cut with two selections:
    Anatase (101): four O2 planes per repeat unit.  Over the correct
    termination the top O sits 0.73 A above the Ti; over another phase of the
    same O2 plane only 0.15 A.  "relative" (default) keeps the termination,
-   "shape" mixes both.  The thinnest mixed slab, O2 Ti2 O2' (6 atoms), is
-   missing even with "shape": its two different surfaces give it a dipole of
-   2.3 e*A, 1.16 per formula unit, above dipole_tol=0.3.  The same dipole
-   divided over more formula units passes from 30 atoms on (0.23), which is
-   why the phase, not the dipole check, has to keep the termination.
+   "shape" mixes both.  The mixed slabs, from O2 Ti2 O2' (6 atoms) up, have
+   a polarity of 0.022 /A at every thickness, which passes dipole_tol=0.05
+   (the value relaxed slabs need), so only the phase keeps the termination.
 
 2. Same relative phase, different absolute phase (a---a vs a---a').
    Rutile IrO2 (110): one repeat unit up is half a cell sideways (the repeat
@@ -37,10 +35,8 @@ Output in example/output_phases/:
 - plane_phases.traj: every sub-slab of the three cases, one frame each,
   repeated 3x3 in-plane so the registry is easy to see (the frame table is
   printed; each frame's description is also in atoms.info).
-- one folder per case and selection with a picture per cut: a side view of
-  the input slab (sub-slab in colour, cut away in grey) and its planes with
-  their labels, the planes the selection allowed as surfaces in green and
-  the two cuts as dashed lines.
+- one folder per case and selection with a plot per cut (planes allowed as
+  bottom surface in red, as top surface in blue).
 
 Pass --view to open the trajectory in the ASE GUI (top view along the
 normal; for a side view run ``ase gui -R -90x example/output_phases/plane_phases.traj``).
@@ -105,13 +101,13 @@ def main(argv=None):
 
     q_ti, q_ir = {"Ti": 4.0, "O": -2.0}, {"Ir": 4.0, "O": -2.0}
     frames = []
-    # A loose dipole tolerance (as for relaxed slabs) lets slightly polar
-    # cuts through, so only the plane phase keeps the anatase termination.
+    # The dipole tolerance relaxed slabs need (0.05) lets the slightly
+    # polar mixed cuts through, so only the plane phase keeps the termination.
     frames += run_case(
         "1_anatase101", "1. Anatase (101): same arrangement, different relative phase",
         "TiO2_anatase.cif", q_ti, (1, 0, 1), 3, ("relative", "shape"),
         lambda s: f"Ti {ti_depth(s):.2f} A below the top O",
-        gen_kwargs={"dipole_tol": 0.3}, cut_kwargs={"dipole_tol": 0.3},
+        gen_kwargs={"dipole_tol": 0.05}, cut_kwargs={"dipole_tol": 0.05},
     )
     frames += run_case(
         "2_IrO2_110", "2. IrO2 (110): same relative phase, different absolute phase",
@@ -137,7 +133,7 @@ def main(argv=None):
     print(f"\n{traj}  (frames repeated 3x3 in-plane):")
     for k, (text, _) in enumerate(frames):
         print(f"   frame {k:2d}: {text}")
-    print(f"Cut pictures: {OUT}/<case>/<selection>/*.png")
+    print(f"Cut plots: {OUT}/<case>/<selection>/*.png")
     print(f"Side view: ase gui -R -90x {traj}")
 
     if args.view:

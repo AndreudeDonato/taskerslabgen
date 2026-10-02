@@ -6,7 +6,10 @@ from ase.io import read
 from scipy.optimize import linear_sum_assignment
 
 from .core import (
+    DEFAULT_DIPOLE_TOL,
     _INDEX_KEY,
+    _charge_scale,
+    _surface_area,
     _SAME_PLANE,
     SELECTIONS,
     _charges_to_list,
@@ -38,7 +41,7 @@ def cutslab(
     axis=2,
     plane_tol=None,
     charge_tol=1e-3,
-    dipole_tol=0.05,
+    dipole_tol=DEFAULT_DIPOLE_TOL,
     plot_out_dir=".",
     plot=False,
     verbose=None,
@@ -46,7 +49,7 @@ def cutslab(
     bond_distances=None,
     reconstruction=None,
     cut_at="termination",
-    cuts="right",
+    cuts="top",
     vacuum=15.0,
     bulk_atoms=None,
     miller=None,
@@ -76,12 +79,16 @@ def cutslab(
         Largest z-gap (angstrom) between neighbouring atoms of one plane
         (single-linkage clustering).  ``None`` (default) uses 0.1 Å.
     charge_tol : float
-        Largest |net charge| per formula unit (e) treated as neutral
-        (default 1e-3).
+        Largest |net charge| per formula unit, in units of the mean absolute
+        charge per atom, treated as neutral (default 1e-3).
     dipole_tol : float
-        Largest |dipole| per formula unit (e·Å) still treated as zero
-        (default 0.05).  Genuinely polar repeat units are ~1-6 e·Å per
-        formula unit; relaxed structures may need ~0.3.
+        Largest polarity still treated as zero (default 1e-3): |dipole| along
+        the normal per surface area, with the charges divided by their mean
+        absolute value, in 1/Å (:func:`~taskerslabgen.dipole_per_area`).  It
+        does not depend on the thickness, so a sub-slab passes or fails at
+        every thickness alike.  A sub-slab of a relaxed slab keeps one
+        relaxed surface and a freshly cut one, ~0.004 typically and up to
+        ~0.04: use ~0.05 for relaxed slabs.
     plot_out_dir : str
         Directory for output plots.
     plot : bool
@@ -115,9 +122,11 @@ def cutslab(
           every sub-slab are planes with one of those labels.  A genslab
           termination is ``[plane_type, top_plane_type]``.
     cuts : str
-        ``"right"`` (default) -- fix bottom plane, peel from the top.
-        ``"left"`` -- fix top plane, peel from the bottom.
+        ``"top"`` (default) -- keep the bottom plane and cut from the top.
+        ``"bottom"`` -- keep the top plane and cut from the bottom.
         ``"all"`` -- keep every valid cut.
+        (``"right"`` and ``"left"``, the names before 0.5, still work as
+        ``"top"`` and ``"bottom"`` with a deprecation warning.)
     vacuum : float
         Vacuum to add (angstrom, per side) to each sub-slab.
     bulk_atoms : Atoms or None
@@ -170,7 +179,7 @@ def cutslab(
         known, ``stacking_labels`` (labels of one repeat unit from its
         bottom plane).
     """
-    from .plotting import plot_cut
+    from .plotting import plot_slab
 
     if bond_threshold is not None or bond_distances is not None:
         warnings.warn(
@@ -178,9 +187,17 @@ def cutslab(
             DeprecationWarning,
             stacklevel=2,
         )
-    if cuts not in ("right", "left", "all"):
+    if cuts in ("right", "left"):
+        new = {"right": "top", "left": "bottom"}[cuts]
+        warnings.warn(
+            f"cutslab(cuts={cuts!r}) is now cuts={new!r}; the old name will be removed.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        cuts = new
+    if cuts not in ("top", "bottom", "all"):
         raise ValueError(
-            f"Unknown cuts mode: {cuts!r}. Must be 'right', 'left', or 'all'."
+            f"Unknown cuts mode: {cuts!r}. Must be 'top', 'bottom', or 'all'."
         )
     if selection not in SELECTIONS:
         raise ValueError(f"selection must be one of {SELECTIONS}, got {selection!r}")
@@ -386,6 +403,9 @@ def cutslab(
 
     # ---- Evaluate every candidate cut on the actual atoms ----
     q_all = np.asarray(charges_list, dtype=float)
+    # Charges in units of their mean absolute value, dipoles per surface area.
+    q_scale = _charge_scale(q_all)
+    area = _surface_area(atoms.cell, axis)
     species = sorted({int(Z) for Z in atoms.numbers} | {int(Z) for Z in reduced_counts})
     column = {Z: k for k, Z in enumerate(species)}
 
@@ -419,10 +439,10 @@ def cutslab(
             if not is_stoich or set(count_map) - set(reduced_counts):
                 continue
             n_atoms, total_q, sum_z, sum_qz = sums
-            if abs(total_q) > charge_tol * stoich_k:
+            if abs(total_q) > charge_tol * stoich_k * q_scale:
                 continue
             mu = float(sum_qz - total_q * sum_z / n_atoms)  # about the mean height
-            if abs(mu) > dipole_tol * stoich_k:
+            if abs(mu) / (area * q_scale) > dipole_tol:
                 continue
             valid_cuts.append({
                 "bottom_plane": bi,
@@ -440,12 +460,12 @@ def cutslab(
     for i in recon_eligible:
         plot_names[i] = recon_label
 
-    if valid_cuts and cuts == "right":
+    if valid_cuts and cuts == "top":
         fixed_bot = min(c["bottom_plane"] for c in valid_cuts)
         valid_cuts = [
             c for c in valid_cuts if c["bottom_plane"] == fixed_bot
         ]
-    elif valid_cuts and cuts == "left":
+    elif valid_cuts and cuts == "bottom":
         fixed_top = max(c["top_plane"] for c in valid_cuts)
         valid_cuts = [
             c for c in valid_cuts if c["top_plane"] == fixed_top
@@ -497,8 +517,9 @@ def cutslab(
         raise ValueError(
             "No stoichiometric, charge-neutral, zero-dipole cuts found "
             f"matching cut_at={cut_at!r} (charge_tol={charge_tol}, "
-            f"dipole_tol={dipole_tol} per formula unit). Relaxed slabs usually "
-            "need dipole_tol~0.3, and rumpled planes a larger plane_tol or "
+            f"dipole_tol={dipole_tol} /A). Sub-slabs of relaxed slabs keep one "
+            "relaxed surface and usually need dipole_tol~0.05, and rumpled planes "
+            "a larger plane_tol or "
             "bulk_atoms=." + polar_hint
         )
 
@@ -532,22 +553,12 @@ def cutslab(
                 f"{plot_out_dir}/{stem}_hkl_{miller_str}"
                 f"_cut_{cut_idx}_{plane_name_for_filename(bp)}_{plane_name_for_filename(tp)}.png"
             )
-            notes = [
-                f"cut_at={cut_at!r}, selection={selection!r}, cuts={cuts!r}",
-                f"{cut['n_planes']} plane{'s' if cut['n_planes'] != 1 else ''}, {len(slab)} atoms "
-                f"({cut['stoich_k']} formula units)",
-                f"dipole {abs(cut['net_dipole']) / cut['stoich_k']:.3f} e*A per formula unit "
-                f"(dipole_tol={dipole_tol})",
-                f"top/bottom phase overlap {slab.info['cut_phase_overlap']:.2f} "
-                "(1: top exactly over bottom)",
-            ]
             # Only this sub-slab's surfaces carry the reconstructed label.
             names_here = [plot_names[k] if k in (bi, ti) else plane_names[k] for k in range(n)]
-            plot_cut(
-                atoms, planes_sorted, names_here, bi, ti, plot_path, axis=axis,
-                candidates=set(bottom_indices), top_candidates=set(top_indices), removed=drop,
-                notes=notes,
-                title=f"cutslab {stem} ({miller_str}): cut {cut_idx}, {bp} to {tp}",
+            plot_slab(
+                atoms, planes_sorted, names_here, plot_path, bottom=bi, top=ti, axis=axis,
+                bottom_ok=bottom_indices, top_ok=top_indices, removed=drop,
+                title=f"{stem} ({miller_str}) cut {cut_idx}: {bp} to {tp}",
             )
 
         slab_atoms.append(slab)

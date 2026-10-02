@@ -174,20 +174,31 @@ When working with relaxed supercells, the recommended workflow is:
    a thick non-polar slab.  This determines the optimal Tasker
    termination (including Tasker III reconstruction if needed).
 2. **cutslab** — call `cutslab` on the thick slab with
-   `cut_at="termination"` and `cuts="right"` (default).  The bottom
-   plane is fixed and the code peels from the top, generating every
+   `cut_at="termination"` and `cuts="top"` (default).  The bottom
+   plane is kept and the code cuts from the top, generating every
    valid thickness down to a single plane.  For Tasker III surfaces,
    pass the `reconstruction` dict from the genslab output so that
    newly exposed interior planes receive the same atomic deletion.
 
 **Relaxed slabs.** Pass the bulk: `cutslab(relaxed, Q, bulk_atoms=bulk,
-dipole_tol=0.3)`.  Planes are then matched to the bulk planes, so rumpled or
+dipole_tol=0.05)`.  Planes are then matched to the bulk planes, so rumpled or
 shifted surface planes stay whole and keep their bulk label; a surface that
 deviates more than `deform_tol` (or changed composition) is labelled with
 `~` (`O4~`) and still counts as an `O4` termination.  Stoichiometry, charge
-and dipole of every cut are evaluated on the actual relaxed atoms, so a cut
-that keeps one relaxed surface can be rejected as polar; relaxed slabs
-usually need `dipole_tol≈0.3`.
+and dipole of every cut are evaluated on the actual relaxed atoms.  A cut
+keeps one relaxed surface and gets a freshly cut one, which carries a small
+dipole (typically 0.004, up to ~0.04 in the relaxed slabs we tested), so
+relaxed slabs need `dipole_tol≈0.05`.
+
+**Polarity.** `dipole_tol` is compared with the dipole along the normal per
+surface area, with the charges divided by their mean absolute value
+(`dipole_per_area`, in 1/Å).  Formal, relative or computed (e.g. Hirshfeld)
+charges in proportion give the same value, and it does not change with the
+thickness, so a sub-slab passes or fails at every thickness alike.  Ideal
+crystals give ~0 (the default tolerance is 1e-3), a cut over a relaxed
+surface up to ~0.04, a wrong anatase (101) termination 0.022, and the dipole
+of a polar stacking grows by ~0.1 per repeat unit (wurtzite ZnO (0001):
+0.81 for six units).
 
 ### Tasker III limitation
 
@@ -243,8 +254,8 @@ classifies each surface as Tasker I/II (zero dipole) or Tasker III
 | `layer_thickness_list` | `list[int]` | *required* | Slab thicknesses in bulk repeat units (e.g. `[2, 4, 6]`); a Tasker I/II slab of thickness *n* contains exactly *n* bulk repeat units. |
 | `bulk_name` | `str` | `"slab"` | Label used in plot and output filenames. |
 | `plane_tol` | `float` or `None` | `None` | Largest z-gap (Å) between neighbouring atoms of one plane (single-linkage clustering). `None` = 0.1 Å. |
-| `charge_tol` | `float` | `1e-3` | Largest net charge per formula unit (e) treated as neutral. |
-| `dipole_tol` | `float` | `0.05` | Largest \|dipole\| per formula unit (e·Å) treated as zero: below it the surface is Tasker I/II, and Tasker III reconstructions must also stay below it. Polar repeat units are ~1–6 e·Å per formula unit; relaxed bulks may need ~0.3. |
+| `charge_tol` | `float` | `1e-3` | Largest net charge per formula unit, in units of the mean absolute charge per atom, treated as neutral. |
+| `dipole_tol` | `float` | `1e-3` | Largest polarity (dipole per surface area, charges normalised, 1/Å; see [Polarity](#cutslab)) treated as zero, for every thickness built: below it the surface is Tasker I/II, and Tasker III reconstructions must also stay below it. Relaxed bulks: ~0.05. |
 | `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of the slab. |
 | `plot` | `bool` | `False` | Generate stacking-axis plots showing planes and cuts. |
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
@@ -339,7 +350,7 @@ sub_slabs = cutslab(
     bond_distances=None,
     reconstruction=None,
     cut_at="termination",
-    cuts="right",
+    cuts="top",
     vacuum=15.0,
     bulk_atoms=None,
     miller=None,
@@ -359,8 +370,8 @@ termination.
 | `charges` | `dict`, `list` or `None` | *required* | Formal charges (same format as `generate_slabs_for_miller`; `None` reads them from the slab, e.g. computed charges of a relaxed slab). |
 | `axis` | `int` | `2` | Cartesian axis perpendicular to the surface (0=x, 1=y, 2=z). |
 | `plane_tol` | `float` or `None` | `None` | Largest z-gap (Å) between neighbouring atoms of one plane (single-linkage clustering). `None` = 0.1 Å. |
-| `charge_tol` | `float` | `1e-3` | Largest net charge per formula unit (e) treated as neutral. |
-| `dipole_tol` | `float` | `0.05` | Largest \|dipole\| per formula unit (e·Å) of a sub-slab treated as zero; relaxed slabs usually need ~0.3. |
+| `charge_tol` | `float` | `1e-3` | Largest net charge per formula unit, in units of the mean absolute charge per atom, treated as neutral. |
+| `dipole_tol` | `float` | `1e-3` | Largest polarity (dipole per surface area, charges normalised, 1/Å) of a sub-slab treated as zero; relaxed slabs usually need ~0.05. |
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
 | `plot` | `bool` | `False` | Generate a stacking-axis plot for each sub-slab. |
 | `verbose` | `bool` or `None` | `None` | Print plane stacking and cut details. |
@@ -368,7 +379,7 @@ termination.
 | `bond_distances` | `dict` or `None` | `None` | Unused; kept for backward compatibility. |
 | `reconstruction` | `dict` or `None` | `None` | Tasker III reconstruction dict from genslab output (`term["reconstruction"]`, JSON-serialisable). Newly exposed copies of the reconstructed plane receive the same deletions, placed as genslab places them; in-plane supercells of the slab work. Forces `cut_at="termination"` if `cut_at` was `"all"`; an explicit `cut_at` must select the `-recon` label to expose copies. |
 | `cut_at` | `str` or `list[str]` | `"termination"` | Where to place cuts (see below). |
-| `cuts` | `str` | `"right"` | Direction of cuts (see below). |
+| `cuts` | `str` | `"top"` | Which side is cut (see below). |
 | `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of every sub-slab. |
 | `bulk_atoms` | `Atoms` or `None` | `None` | Bulk the slab was built from: its unit cell or a supercell of it (e.g. a relaxed bulk calculation), up to a few per cent of strain. Each atom is assigned to the nearest bulk plane (registry learned from the slab interior), so relaxed surface planes that rumple or shift stay whole; each plane gets its bulk label (`O4`), or `O4~` if it deviates by more than `deform_tol` or its composition changed. Recommended for relaxed slabs. |
 | `miller` | `tuple` or `None` | `None` | Miller index of the slab, needed with `bulk_atoms`; defaults to `slab.info["miller"]` (set by genslab). |
@@ -388,9 +399,12 @@ termination.
 
 | Value | Behaviour |
 |---|---|
-| `"right"` (default) | Fix bottom plane, peel from the top. Produces slabs of decreasing thickness. |
-| `"left"` | Fix top plane, peel from the bottom. |
+| `"top"` (default) | Keep the bottom plane, cut from the top. Produces slabs of decreasing thickness. |
+| `"bottom"` | Keep the top plane, cut from the bottom. |
 | `"all"` | Keep every valid cut (all combinations of bottom/top boundaries). |
+
+`"right"` and `"left"` (the names before 0.5) still work as `"top"` and
+`"bottom"`, with a deprecation warning.
 
 **Returns**
 
@@ -519,7 +533,7 @@ Import these from `taskerslabgen.advanced` (except `validate_slab` and
 | `compute_reduced_counts(atoms_z)` | Compute reduced (primitive) stoichiometry. |
 | `is_stoichiometric_sequence(sequence_counts, reduced_counts)` | Check if a sequence is a whole-number multiple of bulk formula. |
 | `enumerate_cut_pairs(planes, L, reduced_counts, charge_tol)` | Enumerate all contiguous plane sequences with charge/dipole info. |
-| `select_best_sequence(sequences, dipole_tol)` | Select the best full-period stoichiometric sequence (dipole per formula unit). |
+| `select_best_sequence(sequences, dipole_tol, n_units)` | Select the best full-period stoichiometric sequence (polarity of a slab of *n_units* repeat units). |
 | `compute_cut_positions(planes, L, bottom_cut_index, top_cut_index)` | Compute z-coordinates for bottom and top cuts. |
 | `apply_vacuum_to_slab(atoms, vacuum, axis)` | Add vacuum above and below a slab. |
 | `compute_delete_info(cut_plane, deletion_mask, atoms_z_matrix, surf_bulk)` | Extract reconstruction deletion pattern as `(Z, fx, fy)` tuples. |
@@ -553,11 +567,11 @@ Import these from `taskerslabgen.advanced` (except `validate_slab` and
 
 The example scripts write into `example/output*/`:
 
-- `*_hkl_{miller}_cut_{idx}_{bot}_{top}.png` — one picture per cutslab cut
-  (only when `--plot` is passed): a side view of the input slab with the
-  sub-slab in colour and the rest grey, and its planes with their labels,
-  coloured by the planes the selection allowed as the bottom (red) and top
-  (blue) surfaces, with both cuts as dashed lines.
+- PNG plots (only with `--plot`), the same style for genslab and cutslab:
+  the slab from the side with its planes labelled and the surfaces in bold.
+  cutslab plots (`*_cut_{idx}_{bottom}_{top}.png`) grey out what was cut
+  away, draw the cuts as dashed lines and colour the planes the selection
+  allowed as bottom (red) and top (blue) surface.
 - Structure files for each slab / sub-slab (CIF by default in demos).
 
 ## Running tests

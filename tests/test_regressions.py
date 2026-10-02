@@ -47,11 +47,14 @@ def _tasker_type(atoms, charges, hkl, plane_tol=None):
         select_best_sequence,
     )
 
+    from taskerslabgen.core import _charge_scale, _surface_area
+
     surf = build_surface(atoms, hkl, layers=1)
     atoms_z, L = compute_projection(atoms, surf, charges, hkl)
     planes = identify_planes(atoms_z, L, plane_tol=plane_tol)
     best = select_best_sequence(
-        enumerate_cut_pairs(planes, L, compute_reduced_counts(atoms_z))
+        enumerate_cut_pairs(planes, L, compute_reduced_counts(atoms_z),
+                            area=_surface_area(surf.cell), charge_scale=_charge_scale(atoms_z[:, 2]))
     )
     assert best is not None
     return "I/II" if best["is_tasker_ii"] else "III"
@@ -71,9 +74,10 @@ def _bulk_max_gap(atoms, hkl):
     return float(np.max(np.diff(np.concatenate([z, [z[0] + L]]))))
 
 
-def _assert_valid_slab(slab, charges, reduced, max_gap=None, dipole_per_fu=None):
-    """Stoichiometric, neutral, non-polar (|dipole| < 1e-4 e*A, or at most
-    *dipole_per_fu* per formula unit) and without gaps above *max_gap*."""
+def _assert_valid_slab(slab, charges, reduced, max_gap=None, polarity=None):
+    """Stoichiometric, neutral, non-polar (|dipole| < 1e-4 e*A, or a
+    normalised dipole per area of at most *polarity*) and without gaps above
+    *max_gap*."""
     counts = Counter(int(z) for z in slab.numbers)
     ks = {counts.get(z, 0) / r for z, r in reduced.items()}
     assert len(ks) == 1 and next(iter(ks)) >= 1 and float(next(iter(ks))).is_integer(), (
@@ -83,12 +87,14 @@ def _assert_valid_slab(slab, charges, reduced, max_gap=None, dipole_per_fu=None)
     assert abs(q.sum()) < 1e-6, f"charged slab {slab.get_chemical_formula()} Q={q.sum():+.3f}"
     z = slab.positions[:, 2]
     mu = float(np.sum(q * (z - z.mean())))
-    if dipole_per_fu is None:
+    if polarity is None:
         assert abs(mu) < 1e-4, f"polar slab {slab.get_chemical_formula()} mu={mu:+.4f}"
     else:
-        k = len(slab) / sum(reduced.values())
-        assert abs(mu) / k <= dipole_per_fu + 1e-9, (
-            f"polar slab {slab.get_chemical_formula()} mu={mu:+.4f} ({abs(mu) / k:.4f} per f.u.)"
+        from taskerslabgen import dipole_per_area
+
+        p = dipole_per_area(q, slab.positions, slab.cell)
+        assert p <= polarity + 1e-12, (
+            f"polar slab {slab.get_chemical_formula()} mu={mu:+.4f} (polarity {p:.2e} /A)"
         )
     if max_gap is not None:
         gap = float(np.max(np.diff(np.sort(z))))
@@ -179,7 +185,7 @@ def test_cutslab_all_mode_has_no_glued_or_duplicate_slabs(ceo2_111_slab):
 def test_cutslab_all_mode_right_anchors_at_bottom_plane(ceo2_111_slab):
     from taskerslabgen import cutslab
 
-    subs = cutslab(ceo2_111_slab, Q_CEO2, cut_at="all", cuts="right")
+    subs = cutslab(ceo2_111_slab, Q_CEO2, cut_at="all", cuts="top")
     assert {s.info["cut_bottom_idx"] for s in subs} == {0}
     assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
 
@@ -237,7 +243,7 @@ def test_polar_reconstruction_is_rejected_not_returned():
 
     with pytest.raises(PolarSurfaceError, match="(?i)dipole") as err:
         generate_slabs_for_miller(ZNO * (2, 2, 1), Q_ZNO, (0, 0, 1), [2])
-    assert err.value.min_dipole_per_fu > 1.0  # genuinely polar
+    assert err.value.min_dipole > 0.02  # genuinely polar (dipole_tol default 1e-3)
 
 
 def test_odd_excess_error_suggests_supercell():
@@ -452,20 +458,34 @@ def test_cif_rounded_coordinates_stay_non_polar():
     assert _tasker_type(rounded, Q_IRO2, (1, 1, 0)) == "I/II"
 
 
-def test_dipole_tol_is_per_formula_unit():
+def test_dipole_tol_is_per_area_of_the_thickest_slab():
+    """The polarity is per surface area; n stacked repeat units have n times
+    the dipole of one, so the Tasker type is decided for the thickest slab."""
     from taskerslabgen.advanced import select_best_sequence
 
-    def seq(mu, k):
+    def seq(p):
         return {"is_neutral": True, "is_stoich": True, "is_full_period": True,
-                "net_dipole": mu, "stoich_k": k, "dipole_per_fu": abs(mu) / k,
-                "bottom_cut": 0}
+                "net_dipole": p, "stoich_k": 1, "dipole_per_area": p, "bottom_cut": 0}
 
-    assert select_best_sequence([seq(0.16, 4)])["is_tasker_ii"]       # 0.04 per f.u.
-    assert not select_best_sequence([seq(0.16, 2)])["is_tasker_ii"]   # 0.08 per f.u.
+    assert select_best_sequence([seq(4e-4)], dipole_tol=1e-3, n_units=2)["is_tasker_ii"]
+    assert not select_best_sequence([seq(4e-4)], dipole_tol=1e-3, n_units=3)["is_tasker_ii"]
 
 
-def test_cutslab_relaxed_slab_keeps_thick_cuts(ceo2_111_slab):
-    """Relaxation dipoles do not grow with thickness; per-f.u. tolerance keeps the series."""
+def test_polarity_ignores_the_scale_of_the_charges(ceo2_111_slab):
+    """Formal, relative or computed charges in proportion give one polarity."""
+    from taskerslabgen import dipole_per_area
+
+    relaxed = ceo2_111_slab.copy()
+    relaxed.positions[relaxed.positions[:, 2] > relaxed.positions[:, 2].max() - 1.0, 2] -= 0.1
+    formal = np.array([Q_CEO2[s] for s in relaxed.get_chemical_symbols()])
+    values = {dipole_per_area(scale * formal, relaxed.positions, relaxed.cell)
+              for scale in (1.0, 0.5, 0.31)}
+    assert max(values) - min(values) < 1e-12 and max(values) > 1e-3
+
+
+def test_relaxed_sub_slabs_judged_alike_at_every_thickness(ceo2_111_slab):
+    """A sub-slab keeps one relaxed surface: its dipole per area (~0.007 /A
+    here) does not depend on the thickness, so the verdict does not either."""
     from taskerslabgen import cutslab
 
     relaxed = ceo2_111_slab.copy()
@@ -473,8 +493,10 @@ def test_cutslab_relaxed_slab_keeps_thick_cuts(ceo2_111_slab):
     relaxed.positions[z < z.min() + 1.0, 2] += 0.10   # outer planes relax inward
     relaxed.positions[z > z.max() - 1.0, 2] -= 0.10
     relaxed.positions[:, 2] += np.random.default_rng(0).normal(0.0, 0.01, len(relaxed))
-    subs = cutslab(relaxed, Q_CEO2, dipole_tol=0.3)
+    subs = cutslab(relaxed, Q_CEO2, dipole_tol=0.05)
     assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
+    strict = cutslab(relaxed, Q_CEO2, dipole_tol=0.005)
+    assert [s.get_chemical_formula() for s in strict] == ["Ce12O24"]
 
 
 # ------------------------------------------------------------------
@@ -538,7 +560,7 @@ def test_bulk_matching_keeps_rumpled_surface_plane_whole(ceo2_111_slab):
     from taskerslabgen import cutslab
 
     rumpled = _relax_surfaces(ceo2_111_slab, "rumpled")
-    subs = cutslab(rumpled, Q_CEO2, bulk_atoms=CEO2, dipole_tol=0.3)
+    subs = cutslab(rumpled, Q_CEO2, bulk_atoms=CEO2, dipole_tol=0.05)
     assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
     assert {(s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in subs} == {("O4", "O4'")}
 
@@ -554,12 +576,15 @@ def test_deformed_surface_plane_gets_tilde_label(ceo2_111_slab):
 
 
 def test_cut_dipoles_use_relaxed_positions(ceo2_111_slab):
-    """The thinnest cut keeps one relaxed surface: 0.4 e*A per formula unit."""
+    """Cuts keep one surface relaxed outwards by 0.2 A: 0.012 /A at every
+    thickness, against ~0 for the symmetric input slab."""
     from taskerslabgen import cutslab
 
     relaxed = _relax_surfaces(ceo2_111_slab, "outward")
-    subs = cutslab(relaxed, Q_CEO2, bulk_atoms=CEO2, dipole_tol=0.3)
-    assert [s.get_chemical_formula() for s in subs] == ["Ce8O16", "Ce12O24"]
+    subs = cutslab(relaxed, Q_CEO2, bulk_atoms=CEO2, dipole_tol=0.01)
+    assert [s.get_chemical_formula() for s in subs] == ["Ce12O24"]
+    subs = cutslab(relaxed, Q_CEO2, bulk_atoms=CEO2, dipole_tol=0.05)
+    assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
 
 
 @pytest.mark.parametrize("hkl", [(0, 0, 1), (1, 1, 0)], ids=["IrO2001", "IrO2110"])
@@ -866,7 +891,7 @@ def test_tasker3_dipole_counts_the_deleted_atoms(atoms, charges, hkl, kwargs):
         assert info["tasker_type"] == "III"
         for slab in info["atoms"]:
             # Rumpled surface planes leave a small dipole; within dipole_tol.
-            _assert_valid_slab(slab, charges, _reduced(atoms), dipole_per_fu=0.05)
+            _assert_valid_slab(slab, charges, _reduced(atoms), polarity=1e-3)
 
 
 @pytest.mark.parametrize(
@@ -942,12 +967,12 @@ def test_tasker3_errors_name_the_failed_condition():
     """T5: a charge failure was reported as a dipole failure."""
     from taskerslabgen.tasker3 import _select_tasker3_candidates
 
-    charged = {"is_neutral": False, "charge_per_fu": 0.5, "dipole_per_fu": 0.0}
+    charged = {"is_neutral": False, "charge_per_fu": 0.5, "dipole_per_area": 0.0}
     with pytest.raises(ValueError, match="charge-neutral"):
-        _select_tasker3_candidates([charged], (0, 0, 1), 0.05, 1e-3)
-    polar = {"is_neutral": True, "charge_per_fu": 0.0, "dipole_per_fu": 1.0}
+        _select_tasker3_candidates([charged], (0, 0, 1), 1e-3, 1e-3)
+    polar = {"is_neutral": True, "charge_per_fu": 0.0, "dipole_per_area": 0.1}
     with pytest.raises(ValueError, match="dipole"):
-        _select_tasker3_candidates([polar], (0, 0, 1), 0.05, 1e-3)
+        _select_tasker3_candidates([polar], (0, 0, 1), 1e-3, 1e-3)
 
 
 # ------------------------------------------------------------------
@@ -1089,12 +1114,12 @@ def test_bulk_matching_when_relaxation_splits_every_plane():
     order = oxygens[np.lexsort((split.positions[oxygens, 0], np.round(split.positions[oxygens, 2], 1)))]
     split.positions[order[0::2], 2] += 0.12
     split.positions[order[1::2], 2] -= 0.12
-    subs = cutslab(split, Q_IRO2, bulk_atoms=IRO2, dipole_tol=0.3)
+    subs = cutslab(split, Q_IRO2, bulk_atoms=IRO2, dipole_tol=0.05)
     # The planes alternate IrO2 / IrO2' (rotated): keeping the input's top
     # plane takes every second thickness, any phase takes all of them.
     assert [len(s) for s in subs] == [6 * m for m in range(1, 5)]
     assert {s.info["cut_bottom_plane"] for s in subs} == {"IrO2'~"}
-    loose = cutslab(split, Q_IRO2, bulk_atoms=IRO2, dipole_tol=0.3, selection="shape")
+    loose = cutslab(split, Q_IRO2, bulk_atoms=IRO2, dipole_tol=0.05, selection="shape")
     assert [len(s) for s in loose] == [3 * m for m in range(1, 9)]
 
 
@@ -1194,7 +1219,7 @@ def test_public_api_and_deprecated_names(ceo2_111_slab):
 # ------------------------------------------------------------------
 def _distorted_iro2(shift=0.05):
     """IrO2 with one Ir moved along a: (110) becomes slightly polar
-    (least polar slab ~0.07 e*A per formula unit)."""
+    (least polar 4-layer slab ~0.008 /A, normalised dipole per area)."""
     b = IRO2.copy()
     i = [a.index for a in b if a.symbol == "Ir"][0]
     b.positions[i] += [shift, 0.0, 0.0]
@@ -1207,18 +1232,18 @@ def test_dipole_tol_max_builds_slightly_polar_facet_with_warning():
     b = _distorted_iro2()
     with pytest.raises(PolarSurfaceError) as err:
         generate_slabs_for_miller(b, Q_IRO2, (1, 1, 0), [4])
-    needed = err.value.min_dipole_per_fu
-    assert 0.05 < needed < 0.1
+    needed = err.value.min_dipole
+    assert 1e-3 < needed < 0.02
     # A cap below what the facet needs still raises.
     with pytest.raises(PolarSurfaceError):
         generate_slabs_for_miller(b, Q_IRO2, (1, 1, 0), [4], dipole_tol_max=0.9 * needed)
 
     with pytest.warns(UserWarning, match="dipole_tol"):
-        result = generate_slabs_for_miller(b, Q_IRO2, (1, 1, 0), [4], dipole_tol_max=0.2)
+        result = generate_slabs_for_miller(b, Q_IRO2, (1, 1, 0), [4], dipole_tol_max=0.05)
     term = result[(1, 1, 0)][0]
-    assert needed <= term["dipole_tol"] <= 0.2
+    assert needed <= term["dipole_tol"] <= 0.05
     slab = term["atoms"][0]
-    _assert_valid_slab(slab, Q_IRO2, _reduced(b), dipole_per_fu=term["dipole_tol"])
+    _assert_valid_slab(slab, Q_IRO2, _reduced(b), polarity=term["dipole_tol"])
     # The recorded tolerance lets cutslab cut the same slab.
     subs = cutslab(slab, Q_IRO2, dipole_tol=term["dipole_tol"], reconstruction=term["reconstruction"])
     assert len(subs[-1]) == len(slab)
@@ -1239,11 +1264,11 @@ def test_dipole_tol_max_leaves_non_polar_facets_alone():
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
             new = generate_slabs_for_miller(
-                b, q, hkl, [2], candidates="all", dipole_tol_max=1.0, **kw
+                b, q, hkl, [2], candidates="all", dipole_tol_max=0.05, **kw
             )[hkl]
         assert ref.keys() == new.keys()
         for tid in ref:
-            assert new[tid]["dipole_tol"] == ref[tid]["dipole_tol"] == 0.05
+            assert new[tid]["dipole_tol"] == ref[tid]["dipole_tol"] == 1e-3
             assert new[tid]["plane_type"] == ref[tid]["plane_type"]
             assert repr(new[tid]["reconstruction"]) == repr(ref[tid]["reconstruction"])
             np.testing.assert_array_equal(new[tid]["atoms"][0].positions, ref[tid]["atoms"][0].positions)
@@ -1253,7 +1278,7 @@ def test_dipole_tol_max_below_dipole_tol_is_rejected():
     from taskerslabgen import generate_slabs_for_miller
 
     with pytest.raises(ValueError, match="dipole_tol_max"):
-        generate_slabs_for_miller(IRO2, Q_IRO2, (1, 1, 0), [2], dipole_tol=0.3, dipole_tol_max=0.1)
+        generate_slabs_for_miller(IRO2, Q_IRO2, (1, 1, 0), [2], dipole_tol=0.05, dipole_tol_max=0.01)
 
 
 # ------------------------------------------------------------------
@@ -1272,13 +1297,13 @@ def test_termination_keeps_relative_phase_anatase101():
     from taskerslabgen import cutslab, generate_slabs_for_miller
 
     q = {"Ti": 4.0, "O": -2.0}
-    term = generate_slabs_for_miller(ANATASE, q, (1, 0, 1), [6], dipole_tol=0.3)[(1, 0, 1)][0]
+    term = generate_slabs_for_miller(ANATASE, q, (1, 0, 1), [6], dipole_tol=0.05)[(1, 0, 1)][0]
     thick = term["atoms"][0]
-    subs = cutslab(thick, q, dipole_tol=0.3)
+    subs = cutslab(thick, q, dipole_tol=0.05)
     assert [len(s) for s in subs] == [12 * m for m in range(1, 7)]
     assert {_ti_depth(s) for s in subs} == {_ti_depth(thick)}
     assert {s.info["cut_top_plane"] for s in subs} == {term["top_plane_type"]}
-    every_phase = cutslab(thick, q, dipole_tol=0.3, selection="shape")
+    every_phase = cutslab(thick, q, dipole_tol=0.05, selection="shape")
     assert len(every_phase) > len(subs)
     assert {_ti_depth(s) for s in every_phase} > {_ti_depth(thick)}
 
@@ -1373,3 +1398,17 @@ def test_slabs_drop_bulk_cif_metadata():
     sub = cutslab(slab, Q_IRO2)[0]
     for atoms in (slab, sub):
         assert not {"occupancy", "spacegroup", "unit_cell"} & set(atoms.info)
+
+
+def test_cuts_top_bottom_and_old_names(ceo2_111_slab):
+    """cuts= names follow the vertical plots: "top" keeps the bottom plane
+    and cuts from the top; "right"/"left" are the old names."""
+    from taskerslabgen import cutslab
+
+    top = cutslab(ceo2_111_slab, Q_CEO2, cuts="top")
+    bottom = cutslab(ceo2_111_slab, Q_CEO2, cuts="bottom")
+    assert len({s.info["cut_bottom_idx"] for s in top}) == 1
+    assert len({s.info["cut_top_idx"] for s in bottom}) == 1
+    with pytest.warns(DeprecationWarning, match="cuts='top'"):
+        old = cutslab(ceo2_111_slab, Q_CEO2, cuts="right")
+    assert [len(s) for s in old] == [len(s) for s in top]

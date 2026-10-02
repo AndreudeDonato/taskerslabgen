@@ -8,7 +8,10 @@ from ase.data import atomic_numbers, chemical_symbols
 from ase.io import write
 
 from .core import (
+    DEFAULT_DIPOLE_TOL,
     PolarSurfaceError,
+    _charge_scale,
+    _surface_area,
     _INDEX_KEY,
     _charges_to_list,
     _finalize_slab,
@@ -115,7 +118,7 @@ def generate_slabs_for_miller(
     bulk_name="slab",
     plane_tol=None,
     charge_tol=1e-3,
-    dipole_tol=0.05,
+    dipole_tol=DEFAULT_DIPOLE_TOL,
     vacuum=15.0,
     plot=False,
     plot_out_dir=".",
@@ -158,14 +161,19 @@ def generate_slabs_for_miller(
         Largest z-gap (angstrom) between neighbouring atoms of one plane
         (single-linkage clustering).  ``None`` (default) uses 0.1 Å.
     charge_tol : float
-        Largest |net charge| per formula unit (e) treated as neutral
-        (default 1e-3).
+        Largest |net charge| per formula unit, in units of the mean absolute
+        charge per atom, treated as neutral (default 1e-3).
     dipole_tol : float
-        Largest |dipole| per formula unit (e·Å) still treated as zero
-        (default 0.05).  Genuinely polar repeat units are ~1-6 e·Å per
-        formula unit; relaxed structures may need ~0.3.
-        Used to classify Tasker I/II and to accept Tasker III
-        reconstructions.
+        Largest polarity still treated as zero (default 1e-3): the |dipole|
+        along the normal per surface area, with the charges divided by
+        their mean absolute value, in 1/Å (:func:`~taskerslabgen.dipole_per_area`).
+        Formal, relative or computed charges then give the same numbers, and
+        a slab's polarity does not depend on its thickness.  Every slab
+        built (each thickness of *layer_thickness_list*) must stay within
+        it; it classifies Tasker I/II and accepts Tasker III
+        reconstructions.  Ideal crystals give ~0; a cut surface over a
+        relaxed one gives up to ~0.04, a wrong termination of anatase (101)
+        0.02, a polar repeat unit ~0.1 per repeat unit.
     vacuum : float
         Vacuum to add (angstrom, per side).
     plot : bool
@@ -229,8 +237,9 @@ def generate_slabs_for_miller(
         smallest tolerance that gives a slab (rounded up), if it is at most
         *dipole_tol_max*, and warn.  Facets that succeed with *dipole_tol*
         are not affected.  ``None`` (default) raises
-        :class:`~taskerslabgen.PolarSurfaceError` instead.  Genuinely polar
-        facets need ~1-6 e·Å per formula unit, so keep it below ~1.
+        :class:`~taskerslabgen.PolarSurfaceError` instead.  Same units as
+        *dipole_tol*; genuinely polar facets reach ~0.1 per repeat unit, so
+        keep it well below that.
 
     Returns
     -------
@@ -313,13 +322,13 @@ def _generate_with_dipole_fallback(bulk_atoms, charges, miller, opts, dipole_tol
     try:
         result = _generate_for_one_miller(bulk_atoms, charges, miller, opts, *args)
     except PolarSurfaceError as exc:
-        needed = _round_up(exc.min_dipole_per_fu * 1.02)
+        needed = _round_up(exc.min_dipole * 1.02)
         if dipole_tol_max is None or needed > dipole_tol_max:
             raise
         warnings.warn(
             f"{opts.bulk_name} {miller}: no slab is non-polar within "
-            f"dipole_tol={opts.dipole_tol} (the least polar has "
-            f"{exc.min_dipole_per_fu:.3g} e*A per formula unit); built with "
+            f"dipole_tol={opts.dipole_tol} (the least polar has a polarity of "
+            f"{exc.min_dipole:.3g} /A); built with "
             f"dipole_tol={needed}.  Check the bulk's symmetry, and cut these "
             "slabs with cutslab(dipole_tol=info['dipole_tol']).",
             UserWarning,
@@ -340,7 +349,7 @@ class _Options:
     bulk_name: str = "slab"
     plane_tol: object = None
     charge_tol: float = 1e-3
-    dipole_tol: float = 0.05
+    dipole_tol: float = DEFAULT_DIPOLE_TOL
     vacuum: float = 15.0
     plot: bool = False
     plot_out_dir: str = "."
@@ -366,6 +375,8 @@ class _Facet:
     name_map: dict
     reduced_counts: dict
     charges_list: list   # charge of every atom of the input bulk
+    area: float = 1.0    # surface area of the cell (angstrom^2)
+    charge_scale: float = 1.0  # mean absolute charge per atom of the bulk
     repeat: int = 0      # planes in one lattice repeat (fewer than len(planes) for centred cells)
 
     def validation(self, opts):
@@ -421,7 +432,7 @@ def _analyse_facet(bulk_atoms, charges, miller, opts, surface_supercell=None):
         bulk=bulk, miller=tuple(miller), out_miller=out_miller, surf_bulk=surf_bulk,
         atoms_z=atoms_z, L=L, planes=planes, names=names, name_map=name_map,
         reduced_counts=compute_reduced_counts(atoms_z), charges_list=charges_list,
-        repeat=repeat,
+        repeat=repeat, area=_surface_area(surf_bulk.cell), charge_scale=_charge_scale(atoms_z[:, 2]),
     )
 
 
@@ -433,8 +444,12 @@ def _generate_for_one_miller(bulk_atoms, charges, miller, opts, prefer_plane, ca
 
     facet = _analyse_facet(bulk_atoms, charges, miller, opts, surface_supercell)
     sequences = enumerate_cut_pairs(facet.planes, facet.L, facet.reduced_counts,
-                                    charge_tol=opts.charge_tol)
-    best_seq = select_best_sequence(sequences, dipole_tol=opts.dipole_tol)
+                                    charge_tol=opts.charge_tol, area=facet.area,
+                                    charge_scale=facet.charge_scale)
+    # A slab of n repeat units has n times the dipole of one: judge by the
+    # thickest slab asked for.
+    n_units = max(opts.layers)
+    best_seq = select_best_sequence(sequences, dipole_tol=opts.dipole_tol, n_units=n_units)
     if best_seq is None:
         raise ValueError("No valid stoichiometry sequences found.")
 
@@ -443,7 +458,8 @@ def _generate_for_one_miller(bulk_atoms, charges, miller, opts, prefer_plane, ca
         valid_sequences = [s for s in sequences if s["is_neutral"] and s["is_stoich"]]
         print("\nValid stoichiometry sequences (charge-neutral, reduced formula):")
         for i, seq in enumerate(valid_sequences):
-            tasker_tag = "Tasker II" if seq["dipole_per_fu"] <= opts.dipole_tol else "Tasker III"
+            tasker_tag = ("Tasker II" if seq["dipole_per_area"] * n_units <= opts.dipole_tol
+                          else "Tasker III")
             bottom_edge = f"{seq['bottom_cut']}-{(seq['bottom_cut'] + 1) % n}"
             top_edge = f"{seq['top_cut']}-{(seq['top_cut'] + 1) % n}"
             print(
@@ -466,7 +482,7 @@ def _generate_for_one_miller(bulk_atoms, charges, miller, opts, prefer_plane, ca
         return _tasker3_path(facet, opts, prefer_plane, candidates, savecandidates)
     except PolarSurfaceError as exc:
         # The least polar Tasker I/II cut may beat every reconstruction.
-        exc.min_dipole_per_fu = min(exc.min_dipole_per_fu, best_seq["dipole_per_fu"])
+        exc.min_dipole = min(exc.min_dipole, best_seq["dipole_per_area"] * n_units)
         raise
 
 
@@ -497,8 +513,22 @@ def _save_candidates(slabs, facet, opts, kind):
         print(f"Saved {len(frames)} Tasker {kind} candidates to {path}\n")
 
 
+def _plot_termination(facet, opts, slab, bottom, path, title, recon_label=None):
+    """Plot a built slab (:func:`plot_slab`), its planes named like the
+    bulk planes they come from, starting at bulk plane *bottom*."""
+    from .plotting import plot_slab
+
+    atoms_z = np.column_stack([slab.numbers, slab.positions[:, 2], np.zeros(len(slab))])
+    planes = sorted(identify_planes(atoms_z, float(slab.cell[2, 2]), plane_tol=opts.plane_tol),
+                    key=lambda p: p["z_center"])
+    n_pl = len(facet.names)
+    names = [facet.names[(bottom + k) % n_pl] for k in range(len(planes))]
+    if recon_label is not None:
+        names[0] = names[-1] = recon_label
+    plot_slab(slab, planes, names, path, title=title)
+
+
 def _tasker12_path(facet, sequences, opts, prefer_plane, candidates_mode, savecandidates):
-    from .plotting import plot_unitcell_atoms
     from .builder import build_cut_slabs
     from .tasker3 import _bond_pairs, _bonds_across_plane
 
@@ -520,7 +550,7 @@ def _tasker12_path(facet, sequences, opts, prefer_plane, candidates_mode, saveca
     ranked = []
     for s in sequences:
         if not (s["is_neutral"] and s["is_stoich"] and s["is_full_period"]
-                and s["dipole_per_fu"] <= opts.dipole_tol):
+                and s["dipole_per_area"] * max(opts.layers) <= opts.dipole_tol):
             continue
         cut = s["bottom_cut"]
         bot, top = (cut + 1) % n_pl, cut
@@ -557,14 +587,13 @@ def _tasker12_path(facet, sequences, opts, prefer_plane, candidates_mode, saveca
         seq = term["sequence"]
         slabs = facet.finalize(build(seq, opts.layers), opts, bottom=(seq["bottom_cut"] + 1) % n_pl)
         if opts.plot:
-            zbot, ztop = compute_cut_positions(planes, L, seq["bottom_cut"], seq["top_cut"])
-            bp = plane_name_for_filename(names[(seq["bottom_cut"] + 1) % n_pl])
-            tp = plane_name_for_filename(names[seq["top_cut"]])
-            plot_unitcell_atoms(
-                facet.atoms_z, L, facet.out_miller,
-                out_png=f"{opts.plot_out_dir}/{opts.bulk_name}_hkl_{h}{k}{l}_{bp}_{tp}_{tid}.png",
-                plane_tol=opts.plane_tol, planes=planes,
-                zbot=zbot, ztop=ztop, dipole=seq["net_dipole"], plane_names=names,
+            bottom = (seq["bottom_cut"] + 1) % n_pl
+            bp, tp = names[bottom], names[seq["top_cut"]]
+            _plot_termination(
+                facet, opts, slabs[0], bottom,
+                f"{opts.plot_out_dir}/{opts.bulk_name}_hkl_{h}{k}{l}_"
+                f"{plane_name_for_filename(bp)}_{plane_name_for_filename(tp)}_{tid}.png",
+                f"{opts.bulk_name} ({h}{k}{l}) termination {tid}: {bp} to {tp}",
             )
         output[tid] = {
             "atoms": slabs,
@@ -602,7 +631,7 @@ def _tasker3_candidates(facet, opts, prefer_plane=None):
         charge_tol=opts.charge_tol, verbose=opts.verbose, prefer_plane=prefer_plane,
         plane_names=facet.names, dipole_tol=opts.dipole_tol,
         bulk_atoms=facet.bulk, miller=facet.miller, bond_threshold=opts.bond_threshold,
-        min_layers=min(opts.layers), max_masks=opts.max_masks,
+        min_layers=min(opts.layers), max_layers=max(opts.layers), max_masks=opts.max_masks,
     )
     valid = _select_tasker3_candidates(candidates, facet.out_miller, opts.dipole_tol, opts.charge_tol)
     return candidates, valid
@@ -621,7 +650,6 @@ def _tasker3_slabs(facet, opts, cand, layers):
 
 def _tasker3_termination(facet, opts, cand, plot_path=None):
     """Validated slabs, reconstruction metadata and plot of one candidate."""
-    from .plotting import plot_unitcell_atoms
     from .tasker3 import _reconstruction_metadata
 
     i = cand["cut_plane_idx"]
@@ -643,13 +671,11 @@ def _tasker3_termination(facet, opts, cand, plot_path=None):
             f"mu={cand['net_dipole']:+.4e}  bonds_broken={cand['bond_score']}"
         )
     if opts.plot and plot_path is not None:
-        zbot, ztop = compute_cut_positions(facet.planes, facet.L, (i - 1) % len(facet.planes), i)
-        recon_names = list(facet.names)
-        recon_names[i] = cand["recon_label"]
-        plot_unitcell_atoms(
-            facet.atoms_z, facet.L, facet.out_miller,
-            out_png=plot_path, plane_tol=opts.plane_tol, planes=facet.planes,
-            zbot=zbot, ztop=ztop, dipole=cand["net_dipole"], plane_names=recon_names,
+        h, k, l = facet.out_miller
+        _plot_termination(
+            facet, opts, slabs[0], i, plot_path,
+            f"{opts.bulk_name} ({h}{k}{l}) {cand['recon_label']}",
+            recon_label=cand["recon_label"],
         )
     return slabs, reconstruction
 

@@ -43,16 +43,38 @@ cutslab thickness series selected by them, change.
 - genslab builds the same structures as 0.4.0 (checked on 58 facets); only
   labels, and the order of equally ranked terminations, change.
 
+### Polarity per surface area, charges normalised
+- ``dipole_tol`` is now compared with the dipole along the normal **per
+  surface area**, with the charges **divided by their mean absolute value**
+  (new ``dipole_per_area``, 1/Å), instead of the dipole per formula unit in
+  e·Å.  Formal, relative or computed charges in proportion give the same
+  values, and a slab's verdict no longer depends on its thickness: per
+  formula unit, the same asymmetric anatase (101) slab (2.3 e·Å) was
+  rejected at 6 and 18 atoms and accepted at 30.  ``charge_tol`` is likewise
+  relative to the mean absolute charge.
+- Default ``dipole_tol=1e-3`` (ideal crystals give ~0; rounded CIF
+  coordinates ~5e-5).  Relaxed slabs need ~0.05: a sub-slab keeps one
+  relaxed surface, 0.004 typically and up to 0.04 in the 107 relaxed slabs
+  tested.  Dipoles of a polar stacking add up with the thickness, so genslab
+  judges every slab it builds (``select_best_sequence(..., n_units)``,
+  Tasker III candidates over ``min_layers``..``max_layers``).
+- ``PolarSurfaceError.min_dipole`` (was ``min_dipole_per_fu``), candidate and
+  sequence key ``dipole_per_area`` (was ``dipole_per_fu``);
+  ``enumerate_cut_pairs`` requires ``area=`` and ``charge_scale=``.
+
+### Other changes
+- ``cutslab(cuts=...)`` is ``"top"`` (default: keep the bottom plane, cut from
+  the top) or ``"bottom"``, matching the vertical plots; ``"right"`` and
+  ``"left"`` still work with a ``DeprecationWarning``.
+- genslab and cutslab draw the same simple plot (``plot_slab``): the slab
+  from the side and its planes labelled, surfaces in bold; cutslab adds the
+  cuts and colours the planes the selection allowed as bottom (red) and top
+  (blue) surface.
+
 ### Fixes
 - Slabs no longer carry the bulk CIF's ``spacegroup``, ``unit_cell`` and
   ``occupancy`` info: occupancies are keyed by tags, so the ASE GUI drew
   slab atoms with the wrong species.
-
-- ``cutslab(plot=True)`` draws a new picture per cut (``plot_cut``): the
-  input slab from the side with the sub-slab in colour, and its planes
-  labelled and coloured by what the selection allowed as bottom and top
-  surface.  The old plot put the bottom cut line in the vacuum when a
-  sub-slab started at the first plane, and its labels overlapped.
 
 ### Examples
 - New ``example/plane_phases.py``: the three cases (relative phase, absolute

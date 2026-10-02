@@ -203,63 +203,38 @@ def _spread(values, gap):
     return pos
 
 
-def plot_cut(
+def plot_slab(
     atoms,
     planes,
     plane_names,
-    bottom,
-    top,
     out_png,
+    bottom=0,
+    top=None,
     axis=2,
-    candidates=None,
+    bottom_ok=None,
+    top_ok=None,
     removed=(),
-    notes=(),
     title=None,
-    top_candidates=None,
 ):
     """
-    Picture of one cut of a slab: which planes the sub-slab keeps, where it
-    was cut, and which planes could have been its surfaces.
+    Side view of a slab with its planes labelled: the plot of both
+    generate_slabs_for_miller and cutslab.
 
-    Left panel: side view of the input slab (position along the first cell
-    vector, two cells wide, against height).  Atoms of the sub-slab are
-    drawn in colour, atoms cut away faded, and atoms removed by a
-    reconstruction as open circles.  Right panel: every plane at its height
-    with its label, coloured like the cut lines: planes the selection allows
-    as the bottom surface in red, as the top surface in blue, as either in
-    green; the sub-slab's bottom and top planes in bold.  Dashed lines
-    mark the two cuts; *notes* go in a caption below.
-
-    Parameters
-    ----------
-    atoms : Atoms
-        The input slab.
-    planes : list of dict
-        Its planes (``indices``, ``z_center``, ``counts``), bottom to top.
-    plane_names : list of str
-        Label of every plane.
-    bottom, top : int
-        Indices of the sub-slab's bottom and top planes.
-    out_png : str
-        Output image path.
-    axis : int
-        Surface normal (cell vector index).
-    candidates : set of int or None
-        Planes the selection allowed as the bottom surface (as either
-        surface if *top_candidates* is None).
-    removed : iterable of int
-        Atoms of the sub-slab's planes deleted by a reconstruction.
-    notes : iterable of str
-        Caption lines (selection, dipole, ...).
-    title : str or None
-        Figure title.
-    top_candidates : set of int or None
-        Planes the selection allowed as the top surface.
+    Left: the atoms, position along the first cell vector (two cells) against
+    height.  Right: the label of every plane at its height.  The planes
+    *bottom* to *top* are the slab shown: its two surfaces are in bold, and
+    planes outside it (a sub-slab cut from a thicker one) are grey, with the
+    cuts as dashed lines (red bottom, blue top).  Planes in *bottom_ok* /
+    *top_ok* (those a selection allowed as bottom / top surface) are coloured
+    like the cut lines, green if allowed as either.  Atoms in *removed*
+    (deleted by a reconstruction) are drawn as open circles.
     """
     from ase.data import covalent_radii
 
-    bottom_ok = set(candidates or ())
-    top_ok = bottom_ok if top_candidates is None else set(top_candidates)
+    n = len(planes)
+    top = n - 1 if top is None else top
+    bottom_ok = set(bottom_ok or ())
+    top_ok = set(top_ok or ())
     removed = set(int(i) for i in removed)
     in_plane = [i for i in range(3) if i != axis]
     frac = atoms.get_scaled_positions(wrap=False)
@@ -268,45 +243,32 @@ def plot_cut(
     z = atoms.positions[:, axis]
     kept = {i for p in planes[bottom:top + 1] for i in p["indices"]} - removed
 
-    def plane_extent(k):
-        zz = z[planes[k]["indices"]]
-        return zz.min(), zz.max()
-
-    lo, hi = plane_extent(bottom)[0], plane_extent(top)[1]
-    z_bottom_cut = 0.5 * (plane_extent(bottom - 1)[1] + lo) if bottom > 0 else lo - 0.6
-    z_top_cut = 0.5 * (hi + plane_extent(top + 1)[0]) if top < len(planes) - 1 else hi + 0.6
-
-    z_lo, z_hi = z.min() - 1.5, z.max() + 1.5
-    height = float(np.clip(0.3 * (z_hi - z_lo), 4.0, 16.0))
-    fig, (ax, lad) = plt.subplots(
-        1, 2, figsize=(9.0, height), sharey=True, gridspec_kw={"width_ratios": [1.3, 1.0]}
-    )
-    sizes = 260.0 * covalent_radii[atoms.numbers] ** 2
+    z_lo, z_hi = z.min() - 1.0, z.max() + 1.0
+    height = float(np.clip(0.28 * (z_hi - z_lo), 3.0, 14.0))
+    fig, (ax, lad) = plt.subplots(1, 2, figsize=(7.0, height), sharey=True,
+                                  gridspec_kw={"width_ratios": [1.4, 1.0]})
+    sizes = 200.0 * covalent_radii[atoms.numbers] ** 2
     gone = np.array([i in removed for i in range(len(atoms))], dtype=bool)
     keep = np.array([i in kept for i in range(len(atoms))], dtype=bool)
     out = ~keep & ~gone
     for shift in (0.0, a1):
-        ax.scatter(x[out] + shift, z[out], s=sizes[out], c="#d9d9d9", edgecolors="#bfbfbf",
-                   linewidths=0.5, zorder=1)
+        ax.scatter(x[out] + shift, z[out], s=sizes[out], c="#dddddd", edgecolors="#c4c4c4",
+                   linewidths=0.4, zorder=1)
         ax.scatter(x[keep] + shift, z[keep], s=sizes[keep], c=jmol_colors[atoms.numbers[keep]],
-                   edgecolors="black", linewidths=0.5, zorder=2)
+                   edgecolors="black", linewidths=0.4, zorder=2)
         ax.scatter(x[gone] + shift, z[gone], s=sizes[gone], facecolors="none",
-                   edgecolors=jmol_colors[atoms.numbers[gone]], linewidths=1.4, zorder=3)
-    ax.axvline(a1, color="#999999", lw=0.8, ls=":")
+                   edgecolors=jmol_colors[atoms.numbers[gone]], linewidths=1.2, zorder=3)
     ax.set_xlim(-0.6, 2 * a1 + 0.6)
-    ax.set_xlabel("position along the first cell vector (Å), two cells")
-    ax.set_ylabel("height z (Å)")
+    ax.set_xticks([])
+    ax.set_ylabel("z (Å)")
 
-    # Labels spread apart where planes are close, with leader lines.
     zc = [p["z_center"] for p in planes]
-    gap = 1.35 * 8.5 / 72.0 * (z_hi - z_lo) / (0.8 * height)
+    gap = 1.3 * 8.0 / 72.0 * (z_hi - z_lo) / (0.85 * height)
     order = np.argsort(zc)
-    spread = _spread([zc[k] for k in order], gap)
-    label_z = np.empty(len(planes))
-    label_z[order] = spread
-    for k, plane in enumerate(planes):
+    label_z = np.empty(n)
+    label_z[order] = _spread([zc[k] for k in order], gap)
+    for k in range(n):
         inside = bottom <= k <= top
-        surface = k in (bottom, top)
         if k in bottom_ok and k in top_ok:
             color = "#2ca02c"
         elif k in bottom_ok:
@@ -314,43 +276,28 @@ def plot_cut(
         elif k in top_ok:
             color = "#1f77b4"
         else:
-            color = "black" if inside else "#b0b0b0"
-        lad.plot([0.0, 0.12], [zc[k], zc[k]], color=color, lw=2.4 if surface else 1.0)
-        lad.plot([0.12, 0.2], [zc[k], label_z[k]], color=color, lw=0.6)
-        n_out = sum(1 for i in plane["indices"] if i in removed)
-        text = plane_names[k]
-        if n_out and inside:
-            text += f"  ({len(plane['indices']) - n_out} of {len(plane['indices'])} atoms kept)"
-        if k == bottom == top:
-            text += "   \u25c0 bottom and top surface"
-        elif k == bottom:
-            text += "   \u25c0 bottom surface"
-        elif k == top:
-            text += "   \u25c0 top surface"
-        lad.text(0.22, label_z[k], text, va="center", fontsize=8.5, color=color,
+            color = "black" if inside else "#aaaaaa"
+        surface = k in (bottom, top)
+        lad.plot([0.0, 0.1, 0.18], [zc[k], zc[k], label_z[k]], color=color, lw=0.8)
+        lad.text(0.2, label_z[k], plane_names[k], va="center", fontsize=8, color=color,
                  fontweight="bold" if surface else "normal")
-    for panel in (ax, lad):
-        panel.axhline(z_bottom_cut, color="red", ls="--", lw=1.2)
-        panel.axhline(z_top_cut, color="blue", ls="--", lw=1.2)
-    lad.text(0.99, z_bottom_cut, "bottom cut", color="red", fontsize=8, ha="right", va="top",
-             transform=lad.get_yaxis_transform())
-    lad.text(0.99, z_top_cut, "top cut", color="blue", fontsize=8, ha="right", va="bottom",
-             transform=lad.get_yaxis_transform())
-    lad.set_xlim(0.0, 1.0)
-    lad.set_xticks([])
-    for side in ("top", "right", "bottom"):
-        lad.spines[side].set_visible(False)
-    ax.set_ylim(z_lo, z_hi)
+    if bottom > 0 or top < n - 1:
+        def extent(k):
+            zz = z[planes[k]["indices"]]
+            return zz.min(), zz.max()
 
-    legend = ("planes allowed as surface: red bottom, blue top, green either;  "
-              "grey: cut away")
-    if removed:
-        legend += ";  open circles: removed by the reconstruction"
-    caption = "\n".join(list(notes) + [legend])
+        lo, hi = extent(bottom)[0], extent(top)[1]
+        cuts = [(0.5 * (extent(bottom - 1)[1] + lo) if bottom > 0 else lo - 0.5, "#d62728"),
+                (0.5 * (hi + extent(top + 1)[0]) if top < n - 1 else hi + 0.5, "#1f77b4")]
+        for zcut, color in cuts:
+            for panel in (ax, lad):
+                panel.axhline(zcut, color=color, ls="--", lw=1.0)
+    lad.set_xlim(0.0, 1.0)
+    lad.axis("off")
+    ax.set_ylim(z_lo, z_hi)
     if title:
-        fig.suptitle(title, fontsize=11)
+        fig.suptitle(title, fontsize=10)
     fig.tight_layout()
-    fig.text(0.01, 0.0, caption, fontsize=8.5, va="top", ha="left", family="monospace")
     Path(out_png).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, dpi=150, bbox_inches="tight")
     plt.close(fig)

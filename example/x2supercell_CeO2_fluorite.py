@@ -92,7 +92,7 @@ def main(argv=None):
             cut_at="termination",
             reconstruction=term.get("reconstruction"),
             vacuum=15.0,
-            cuts="right",
+            cuts="top",
         )
 
         print(f"\n  Generated {len(sub_slabs)} sub-slabs for {miller}")

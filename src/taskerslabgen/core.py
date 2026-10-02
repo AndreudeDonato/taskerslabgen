@@ -14,6 +14,39 @@ from scipy.optimize import linear_sum_assignment
 # default as pymatgen's ``ftol``.
 DEFAULT_PLANE_TOL = 0.1
 
+# Polarity is measured as the dipole per surface area, with the charges
+# divided by their mean absolute value: any proportional set of charges
+# (formal, relative, computed) gives the same numbers, and a slab's verdict
+# does not depend on its thickness.  Units: 1/angstrom.
+DEFAULT_DIPOLE_TOL = 1e-3
+
+
+def _charge_scale(charges):
+    """Mean absolute charge per atom: the unit in which charges are compared."""
+    q = np.abs(np.asarray(charges, dtype=float))
+    scale = float(q.mean()) if q.size else 0.0
+    return scale if scale > 0 else 1.0
+
+
+def _surface_area(cell, axis=2):
+    """Area (angstrom^2) of the cell face perpendicular to *axis*."""
+    a, b = [np.asarray(cell[i], dtype=float) for i in range(3) if i != axis]
+    return float(np.linalg.norm(np.cross(a, b)))
+
+
+def dipole_per_area(charges, positions, cell, axis=2, charge_scale=None):
+    """
+    Polarity of a slab: |dipole along *axis*| per surface area, with the
+    charges divided by *charge_scale* (default: their mean absolute value).
+    In 1/angstrom; this is what ``dipole_tol`` is compared with.
+    """
+    q = np.asarray(charges, dtype=float)
+    scale = _charge_scale(q) if charge_scale is None else charge_scale
+    z = np.asarray(positions, dtype=float)[:, axis]
+    mu = float(np.sum(q * (z - z.mean())))
+    return abs(mu) / (_surface_area(cell, axis) * scale)
+
+
 # Per-atom array used internally to track which input atom each slab atom
 # came from (survives ``ase.build.surface`` and slicing).  Removed before
 # slabs are returned.
@@ -29,13 +62,15 @@ class PolarSurfaceError(ValueError):
     No termination or reconstruction of a facet is non-polar within
     ``dipole_tol``.
 
-    ``min_dipole_per_fu`` is the smallest |dipole| per formula unit (e·Å)
-    that any candidate reaches: the ``dipole_tol`` a slab would need.
+    ``min_dipole`` is the smallest polarity (dipole per surface area,
+    charges normalised, 1/Å; see :func:`dipole_per_area`) that any candidate
+    reaches over the requested thicknesses: the ``dipole_tol`` a slab would
+    need.
     """
 
-    def __init__(self, message, min_dipole_per_fu):
+    def __init__(self, message, min_dipole):
         super().__init__(message)
-        self.min_dipole_per_fu = float(min_dipole_per_fu)
+        self.min_dipole = float(min_dipole)
 
 
 def _check_miller(miller):
@@ -417,7 +452,7 @@ def is_stoichiometric_sequence(sequence_counts, reduced_counts):
     return True, ks[0]
 
 
-def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3):
+def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3, *, area, charge_scale):
     """
     Enumerate all contiguous plane sequences and compute their charge,
     stoichiometry, and dipole moment.
@@ -431,17 +466,24 @@ def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3):
     reduced_counts : dict
         Reduced bulk stoichiometry.
     charge_tol : float
-        Largest |net charge| per formula unit (e) treated as neutral.
+        Largest |net charge| per formula unit, in units of *charge_scale*,
+        treated as neutral.
+    area : float
+        Surface area of the cell (angstrom^2), e.g. ``_surface_area(surf.cell)``.
+    charge_scale : float
+        Mean absolute charge per atom of the bulk, e.g.
+        ``_charge_scale(atoms_z[:, 2])``.  Required, like *area*, so that
+        polarities are always normalised.
 
     Returns
     -------
     list of dict
         Each entry describes a cut sequence with keys ``bottom_cut``,
-        ``top_cut``, ``plane_indices``, ``total_charge``, ``net_dipole``,
-        ``is_neutral``, ``is_stoich``, ``stoich_k``, ``dipole_per_fu``
-        (|dipole| per formula unit, ``None`` if not stoichiometric),
-        ``is_full_period`` (the sequence spans one whole bulk repeat unit),
-        etc.
+        ``top_cut``, ``plane_indices``, ``total_charge``, ``net_dipole``
+        (e·Å), ``is_neutral``, ``is_stoich``, ``stoich_k``,
+        ``dipole_per_area`` (|dipole| / (area * charge_scale), 1/Å, ``None``
+        if not stoichiometric), ``is_full_period`` (the sequence spans one
+        whole bulk repeat unit), etc.
     """
     if len(planes) == 0:
         return []
@@ -502,11 +544,12 @@ def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3):
                     "direction": "bottom-to-top",
                     "plane_z": [float(z % L) for z in z_seq_btt],
                     "plane_Q": [float(q) for q in q_seq_btt],
-                    "is_neutral": abs(total_q) <= charge_tol * max(
+                    "is_neutral": abs(total_q) / charge_scale <= charge_tol * max(
                         1.0, sum(seq_counts.values()) / atoms_per_fu),
                     "is_stoich": is_stoich,
                     "stoich_k": stoich_k,
-                    "dipole_per_fu": abs(mu_btt) / stoich_k if is_stoich else None,
+                    "dipole_per_area": (abs(mu_btt) / (area * charge_scale)
+                                        if is_stoich else None),
                     "is_full_period": len(seq_indices_btt) == n,
                 }
             )
@@ -515,7 +558,7 @@ def enumerate_cut_pairs(planes, L, reduced_counts, charge_tol=1e-3):
     return sequences
 
 
-def select_best_sequence(sequences, dipole_tol=0.05):
+def select_best_sequence(sequences, dipole_tol=DEFAULT_DIPOLE_TOL, n_units=1):
     """
     Select the best stoichiometric, charge-neutral sequence (lowest dipole).
 
@@ -531,8 +574,12 @@ def select_best_sequence(sequences, dipole_tol=0.05):
     sequences : list of dict
         Output of :func:`enumerate_cut_pairs`.
     dipole_tol : float
-        Largest |dipole| per formula unit (e·Å) of the repeat unit that is
+        Largest polarity (dipole per surface area, charges normalised, 1/Å)
         still considered zero (Tasker I/II).
+    n_units : int
+        Repeat units of the thickest slab to be built: stacked units add
+        their dipoles, so a slab of *n_units* has *n_units* times the
+        polarity of one.
 
     Returns
     -------
@@ -548,11 +595,11 @@ def select_best_sequence(sequences, dipole_tol=0.05):
         return None
 
     def key(s):
-        d = s["dipole_per_fu"]
+        d = s["dipole_per_area"] * n_units
         return (0.0 if d <= dipole_tol else d, s["bottom_cut"])
 
     best = dict(min(valid, key=key))
-    best["is_tasker_ii"] = best["dipole_per_fu"] <= dipole_tol
+    best["is_tasker_ii"] = best["dipole_per_area"] * n_units <= dipole_tol
     return best
 
 
@@ -624,7 +671,7 @@ def apply_vacuum_to_slab(atoms, vacuum=15.0, axis=2):
 
 
 def validate_slab(slab, charges, reduced_counts, axis=2, charge_tol=1e-3,
-                  dipole_tol=0.05, max_gap=None):
+                  dipole_tol=DEFAULT_DIPOLE_TOL, max_gap=None):
     """
     Check that *slab* satisfies the conditions the generators promise.
 
@@ -639,9 +686,14 @@ def validate_slab(slab, charges, reduced_counts, axis=2, charge_tol=1e-3,
         Reduced bulk stoichiometry ``{Z: count}``.
     axis : int
         Surface-normal axis.
-    charge_tol, dipole_tol : float
-        Tolerances on the net charge (e) and on the dipole along *axis*
-        (e·Å), both per formula unit of the slab.
+    charge_tol : float
+        Largest net charge per formula unit, in units of the mean absolute
+        charge per atom.
+    dipole_tol : float
+        Largest polarity: |dipole along *axis*| per surface area with the
+        charges divided by their mean absolute value, in 1/Å
+        (:func:`dipole_per_area`).  Independent of the thickness and of the
+        scale of the charges.
     max_gap : float or None
         Largest allowed z-gap (angstrom) between neighbouring atoms; catches
         slabs glued together across vacuum.  ``None`` (default) skips the
@@ -667,14 +719,16 @@ def validate_slab(slab, charges, reduced_counts, axis=2, charge_tol=1e-3,
     q = np.asarray(_charges_to_list(slab, charges), dtype=float)
     if len(q) != len(slab):
         raise ValueError(f"Charges length ({len(q)}) does not match atoms ({len(slab)}).")
+    scale = _charge_scale(q)
     net_q = float(np.sum(q))
-    if abs(net_q) > charge_tol * k:
+    if abs(net_q) > charge_tol * k * scale:
         problems.append(f"net charge {net_q:+.4f} e")
 
     z = slab.positions[:, axis]
-    dipole = float(np.sum(q * (z - z.mean())))
-    if abs(dipole) > dipole_tol * k:
-        problems.append(f"dipole {dipole:+.4e} e*A")
+    polarity = dipole_per_area(q, slab.positions, slab.cell, axis, scale)
+    if polarity > dipole_tol:
+        problems.append(f"dipole {float(np.sum(q * (z - z.mean()))):+.4e} e*A "
+                        f"(polarity {polarity:.3g} /A)")
 
     if max_gap is not None and len(slab) > 1:
         gap = float(np.max(np.diff(np.sort(z))))
@@ -684,7 +738,7 @@ def validate_slab(slab, charges, reduced_counts, axis=2, charge_tol=1e-3,
     if problems:
         raise SlabValidationError(
             f"Invalid slab {slab.get_chemical_formula()}: {'; '.join(problems)} "
-            f"(charge_tol={charge_tol}, dipole_tol={dipole_tol} per formula unit)."
+            f"(charge_tol={charge_tol}, dipole_tol={dipole_tol} /A)."
         )
 
 

@@ -56,9 +56,10 @@ def main(argv=None):
     parser.add_argument(
         "--dipole-tol",
         type=float,
-        default=0.3,
-        help="|dipole| per formula unit (e*A) still counted as zero; "
-        "relaxed slabs need more than the 0.05 default.",
+        default=0.05,
+        help="polarity (dipole per surface area, charges normalised, 1/A) still "
+        "counted as zero; sub-slabs of relaxed slabs keep one relaxed surface "
+        "and need more than the 1e-3 default.",
     )
     args = parser.parse_args(argv)
 
@@ -89,7 +90,7 @@ def main(argv=None):
         miller=miller,
         dipole_tol=args.dipole_tol,
         cut_at="termination",
-        cuts="right",
+        cuts="top",
         vacuum=15.0,
     )
 
