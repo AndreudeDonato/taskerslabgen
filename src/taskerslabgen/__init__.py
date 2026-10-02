@@ -21,7 +21,7 @@ enumeration, bonding, Tasker III candidates, builders) are in
 
 import warnings
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 
 def _check_ase_numpy():

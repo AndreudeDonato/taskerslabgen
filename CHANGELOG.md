@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.1 — unreleased
+## 0.5.1 — 2026-10-02
 
 ### Fixes
 - **cutslab(bulk_atoms=) on close planes.**  Bulk mode matched whole planes
