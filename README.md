@@ -198,7 +198,10 @@ deviates more than `deform_tol` (or changed composition) is labelled with
 and dipole of every cut are evaluated on the actual relaxed atoms.  A cut
 keeps one relaxed surface and gets a freshly cut one, which carries a small
 dipole (typically 0.004, up to ~0.04 in the relaxed slabs we tested), so
-relaxed slabs need `dipole_tol≈0.05`.
+relaxed slabs need `dipole_tol≈0.05`.  Pass `bulk_atoms` for relaxed slabs:
+without it, planes are found by height clustering, and planes closer than
+~0.2 Å (anatase (101) has two 0.15 Å apart) blur when relaxation moves atoms
+by a few hundredths of an Å; cutslab then warns that it found no repeat unit.
 
 **Polarity.** `dipole_tol` is compared with the dipole along the normal per
 surface area, with the charges divided by their mean absolute value
