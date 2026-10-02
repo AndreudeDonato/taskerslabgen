@@ -1497,3 +1497,17 @@ def test_slab_labels_without_genslab_hint_group_planes_alike(atoms, charges, hkl
         assert repeat is not None
         pairs = set(zip(hinted, own))
         assert len(pairs) == len(set(hinted)) == len(set(own)), sorted(pairs)
+
+
+def test_old_ase_with_numpy2_fails_with_a_clear_message(monkeypatch):
+    """ASE 3.22 calls numpy.product, gone in NumPy 2: say so at import."""
+    import ase
+
+    import taskerslabgen
+
+    monkeypatch.setattr(np, "__version__", "2.1.0")
+    monkeypatch.setattr(ase, "__version__", "3.22.1")
+    with pytest.raises(ImportError, match="ASE >= 3.23"):
+        taskerslabgen._check_ase_numpy()
+    monkeypatch.setattr(ase, "__version__", "3.29.0")
+    taskerslabgen._check_ase_numpy()

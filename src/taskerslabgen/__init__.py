@@ -23,6 +23,26 @@ import warnings
 
 __version__ = "0.5.0"
 
+
+def _check_ase_numpy():
+    """ASE 3.22 uses ``numpy.product``, which NumPy 2 removed: building any
+    surface then fails deep inside ASE.  Say so at import instead."""
+    import ase
+    import numpy
+
+    def major_minor(version):
+        return tuple(int(part) for part in version.split(".")[:2] if part.isdigit())
+
+    if major_minor(numpy.__version__) >= (2, 0) and major_minor(ase.__version__) < (3, 23):
+        raise ImportError(
+            f"taskerslabgen needs ASE >= 3.23 with NumPy {numpy.__version__} (ASE "
+            f"{ase.__version__} uses functions NumPy 2 removed).  Upgrade ASE "
+            "(pip install -U ase) or install numpy<2."
+        )
+
+
+_check_ase_numpy()
+
 from . import advanced
 from .chargeparsers import parse_hirshfeld_fhi_aims
 from .core import (
