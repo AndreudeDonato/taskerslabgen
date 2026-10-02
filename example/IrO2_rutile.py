@@ -4,8 +4,8 @@ Generate every Tasker I/II termination of IrO2 for several Miller indices.
 Terminations come ranked: ID 0 breaks the fewest bonds (then is the densest
 surface), which is what ``candidates="best"`` returns.
 
-Writes structures under example/output_tasker2/.  Pass --plot for
-stacking-axis PNG plots, --verbose for the full analysis, --view to open
+Writes structures and a plot of every termination (where the bulk was
+cut) under example/output_tasker2/.  Pass --no-plot to skip the plots, --verbose for the full analysis, --view to open
 ASE's GUI after generation.
 """
 from __future__ import annotations
@@ -30,9 +30,9 @@ def main(argv=None):
         help="Open ASE GUI after writing structures (interactive).",
     )
     parser.add_argument(
-        "--plot",
+        "--no-plot",
         action="store_true",
-        help="Write stacking-axis PNG plots next to the structures.",
+        help="Skip the plots of where the slabs were cut.",
     )
     parser.add_argument(
         "--verbose",
@@ -68,7 +68,7 @@ def main(argv=None):
         vacuum=15.0,
         plot_out_dir=output_dir.as_posix(),
         verbose=args.verbose,
-        plot=args.plot,
+        plot=not args.no_plot,
         candidates="all",
     )
 

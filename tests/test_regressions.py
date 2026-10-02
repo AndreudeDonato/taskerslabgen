@@ -1412,3 +1412,28 @@ def test_cuts_top_bottom_and_old_names(ceo2_111_slab):
     with pytest.warns(DeprecationWarning, match="cuts='top'"):
         old = cutslab(ceo2_111_slab, Q_CEO2, cuts="right")
     assert [len(s) for s in old] == [len(s) for s in top]
+
+
+def test_thin_genslab_slab_keeps_genslab_labels():
+    """A 2-layer slab is too thin to show its repeat twice; cutslab then uses
+    the labels genslab stored for one repeat unit."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    q = {"Ti": 4.0, "O": -2.0}
+    term = generate_slabs_for_miller(ANATASE, q, (1, 0, 1), [2], dipole_tol=0.05)[(1, 0, 1)][0]
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*repeat unit.*")
+        subs = cutslab(term["atoms"][0], q, dipole_tol=0.05)
+    assert {(s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in subs} == {
+        (term["plane_type"], term["top_plane_type"])}
+    assert [len(s) for s in subs] == [12, 24]
+
+
+def test_genslab_plot_shows_the_cut(tmp_path):
+    """genslab plots the slab inside one repeat unit of bulk on each side."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    generate_slabs_for_miller(IRO2, Q_IRO2, (1, 1, 0), [2], plot=True, plot_out_dir=str(tmp_path))
+    generate_slabs_for_miller(CEO2, Q_CEO2, (0, 0, 1), [2], prefer_plane="O",
+                              bond_distances=BOND_DISTS_CEO2, plot=True, plot_out_dir=str(tmp_path))
+    assert len(list(tmp_path.glob("*.png"))) == 2

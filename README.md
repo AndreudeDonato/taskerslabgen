@@ -25,11 +25,21 @@ The library:
 - checks every returned slab: stoichiometric, neutral, non-polar
   (raises `SlabValidationError` otherwise)
 
-## Diagram
+## How it looks
 
-See `docs/images/cutdiagram_IrO2rutile100.png` for a schematic overview.
+`generate_slabs_for_miller(..., plot=True)` shows where the bulk was cut: the
+slab between the two cuts, the bulk above and below in grey, and every plane
+labelled.  Rutile IrO₂ (110):
 
-![Tasker slab generation diagram](docs/images/cutdiagram_IrO2rutile100.png)
+![IrO2 (110): where the bulk was cut](docs/images/genslab_IrO2_110.png)
+
+`cutslab(..., plot=True)` draws every cut of a thickness series; planes the
+selection allowed as bottom surface are red, as top surface blue:
+
+![IrO2 (110): one cut of the thickness series](docs/images/cutslab_IrO2_110.png)
+
+More figures in [`example/TUTORIAL.md`](example/TUTORIAL.md); regenerate them
+with `python3 docs/make_figures.py`.
 
 ## Install
 

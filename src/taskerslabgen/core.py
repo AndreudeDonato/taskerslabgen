@@ -1167,6 +1167,20 @@ def _slab_plane_names(atoms, planes_sorted, axis=2, stacking_labels=None):
     waves, cell2d = _plane_waves(atoms, planes_sorted, axis)
     n = len(planes_sorted)
     found = _slab_repeat(planes_sorted, waves, cell2d) if n >= 3 else None
+    if found is None and stacking_labels:
+        # Too thin to show its repeat twice, but genslab told us one repeat
+        # unit of labels from the bottom plane up: use them if every plane
+        # has the composition its label says (the two surface planes may
+        # differ: reconstructed or relaxed).
+        per = len(stacking_labels)
+        cyclic = [stacking_labels[i % per] for i in range(n)]
+        if all(plane_name_base(cyclic[i]) == _formula_label(planes_sorted[i]["counts"])
+               for i in range(1, n - 1)):
+            names = list(cyclic)
+            for i in {0, n - 1}:
+                if plane_name_base(names[i]) != _formula_label(planes_sorted[i]["counts"]):
+                    names[i] = _formula_label(planes_sorted[i]["counts"]) + "~"
+            return names, (per, None, None)
     if found is None:
         names, _ = assign_plane_names(planes_sorted, atoms=atoms, axis=axis)
         return names, None

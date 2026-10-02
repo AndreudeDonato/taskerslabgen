@@ -37,7 +37,7 @@ result = generate_slabs_for_miller(
     bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35},
     prefer_plane="O",
     candidates="best",
-    # plot=False by default (quiet library mode)
+    plot=True,              # where the bulk was cut (PNG in plot_out_dir)
 )
 
 term = next(iter(result[(0, 0, 1)].values()))
@@ -59,6 +59,18 @@ surface plane is pure oxygen.
 
 With `candidates="all"` every termination is returned, ranked: ID 0 breaks the
 fewest bonds (`term["candidate"]`), which is what `candidates="best"` keeps.
+
+`plot=True` shows where the bulk was cut: the slab between the two cuts
+(dashed), with one repeat unit of bulk above and below in grey, and its
+planes labelled.  For this Tasker III slab, half of each surface O plane
+moved to the other side; the removed atoms are the open circles:
+
+![CeO2 (001): where the bulk was cut](../docs/images/genslab_CeO2_001_recon.png)
+
+A Tasker I/II termination, rutile IrO₂ (110), cut between the two
+bridging-O planes `O'` and `O`:
+
+![IrO2 (110): where the bulk was cut](../docs/images/genslab_IrO2_110.png)
 
 ## 3. Cut a thickness series
 
@@ -85,6 +97,12 @@ for slab in sub_slabs:
 sub-slab keeps the input's bottom and top planes (section 7).
 Each returned `Atoms` object carries cut metadata in `.info`, and every
 sub-slab is checked to be stoichiometric, neutral and non-polar.
+
+With `plot=True` every cut is drawn: what was cut away is grey, and the
+planes the selection allowed as bottom surface are red, as top surface
+blue.  Here a 2-layer slab cut from a 3-layer IrO₂ (110) slab:
+
+![IrO2 (110): one cut of the thickness series](../docs/images/cutslab_IrO2_110.png)
 
 ## 4. Tasker III note
 
@@ -172,11 +190,19 @@ bottom surface are red, as top surface blue.
    slabs, from `O2 Ti2 O2'` (6 atoms) up, have a polarity of 0.022 /Å at
    every thickness, which passes the `dipole_tol=0.05` that relaxed slabs
    need: the dipole check cannot keep the termination, the phase does.
+
+   | `selection="relative"` | `selection="shape"` |
+   |---|---|
+   | ![anatase relative](../docs/images/phases_anatase101_relative.png) | ![anatase shape](../docs/images/phases_anatase101_shape.png) |
+   | only `O2` (red) can be the bottom and `O2'''` (blue) the top | every O₂ phase (green) can be either: the top O ends up 0.15 Å over a Ti |
 2. **Same relative phase, different absolute phase (a---a vs a---a').**
    Rutile IrO₂ (110): the top bridging-O row lies exactly over the bottom one
    for 1, 3, 5 layers (`cut_phase_overlap` = 1) and half a cell off for 2,
    4, 6 (`cut_phase_overlap` = 0).  `"relative"` keeps all thicknesses;
-   `"absolute"` keeps the ones in phase with the input slab.
+   `"absolute"` keeps the ones in phase with the input slab.  From a
+   3-layer input (top over bottom), `"absolute"` keeps the 1-layer cut:
+
+   ![IrO2 (110): absolute selection](../docs/images/phases_IrO2_110_absolute.png)
 3. **A rotation is a phase too.**  The two IrO₂ planes of rutile (001) are
    one arrangement rotated by 90°: `IrO2` and `IrO2'`.  `"relative"` keeps
    slabs ending on the same plane as the input (an even number of planes);

@@ -9,7 +9,8 @@ For each Miller index:
 
      {stem}_hkl_{millerindex}_between_{bottom}_{top}_cut_{cutindex}.cif
 
-Headless by default. Pass --plot to write PNG stacking plots.
+Writes a plot of every termination and every cut (where the slab was cut,
+which planes could be surfaces); --no-plot skips them.
 """
 from __future__ import annotations
 
@@ -28,9 +29,9 @@ from taskerslabgen import cutslab, generate_slabs_for_miller, plane_name_for_fil
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--plot",
+        "--no-plot",
         action="store_true",
-        help="Write stacking-axis PNG plots next to the structures.",
+        help="Skip the plots of where the slabs were cut.",
     )
     args = parser.parse_args(argv)
 
@@ -61,7 +62,7 @@ def main(argv=None):
             layer_thickness_list=[3],
             bulk_name=stem,
             vacuum=15.0,
-            plot=args.plot,
+            plot=not args.no_plot,
             plot_out_dir=output_dir.as_posix(),
             # Count only Ce-O bonds (covalent radii would also count Ce-Ce).
             bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35},
@@ -87,7 +88,7 @@ def main(argv=None):
             input_structure=thick_slab,
             charges=charges,
             axis=2,
-            plot=args.plot,
+            plot=not args.no_plot,
             plot_out_dir=output_dir.as_posix(),
             cut_at="termination",
             reconstruction=term.get("reconstruction"),

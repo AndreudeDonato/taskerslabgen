@@ -35,8 +35,9 @@ Output in example/output_phases/:
 - plane_phases.traj: every sub-slab of the three cases, one frame each,
   repeated 3x3 in-plane so the registry is easy to see (the frame table is
   printed; each frame's description is also in atoms.info).
-- one folder per case and selection with a plot per cut (planes allowed as
-  bottom surface in red, as top surface in blue).
+- one folder per case with a plot of where the bulk was cut for the thick
+  slab, and per selection a plot of every cut (planes allowed as bottom
+  surface in red, as top surface in blue).
 
 Pass --view to open the trajectory in the ASE GUI (top view along the
 normal; for a side view run ``ase gui -R -90x example/output_phases/plane_phases.traj``).
@@ -73,6 +74,7 @@ def run_case(folder, title, bulk_file, charges, miller, layers, selections,
     print(f"\n{title}")
     bulk = read((BULKS / bulk_file).as_posix())
     term = generate_slabs_for_miller(bulk, charges, miller, [layers], bulk_name=folder,
+                                     plot=True, plot_out_dir=(OUT / folder).as_posix(),
                                      **(gen_kwargs or {}))[miller][0]
     thick = term["atoms"][0]
     print(f"   thick slab: bottom {term['plane_type']}, top {term['top_plane_type']}, "

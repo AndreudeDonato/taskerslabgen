@@ -513,19 +513,43 @@ def _save_candidates(slabs, facet, opts, kind):
         print(f"Saved {len(frames)} Tasker {kind} candidates to {path}\n")
 
 
-def _plot_termination(facet, opts, slab, bottom, path, title, recon_label=None):
-    """Plot a built slab (:func:`plot_slab`), its planes named like the
-    bulk planes they come from, starting at bulk plane *bottom*."""
+def _plot_termination(facet, opts, context, slab, bottom, path, title,
+                      recon_label=None, removed_tags=()):
+    """
+    Plot where the bulk was cut (:func:`plot_slab`): *context* is the same
+    termination one repeat unit thicker on each side (grey in the plot), so
+    the slab sits between the two cuts.  Planes are named like the bulk planes
+    they come from, starting at bulk plane *bottom*.  For a reconstruction,
+    atoms of the slab's surface planes whose bulk index is in *removed_tags*
+    are drawn as removed.  Falls back to plotting *slab* alone if the
+    context does not split into whole repeat units.
+    """
     from .plotting import plot_slab
 
-    atoms_z = np.column_stack([slab.numbers, slab.positions[:, 2], np.zeros(len(slab))])
-    planes = sorted(identify_planes(atoms_z, float(slab.cell[2, 2]), plane_tol=opts.plane_tol),
-                    key=lambda p: p["z_center"])
     n_pl = len(facet.names)
+    n = opts.layers[0]
+    atoms_z = np.column_stack([context.numbers, context.positions[:, 2], np.zeros(len(context))])
+    planes = sorted(identify_planes(atoms_z, float(context.cell[2, 2]), plane_tol=opts.plane_tol),
+                    key=lambda p: p["z_center"])
+    extra = 1 if recon_label is not None else 0  # a reconstructed slab ends on the cut plane
+    if len(planes) != (n + 2) * n_pl + extra:
+        atoms_z = np.column_stack([slab.numbers, slab.positions[:, 2], np.zeros(len(slab))])
+        planes = sorted(identify_planes(atoms_z, float(slab.cell[2, 2]), plane_tol=opts.plane_tol),
+                        key=lambda p: p["z_center"])
+        names = [facet.names[(bottom + k) % n_pl] for k in range(len(planes))]
+        if recon_label is not None:
+            names[0] = names[-1] = recon_label
+        plot_slab(slab, planes, names, path, title=title)
+        return
     names = [facet.names[(bottom + k) % n_pl] for k in range(len(planes))]
+    lo, hi = n_pl, n_pl + n * n_pl - 1 + extra
+    removed = []
     if recon_label is not None:
-        names[0] = names[-1] = recon_label
-    plot_slab(slab, planes, names, path, title=title)
+        for k in (0, lo, hi, len(planes) - 1):
+            names[k] = recon_label
+        tags = context.arrays[_INDEX_KEY]
+        removed = [i for k in (lo, hi) for i in planes[k]["indices"] if tags[i] in set(removed_tags)]
+    plot_slab(context, planes, names, path, bottom=lo, top=hi, removed=removed, title=title)
 
 
 def _tasker12_path(facet, sequences, opts, prefer_plane, candidates_mode, savecandidates):
@@ -590,7 +614,7 @@ def _tasker12_path(facet, sequences, opts, prefer_plane, candidates_mode, saveca
             bottom = (seq["bottom_cut"] + 1) % n_pl
             bp, tp = names[bottom], names[seq["top_cut"]]
             _plot_termination(
-                facet, opts, slabs[0], bottom,
+                facet, opts, build(seq, [opts.layers[0] + 2])[0], slabs[0], bottom,
                 f"{opts.plot_out_dir}/{opts.bulk_name}_hkl_{h}{k}{l}_"
                 f"{plane_name_for_filename(bp)}_{plane_name_for_filename(tp)}_{tid}.png",
                 f"{opts.bulk_name} ({h}{k}{l}) termination {tid}: {bp} to {tp}",
@@ -672,10 +696,12 @@ def _tasker3_termination(facet, opts, cand, plot_path=None):
         )
     if opts.plot and plot_path is not None:
         h, k, l = facet.out_miller
+        context = _tasker3_slabs(facet, opts, cand, [opts.layers[0] + 2])[0]
+        mask_tags = facet.surf_bulk.arrays[_INDEX_KEY][list(cand["deletion_mask"])]
         _plot_termination(
-            facet, opts, slabs[0], i, plot_path,
+            facet, opts, context, slabs[0], i, plot_path,
             f"{opts.bulk_name} ({h}{k}{l}) {cand['recon_label']}",
-            recon_label=cand["recon_label"],
+            recon_label=cand["recon_label"], removed_tags={int(t) for t in mask_tags},
         )
     return slabs, reconstruction
 

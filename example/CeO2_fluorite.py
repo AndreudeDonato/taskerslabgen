@@ -9,7 +9,8 @@ equivalent patterns it stands for.  They are ranked by broken bonds, then
 by how evenly the remaining surface atoms are spread.
 
 Headless by default: writes structures under example/output_tasker3/.
-Pass --plot for stacking-axis PNG plots, --verbose for the full analysis,
+Writes a plot of every reconstruction (where the bulk was cut, removed
+atoms as open circles); --no-plot skips it.  --verbose for the full analysis,
 --view to open ASE's GUI after generation.
 """
 from __future__ import annotations
@@ -34,9 +35,9 @@ def main(argv=None):
         help="Open ASE GUI after writing structures (interactive).",
     )
     parser.add_argument(
-        "--plot",
+        "--no-plot",
         action="store_true",
-        help="Write stacking-axis PNG plots next to the structures.",
+        help="Skip the plots of where the slabs were cut.",
     )
     parser.add_argument(
         "--verbose",
@@ -62,7 +63,7 @@ def main(argv=None):
         layer_thickness_list=[2],
         bulk_name="CeO2",
         vacuum=15.0,
-        plot=args.plot,
+        plot=not args.no_plot,
         plot_out_dir=output_dir.as_posix(),
         verbose=args.verbose,
         # Count only Ce-O bonds (covalent radii would also count Ce-Ce).

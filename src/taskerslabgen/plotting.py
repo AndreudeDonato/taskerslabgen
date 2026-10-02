@@ -220,8 +220,8 @@ def plot_slab(
     Side view of a slab with its planes labelled: the plot of both
     generate_slabs_for_miller and cutslab.
 
-    Left: the atoms, position along the first cell vector (two cells) against
-    height.  Right: the label of every plane at its height.  The planes
+    Left: the atoms seen along the in-plane lattice direction that hides the
+    fewest of them (two periods wide), against height.  Right: the label of every plane at its height.  The planes
     *bottom* to *top* are the slab shown: its two surfaces are in bold, and
     planes outside it (a sub-slab cut from a thicker one) are grey, with the
     cuts as dashed lines (red bottom, blue top).  Planes in *bottom_ok* /
@@ -237,11 +237,34 @@ def plot_slab(
     top_ok = set(top_ok or ())
     removed = set(int(i) for i in removed)
     in_plane = [i for i in range(3) if i != axis]
-    frac = atoms.get_scaled_positions(wrap=False)
-    a1 = float(np.linalg.norm(atoms.cell[in_plane[0]]))
-    x = (frac[:, in_plane[0]] % 1.0) * a1
+    frac = atoms.get_scaled_positions(wrap=False)[:, in_plane]
     z = atoms.positions[:, axis]
     kept = {i for p in planes[bottom:top + 1] for i in p["indices"]} - removed
+
+    # View along the in-plane lattice direction that hides the fewest atoms
+    # behind others (removed atoms first): the horizontal coordinate is
+    # w . f (mod 1) times the spacing of the lattice rows seen end-on.
+    cell2d = np.asarray(atoms.cell)[np.ix_(in_plane, in_plane)]
+    area = abs(np.linalg.det(cell2d))
+    surface_atoms = [i for k in {bottom, top} for i in planes[k]["indices"]]
+
+    def distinct(w, idx):
+        return len({round(float(np.dot(frac[i], w)) % 1.0, 3) for i in idx})
+
+    def score(w):
+        sep = 0
+        if removed:
+            gone = {round(float(np.dot(frac[i], w)) % 1.0, 3) for i in removed}
+            sep = sum(round(float(np.dot(frac[i], w)) % 1.0, 3) not in gone
+                      for i in surface_atoms if i not in removed)
+        return (sep, distinct(w, range(len(atoms))))
+
+    views = [(1, 0), (0, 1), (1, -1), (1, 1)]
+    w = np.array(max(views, key=score), dtype=float)
+    along = np.array([-w[1], w[0]]) @ cell2d  # lattice vector we look along
+    width = area / float(np.linalg.norm(along))
+    x = (frac @ w % 1.0) * width
+    a1 = width
 
     z_lo, z_hi = z.min() - 1.0, z.max() + 1.0
     height = float(np.clip(0.28 * (z_hi - z_lo), 3.0, 14.0))

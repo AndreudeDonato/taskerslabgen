@@ -14,7 +14,7 @@ FHI-aims outputs; the bulk may be a supercell):
 
     python example/relaxed_cutslab.py --slab slab.out --bulk bulk.out --miller 1 1 0
 
-Sub-slabs are written under example/output_relaxed/.
+Sub-slabs, and a plot of every cut, are written under example/output_relaxed/.
 """
 from __future__ import annotations
 
@@ -61,6 +61,11 @@ def main(argv=None):
         "counted as zero; sub-slabs of relaxed slabs keep one relaxed surface "
         "and need more than the 1e-3 default.",
     )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip the plots of where the slab was cut.",
+    )
     args = parser.parse_args(argv)
 
     here = Path(__file__).resolve().parent
@@ -92,6 +97,8 @@ def main(argv=None):
         cut_at="termination",
         cuts="top",
         vacuum=15.0,
+        plot=not args.no_plot,
+        plot_out_dir=output_dir.as_posix(),
     )
 
     hkl = "".join(str(i) for i in miller)
