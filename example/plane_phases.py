@@ -15,7 +15,11 @@ Three cases, each cut with two selections:
    Anatase (101): four O2 planes per repeat unit.  Over the correct
    termination the top O sits 0.73 A above the Ti; over another phase of the
    same O2 plane only 0.15 A.  "relative" (default) keeps the termination,
-   "shape" mixes both.
+   "shape" mixes both.  The thinnest mixed slab, O2 Ti2 O2' (6 atoms), is
+   missing even with "shape": its two different surfaces give it a dipole of
+   2.3 e*A, 1.16 per formula unit, above dipole_tol=0.3.  The same dipole
+   divided over more formula units passes from 30 atoms on (0.23), which is
+   why the phase, not the dipole check, has to keep the termination.
 
 2. Same relative phase, different absolute phase (a---a vs a---a').
    Rutile IrO2 (110): one repeat unit up is half a cell sideways (the repeat
@@ -68,8 +72,8 @@ def ti_depth(slab):
 def run_case(folder, title, bulk_file, charges, miller, layers, selections,
              describe, gen_kwargs=None, cut_kwargs=None):
     """Build the thick slab, cut it with each selection (pictures in
-    OUT/folder/<selection>/) and return one frame per distinct sub-slab,
-    noting which selections keep it."""
+    OUT/folder/<selection>/) and return the frames: the whole series of
+    every selection, one after the other."""
     print(f"\n{title}")
     bulk = read((BULKS / bulk_file).as_posix())
     term = generate_slabs_for_miller(bulk, charges, miller, [layers], bulk_name=folder,
@@ -77,7 +81,8 @@ def run_case(folder, title, bulk_file, charges, miller, layers, selections,
     thick = term["atoms"][0]
     print(f"   thick slab: bottom {term['plane_type']}, top {term['top_plane_type']}, "
           f"planes of one repeat unit {thick.info['stacking_labels']}")
-    frames = {}
+    case = title.split(":")[0]
+    frames = []
     for selection in selections:
         subs = cutslab(thick, charges, selection=selection, plot=True,
                        plot_out_dir=(OUT / folder / selection).as_posix(), **(cut_kwargs or {}))
@@ -86,10 +91,9 @@ def run_case(folder, title, bulk_file, charges, miller, layers, selections,
             text = describe(s)
             print(f"     {len(s):3d} atoms  {s.info['cut_bottom_plane']} ... "
                   f"{s.info['cut_top_plane']:7s} {text}")
-            frames.setdefault(len(s), (s, text, []))[2].append(selection)
-    case = title.split(":")[0]
-    return [(f"{case}: {len(s)} atoms, {text}, kept by {'/'.join(sel)}", s)
-            for _, (s, text, sel) in sorted(frames.items())]
+            frames.append((f"{case} selection={selection!r}: {len(s)} atoms, "
+                           f"{s.info['cut_bottom_plane']} ... {s.info['cut_top_plane']}, {text}", s))
+    return frames
 
 
 def main(argv=None):

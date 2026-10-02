@@ -156,8 +156,9 @@ label.  Their **absolute** phase (as seen in the slab) alternates.
 | `"absolute"` (cutslab) | also exactly over the input slab's own surface plane |
 | `"shape"` | `O`, `O'`, `O''`, ...: the arrangement in any phase |
 
-`example/plane_phases.py` shows the three cases.  It writes every sub-slab
-to one trajectory, `output_phases/plane_phases.traj` (frame table printed;
+`example/plane_phases.py` shows the three cases.  It writes the series of
+both selections of every case to one trajectory,
+`output_phases/plane_phases.traj` (frame table printed;
 open with `--view`, `ase gui <file>` for the top view along the normal or
 `ase gui -R -90x <file>` for a side view), and a picture of every cut in
 `output_phases/<case>/<selection>/`: the input slab from the side with the
@@ -168,7 +169,12 @@ as the bottom (red) and top (blue) surface.
    (101) has four O₂ planes per repeat unit.  Over the correct termination
    the top O sits 0.73 Å above the Ti; over another phase of the same O₂
    plane only 0.15 Å.  `selection="relative"` keeps the termination
-   through the whole thickness series; `"shape"` mixes both.
+   through the whole thickness series; `"shape"` mixes both.  The thinnest
+   mixed slab, `O2 Ti2 O2'` (6 atoms), is missing even with `"shape"`: its
+   two different surfaces give it a dipole of 2.3 e·Å, 1.16 per formula
+   unit, above `dipole_tol=0.3`.  The same dipole spread over more formula
+   units passes from 30 atoms on (0.23 per formula unit), so the dipole
+   check alone cannot keep a termination: the phase has to.
 2. **Same relative phase, different absolute phase (a---a vs a---a').**
    Rutile IrO₂ (110): the top bridging-O row lies exactly over the bottom one
    for 1, 3, 5 layers (`cut_phase_overlap` = 1) and half a cell off for 2,
