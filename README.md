@@ -233,7 +233,7 @@ result = generate_slabs_for_miller(
     bulk_name="slab",
     plane_tol=None,
     charge_tol=1e-3,
-    dipole_tol=0.05,
+    dipole_tol=1e-3,
     vacuum=15.0,
     plot=False,
     plot_out_dir=".",
@@ -352,7 +352,7 @@ sub_slabs = cutslab(
     axis=2,
     plane_tol=None,
     charge_tol=1e-3,
-    dipole_tol=0.05,
+    dipole_tol=1e-3,
     plot_out_dir=".",
     plot=False,
     verbose=None,
@@ -512,11 +512,12 @@ Returns `(names, name_map)` where `names[i]` is the label of
 from taskerslabgen import reconstruct_tasker_iii
 
 result = reconstruct_tasker_iii(
-    bulk_atoms, charges, miller, layer_thickness_list, bulk_name,
-    plane_tol=None, charge_tol=1e-3, dipole_tol=0.05,
+    bulk_atoms, charges, miller, layer_thickness_list, bulk_name="slab",
+    plane_tol=None, charge_tol=1e-3, dipole_tol=1e-3,
     vacuum=15.0, plot=False, plot_out_dir=".",
     verbose=None, bond_threshold=(0.85, 1.15),
     bond_distances=None, prefer_plane=None, surface_supercell=None,
+    max_masks=200000,
 )
 ```
 

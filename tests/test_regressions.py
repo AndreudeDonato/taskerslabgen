@@ -1437,3 +1437,63 @@ def test_genslab_plot_shows_the_cut(tmp_path):
     generate_slabs_for_miller(CEO2, Q_CEO2, (0, 0, 1), [2], prefer_plane="O",
                               bond_distances=BOND_DISTS_CEO2, plot=True, plot_out_dir=str(tmp_path))
     assert len(list(tmp_path.glob("*.png"))) == 2
+
+
+@pytest.mark.parametrize(
+    "atoms, charges, hkl",
+    [(IRO2, Q_IRO2, (1, 0, 0)), (ANATASE, {"Ti": 4.0, "O": -2.0}, (0, 0, 1))],
+    ids=["IrO2100", "anatase001"],
+)
+def test_bulk_mode_keeps_phases_of_glide_related_terminations(atoms, charges, hkl):
+    """A glide maps these stackings onto themselves half a repeat up, so two
+    height registries fit the bulk equally well plane by plane; only one
+    aligns every plane with a single in-plane translation.  Bulk mode named
+    termination O'''/O'' of rutile (100) O'/O."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    for term in generate_slabs_for_miller(atoms, charges, hkl, [3], candidates="all")[hkl].values():
+        subs = cutslab(term["atoms"][0], charges, bulk_atoms=atoms)
+        assert {(s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in subs} == {
+            (term["plane_type"], term["top_plane_type"])}
+
+
+def test_bulk_mode_robust_to_noise_where_slab_mode_warns():
+    """Anatase (101) Ti2 and O2' are 0.15 A apart: 0.03 A noise on every atom
+    blurs them for height clustering (cutslab warns), not for bulk mode."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    q = {"Ti": 4.0, "O": -2.0}
+    term = generate_slabs_for_miller(ANATASE, q, (1, 0, 1), [4])[(1, 0, 1)][0]
+    noisy = term["atoms"][0].copy()
+    noisy.positions += np.random.default_rng(1).normal(0.0, 0.03, noisy.positions.shape)
+    subs = cutslab(noisy, q, dipole_tol=0.05, bulk_atoms=ANATASE)
+    assert [len(s) for s in subs] == [12, 24, 36, 48]
+    assert {(s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in subs} == {
+        (term["plane_type"], term["top_plane_type"])}
+    with pytest.warns(UserWarning, match="repeat unit"):
+        cutslab(noisy, q, dipole_tol=0.05)
+
+
+@pytest.mark.parametrize(
+    "atoms, charges, hkl",
+    [(ANATASE, {"Ti": 4.0, "O": -2.0}, (0, 0, 1)), (ALBITE, Q_ALBITE, (0, 0, 1))],
+    ids=["anatase001", "albite001"],
+)
+def test_slab_labels_without_genslab_hint_group_planes_alike(atoms, charges, hkl):
+    """cutslab names a slab's planes from its own interior when genslab's
+    labels are not stored; the names may differ, the grouping may not.  The
+    reference repeat unit used planes from before its window (moved in-plane
+    by the repeat translation), merging two O phases of anatase (001)."""
+    from taskerslabgen import generate_slabs_for_miller
+    from taskerslabgen.advanced import identify_planes
+    from taskerslabgen.core import _slab_plane_names
+
+    for term in generate_slabs_for_miller(atoms, charges, hkl, [4], candidates="all")[hkl].values():
+        slab = term["atoms"][0]
+        atoms_z = np.column_stack([slab.numbers, slab.positions[:, 2], np.zeros(len(slab))])
+        planes = sorted(identify_planes(atoms_z, slab.cell[2, 2]), key=lambda p: p["z_center"])
+        hinted, _ = _slab_plane_names(slab, planes, 2, slab.info["stacking_labels"])
+        own, repeat = _slab_plane_names(slab, planes, 2, None)
+        assert repeat is not None
+        pairs = set(zip(hinted, own))
+        assert len(pairs) == len(set(hinted)) == len(set(own)), sorted(pairs)

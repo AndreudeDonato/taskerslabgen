@@ -915,7 +915,7 @@ def reconstruct_tasker_iii(
     charges,
     miller,
     layer_thickness_list,
-    bulk_name,
+    bulk_name="slab",
     plane_tol=None,
     charge_tol=1e-3,
     dipole_tol=DEFAULT_DIPOLE_TOL,

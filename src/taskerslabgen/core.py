@@ -867,6 +867,28 @@ def _wave_alignment(A, B, cell2d, ops=None, images=None):
     return best
 
 
+def _wave_shifts(A, B, cell2d, images=None, same_plane=_SAME_PLANE):
+    """
+    Every in-plane shift *t* (fractional) that moves plane *A* onto plane *B*
+    without rotation (overlap at least *same_plane*): one for a plane with no
+    translational symmetry inside the cell, several otherwise.
+    """
+    if len(A) != len(B) or sorted(A[:, 0]) != sorted(B[:, 0]):
+        return []
+    cell2d = np.asarray(cell2d, dtype=float)
+    images = _wave_images(cell2d) if images is None else images
+    species, counts = np.unique(A[:, 0], return_counts=True)
+    anchor = A[A[:, 0] == species[np.argmin(counts)]][0]
+    found = []
+    for target in B[B[:, 0] == anchor[0]]:
+        t = (target[1:3] - anchor[1:3]) % 1.0
+        if _wave_similarity(A, B, cell2d, t, images=images) < same_plane:
+            continue
+        if not any(_frac_distance(t, u, cell2d) < 1e-3 for u in found):
+            found.append(t)
+    return found
+
+
 def assign_plane_names(planes_sorted, atoms=None, axis=2, same_plane=_SAME_PLANE):
     """
     Label planes by their arrangement and their stacking phase.
@@ -1194,7 +1216,10 @@ def _slab_plane_names(atoms, planes_sorted, axis=2, stacking_labels=None):
     gaps = [(z[ref[(k + 1) % per]] + (dz_rep if k == per - 1 else 0.0)) - z[ref[k]]
             for k in range(per)]
     start = (int(np.argmax(np.round(gaps, 3))) + 1) % per
-    ref = ref[start:] + ref[:start]
+    # One consecutive repeat unit from there: the planes before the window
+    # are replaced by their copies one repeat up (same crystal planes, but
+    # moved in-plane by the repeat translation, so their phases differ).
+    ref = ref[start:] + [r + per for r in ref[:start]]
 
     def residual(i, r):
         """Height of plane i above reference plane r, modulo the repeat."""
@@ -1708,8 +1733,8 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
     """
     catalog, L, bulk_cell2d = _bulk_plane_catalog(bulk_atoms, miller, plane_tol)
     cell2d = np.array(atoms.cell[:2, :2])
-    _catalog_in_cell(catalog, bulk_cell2d, cell2d, L,
-                     a3_xy=_surface_a3_xy(bulk_atoms, miller, cell2d))
+    a3_xy = _surface_a3_xy(bulk_atoms, miller, cell2d)
+    _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, a3_xy=a3_xy)
 
     numbers = atoms.numbers
     z = atoms.positions[:, 2]
@@ -1781,9 +1806,45 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
         good = [(len(slab_planes[k]["indices"]), r) for k, _, r in matched(offset) if r <= deform_tol]
         return (sum(n for n, _ in good), -sum(r for _, r in good))
 
+    images = _wave_images(cell2d)
+
+    def phase_consistency(offset):
+        """
+        Atoms of the matched planes whose in-plane shift onto their bulk
+        plane agrees with one translation of the whole slab (a copy *m*
+        repeat units up also moves by *m* times the in-plane part of the
+        stacking vector).  Registries related by a glide or screw axis match
+        plane by plane but need a mirror or rotation to match as one slab,
+        so this keeps the planes' phases.
+        """
+        shifts = []
+        for k, c, b in ((k, c, b) for k, p in enumerate(slab_planes) for c, b in enumerate(catalog)
+                        if b["counts"] == p["counts"]
+                        and abs(wrap(p["z_center"] - b["z"] - offset)) < 0.3):
+            if rmsd(k, c) > deform_tol:
+                continue
+            m = int(np.round((slab_planes[k]["z_center"] - b["z"] - offset) / L))
+            ref = _wave_rows(b["atoms"])
+            ref[:, 1:3] = (ref[:, 1:3] + m * a3_xy) % 1.0
+            ref[:, 3] = 0.0
+            tgt = _wave_rows(slab_geoms[k])
+            tgt[:, 3] = 0.0
+            shifts.append((len(slab_planes[k]["indices"]),
+                           _wave_shifts(ref, tgt, cell2d, images=images)))
+        best = 0
+        for _, options in shifts:
+            for t0 in options:
+                best = max(best, sum(n for n, opts in shifts
+                                     if any(_frac_distance(t, t0, cell2d) < 0.3 for t in opts)))
+        return best
+
     if candidates:
         candidates = sorted({round(c, 4) for c in candidates})
-        offset = max(candidates, key=score)
+        scores = {c: score(c) for c in candidates}
+        top = max(scores.values())
+        tied = [c for c in candidates
+                if scores[c][0] == top[0] and abs(scores[c][1] - top[1]) < 1e-3 * max(1, n_sp)]
+        offset = max(tied, key=phase_consistency) if len(tied) > 1 else tied[0]
         in_middle = {id(p) for p in middle}
         pairs = [
             (slab_planes[k], b) for k, b, r in matched(offset)

@@ -37,7 +37,8 @@ result = generate_slabs_for_miller(
     bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35},
     prefer_plane="O",
     candidates="best",
-    plot=True,              # where the bulk was cut (PNG in plot_out_dir)
+    plot=True,              # where the bulk was cut ...
+    plot_out_dir="tutorial_plots",  # ... as a PNG in this folder
 )
 
 term = next(iter(result[(0, 0, 1)].values()))
