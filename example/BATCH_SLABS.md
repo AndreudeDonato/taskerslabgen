@@ -3,7 +3,7 @@
 Generate Tasker I/II/III slabs for many bulk structures in one run.
 
 **Script:** `example/batch_unitcell_slabs.py`  
-**Outputs:** slab `.in` files in `X1output_slabs/` at the repo root
+**Outputs:** slab `.in` files in `example/output_batch/` (or `--out-dir`)
 
 ## 1. Clone and install
 
