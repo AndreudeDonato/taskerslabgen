@@ -20,6 +20,8 @@ enumeration, bonding, Tasker III candidates, builders) are in
 
 import warnings
 
+__version__ = "0.5.0.dev0"
+
 from . import advanced
 from .chargeparsers import parse_hirshfeld_fhi_aims
 from .core import (

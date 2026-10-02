@@ -24,6 +24,10 @@ from pathlib import Path
 import numpy as np
 from ase.io import read, write
 
+from _requires import require_taskerslabgen
+
+require_taskerslabgen()  # clear message if Python imports an older taskerslabgen
+
 from taskerslabgen import cutslab, generate_slabs_for_miller
 
 

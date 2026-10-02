@@ -19,6 +19,10 @@ from pathlib import Path
 
 from ase.io import read, write
 
+from _requires import require_taskerslabgen
+
+require_taskerslabgen()  # clear message if Python imports an older taskerslabgen
+
 from taskerslabgen import generate_slabs_for_miller, plane_name_for_filename
 
 
