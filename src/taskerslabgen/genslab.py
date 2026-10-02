@@ -1,3 +1,7 @@
+"""
+generate_slabs_for_miller: classify a facet as Tasker I/II or III, choose the
+termination or reconstruction, and build validated slabs.
+"""
 import math
 import warnings
 from dataclasses import dataclass, replace
@@ -177,7 +181,9 @@ def generate_slabs_for_miller(
     vacuum : float
         Vacuum to add (angstrom, per side).
     plot : bool
-        Generate stacking-axis plots (default ``False``).
+        Plot every termination (default ``False``): the slab between the two
+        cuts, one repeat unit of bulk above and below in grey, planes
+        labelled (:func:`~taskerslabgen.advanced.plot_slab`).
     plot_out_dir : str
         Directory for output plots.
     verbose : bool or None

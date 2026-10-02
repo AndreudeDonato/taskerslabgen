@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.1 — unreleased
+
+### Fixes
+- **cutslab(bulk_atoms=)** could pick a symmetry-equivalent height registry
+  (glide or screw: rutile (100), anatase (001)) and so name a termination by
+  another phase (``O'``/``O`` for genslab's ``O'''``/``O''``).  Registries
+  that fit equally well are now told apart by whether every plane aligns with
+  one in-plane translation of the whole slab.
+- **Slab-only labels** merged phases when the reference repeat unit wrapped
+  round (anatase (001) ``O''``/``O'''``, the two bridging-O rows of relaxed
+  rutile (110) slabs).  Slab-only and genslab labels now group the planes
+  alike on all 33 terminations checked.
+- ``reconstruct_tasker_iii``: ``bulk_name`` defaults to ``"slab"``, like
+  genslab.
+- Importing with ASE < 3.23 and NumPy 2 raises a clear ``ImportError``
+  (ASE 3.22 fails on NumPy 2 deep inside a calculation).
+
+### Other
+- ``plot_unitcell_atoms`` is deprecated (``DeprecationWarning``); use
+  ``plot_slab`` or ``plot=True`` in genslab and cutslab.
+- Module docstrings; parameter docs for ``dipole_per_area`` and ``plot_slab``.
+- README and tutorial: the default ``dipole_tol`` (``1e-3``), examples plot
+  by default (``--no-plot``), ``bulk_atoms`` for relaxed slabs with close
+  planes, the tutorial plot example names its output folder, stale
+  ``assign_plane_names`` rows removed.
+- Unused code removed (lint).
+
 ## 0.5.0 — 2026-10-02
 
 Plane labels now carry the stacking: a label is the plane's arrangement plus

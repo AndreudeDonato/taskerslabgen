@@ -238,7 +238,6 @@ def process_miller(
 
     Returns (n_slabs_written, error_message).
     """
-    h, k, l = miller
     hkl_str = "".join(str(i) for i in miller)
     prefer_plane = PREFER_PLANE.get((stem, miller))
     # Same plane_tol in genslab and cutslab, so both see the same planes.
@@ -367,7 +366,7 @@ def main():
     parser.add_argument(
         "--plot",
         action="store_true",
-        help="Write stacking-axis PNG plots next to slab outputs.",
+        help="Plot every termination and cut next to the slab outputs.",
     )
     parser.add_argument(
         "--bulk-dir",

@@ -1,3 +1,6 @@
+"""
+Build Tasker I/II slabs: whole bulk repeat units between two cut heights.
+"""
 from .core import apply_vacuum_to_slab, build_surface
 
 

@@ -1,3 +1,8 @@
+"""
+Shared machinery: surface cells, plane clustering and labelling (arrangement and
+phase, from smooth plane densities), cut enumeration, polarity, validation and
+matching slab planes to the bulk.
+"""
 import re
 from collections import Counter
 from functools import cmp_to_key
@@ -39,6 +44,23 @@ def dipole_per_area(charges, positions, cell, axis=2, charge_scale=None):
     Polarity of a slab: |dipole along *axis*| per surface area, with the
     charges divided by *charge_scale* (default: their mean absolute value).
     In 1/angstrom; this is what ``dipole_tol`` is compared with.
+
+    Parameters
+    ----------
+    charges : array-like
+        Charge of every atom (any scale: formal, relative or computed).
+    positions : array-like, shape (n, 3)
+        Cartesian positions (angstrom), e.g. ``slab.positions``.
+    cell : array-like, shape (3, 3)
+        Cell vectors; the surface area is that of the two vectors other
+        than *axis*.
+    axis : int
+        Surface normal (cell vector index and Cartesian axis).
+    charge_scale : float or None
+        Divide the charges by this instead of their mean absolute value.
+
+    Example: ``dipole_per_area([charges[s] for s in slab.get_chemical_symbols()],
+    slab.positions, slab.cell)``.
     """
     q = np.asarray(charges, dtype=float)
     scale = _charge_scale(q) if charge_scale is None else charge_scale
@@ -1725,7 +1747,7 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
     contains its species, so rumpled or relaxed surface planes stay whole.
     A plane gets the bulk label (e.g. ``O4``) when it matches its bulk plane
     within *deform_tol* (RMSD in angstrom after the best rigid shift) and a
-    primed label (``O4'``) when it is more deformed or has a different
+    label with ``~`` (``O4~``) when it is more deformed or has a different
     composition.
 
     Returns ``(planes_sorted, labels, reduced_counts)`` with planes in the

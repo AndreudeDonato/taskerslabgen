@@ -1,3 +1,6 @@
+"""
+Read computed atomic charges from DFT outputs (FHI-aims Hirshfeld).
+"""
 def parse_hirshfeld_fhi_aims(output_path):
     """
     Parse Hirshfeld charges from an FHI-aims output file.

@@ -60,8 +60,9 @@ python3 -m pip install --no-build-isolation -e ".[dev]"
 
 ## Quick start
 
-Examples are headless by default (write structures; no GUI). Add `--view` or
-`--plot` when you want interactive viewing or PNG stacking plots.
+The examples write structures and PNG plots of every termination and cut
+(`--no-plot` skips the plots; the batch script plots only with `--plot`).
+`--view` opens the results in the ASE GUI.
 
 ### Tasker III reconstructions (CeO2 fluorite)
 
@@ -270,7 +271,7 @@ classifies each surface as Tasker I/II (zero dipole) or Tasker III
 | `charge_tol` | `float` | `1e-3` | Largest net charge per formula unit, in units of the mean absolute charge per atom, treated as neutral. |
 | `dipole_tol` | `float` | `1e-3` | Largest polarity (dipole per surface area, charges normalised, 1/Å; see [Polarity](#cutslab)) treated as zero, for every thickness built: below it the surface is Tasker I/II, and Tasker III reconstructions must also stay below it. Relaxed bulks: ~0.05. |
 | `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of the slab. |
-| `plot` | `bool` | `False` | Generate stacking-axis plots showing planes and cuts. |
+| `plot` | `bool` | `False` | Plot each termination: the slab between the two cuts, the bulk above and below in grey, planes labelled. |
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
 | `verbose` | `bool` or `None` | `None` | Print detailed information (plane sequences, candidates, etc.). |
 | `bond_threshold` | `tuple[float, float]` | `(0.85, 1.15)` | `(lo, hi)` scaling factors applied to the bond reference distance: Tasker III bond scores and the broken-bond ranking of Tasker I/II terminations. |
@@ -386,7 +387,7 @@ termination.
 | `charge_tol` | `float` | `1e-3` | Largest net charge per formula unit, in units of the mean absolute charge per atom, treated as neutral. |
 | `dipole_tol` | `float` | `1e-3` | Largest polarity (dipole per surface area, charges normalised, 1/Å) of a sub-slab treated as zero; relaxed slabs usually need ~0.05. |
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
-| `plot` | `bool` | `False` | Generate a stacking-axis plot for each sub-slab. |
+| `plot` | `bool` | `False` | Plot each cut: what was cut away in grey, planes allowed as bottom (red) / top (blue) surface. |
 | `verbose` | `bool` or `None` | `None` | Print plane stacking and cut details. |
 | `bond_threshold` | `tuple[float, float]` | `(0.85, 1.15)` | Unused; kept for backward compatibility. |
 | `bond_distances` | `dict` or `None` | `None` | Unused; kept for backward compatibility. |
@@ -498,15 +499,6 @@ Helpers: `plane_name_base("IrO2-a'-recon") == "IrO2"`;
 Returns `(names, name_map)` where `names[i]` is the label of
 `planes_sorted[i]` and `name_map` is `{label: counts_dict}`.
 
----|---|---|---|
-| `planes_sorted` | `list[dict]` | *required* | Planes sorted by z-centre. |
-| `atoms` | `Atoms` or `None` | `None` | Provide to tell geometric variants apart (otherwise composition only). |
-| `axis` | `int` | `2` | Stacking axis. |
-| `xy_tol` | `float` | `0.5` | Matching tolerance (Å, in-plane) for corresponding atoms. |
-
-Returns `(names, name_map)` where `names[i]` is the label of
-`planes_sorted[i]` and `name_map` is `{label: counts_dict}`.
-
 ---
 
 ### `reconstruct_tasker_iii`
@@ -552,7 +544,7 @@ Import these from `taskerslabgen.advanced` (except `validate_slab` and
 | `apply_vacuum_to_slab(atoms, vacuum, axis)` | Add vacuum above and below a slab. |
 | `compute_delete_info(cut_plane, deletion_mask, atoms_z_matrix, surf_bulk)` | Extract reconstruction deletion pattern as `(Z, fx, fy)` tuples. |
 | `build_cut_slabs(bulk_atoms, miller, layer_thickness_list, zbot, ztop, L, vacuum)` | Build Tasker I/II slabs at various thicknesses. |
-| `plot_unitcell_atoms(atoms_z, L, miller, ...)` | Stacking-axis plot with plane annotations. |
+| `plot_slab(atoms, planes, plane_names, out_png, bottom, top, ...)` | The genslab/cutslab plot: side view of a slab, planes labelled, cuts dashed. |
 | `parse_hirshfeld_fhi_aims(output_path)` | Parse the last Hirshfeld charges of an FHI-aims output file (`atoms.set_initial_charges(...)`, then `charges=None`). |
 | `print_adjacency_matrix(adj, atoms)` | Print adjacency matrix with element labels. |
 | `find_tasker3_candidates(planes_sorted, atoms_z_matrix, ...)` | Enumerate and score Tasker III reconstruction candidates. |
@@ -563,13 +555,13 @@ Import these from `taskerslabgen.advanced` (except `validate_slab` and
 ## Folder layout
 
 - `src/taskerslabgen/core.py` — shared utilities: projection, plane
-  clustering, cut enumeration, composition plane labels, termination
-  fingerprinting.
+  clustering, cut enumeration, plane labels (arrangement and phase, from
+  plane densities), polarity, bulk matching.
 - `src/taskerslabgen/genslab.py` — `generate_slabs_for_miller`.
 - `src/taskerslabgen/slabcut.py` — `cutslab`.
 - `src/taskerslabgen/tasker3.py` — Tasker III reconstruction: adjacency
   matrix, symmetric deletion, bond/distribution scoring.
-- `src/taskerslabgen/plotting.py` — stacking-axis plots.
+- `src/taskerslabgen/plotting.py` — the slab plots (`plot_slab`).
 - `src/taskerslabgen/builder.py` — Tasker I/II slab builder.
 - `src/taskerslabgen/chargeparsers.py` — charge parsing (FHI-aims
   Hirshfeld).
@@ -581,7 +573,7 @@ Import these from `taskerslabgen.advanced` (except `validate_slab` and
 
 The example scripts write into `example/output*/`:
 
-- PNG plots (only with `--plot`), the same style for genslab and cutslab:
+- PNG plots (skip with `--no-plot`), the same style for genslab and cutslab:
   the slab from the side with its planes labelled and the surfaces in bold.
   cutslab plots (`*_cut_{idx}_{bottom}_{top}.png`) grey out what was cut
   away, draw the cuts as dashed lines and colour the planes the selection

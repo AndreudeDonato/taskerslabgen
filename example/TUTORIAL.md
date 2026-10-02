@@ -217,7 +217,7 @@ names.
 
 | Script | What it shows |
 |--------|----------------|
-| `example/CeO2_fluorite.py` | Tasker III candidates (headless; `--view` / `--plot` optional) |
+| `example/CeO2_fluorite.py` | Tasker III candidates (plots by default; `--view`, `--no-plot`) |
 | `example/IrO2_rutile.py` | Tasker I/II across several Miller indices |
 | `example/NaAlSi3O8_albite.py` | Tasker I/II for albite (NaAlSi₃O₈) over common Miller indices |
 | `example/x2supercell_CeO2_fluorite.py` | Full genslab → cutslab tandem on a supercell |

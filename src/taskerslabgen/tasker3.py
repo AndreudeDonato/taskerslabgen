@@ -1,3 +1,7 @@
+"""
+Tasker III reconstructions: enumerate, score (broken bonds, charge distribution,
+exact slab dipoles) and build symmetry-distinct deletion patterns.
+"""
 import warnings
 from itertools import combinations
 from math import comb
@@ -13,7 +17,6 @@ from .core import (
     PolarSurfaceError,
     _charge_scale,
     _surface_area,
-    _gauss_reduce_basis,
     _lattice_point_ops,
     _formula_label,
     apply_vacuum_to_slab,
@@ -960,7 +963,7 @@ def reconstruct_tasker_iii(
     vacuum : float
         Vacuum to add (angstrom, per side).
     plot : bool
-        Generate a stacking-axis plot (default ``False``).
+        Plot the reconstructed termination (default ``False``).
     plot_out_dir : str
         Directory for plot files.
     verbose : bool or None

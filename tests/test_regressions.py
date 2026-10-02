@@ -449,7 +449,7 @@ def test_cutslab_on_polar_slab_points_to_reconstruction():
 
 
 # ------------------------------------------------------------------
-# C8 / N2: dipole_tol is per formula unit (default 0.05)
+# C8 / N2: dipole tolerance (per formula unit until 0.4; per area since 0.5)
 # ------------------------------------------------------------------
 def test_cif_rounded_coordinates_stay_non_polar():
     """4-decimal CIF coordinates give a ~6e-4 e*A noise dipole (failed 1e-6)."""

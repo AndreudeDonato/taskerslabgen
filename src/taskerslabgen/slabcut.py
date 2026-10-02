@@ -1,3 +1,7 @@
+"""
+cutslab: cut an existing (possibly relaxed) slab into a thickness series that
+keeps its terminations and reconstruction.
+"""
 import warnings
 from collections import Counter
 
@@ -92,7 +96,9 @@ def cutslab(
     plot_out_dir : str
         Directory for output plots.
     plot : bool
-        Generate stacking-axis plots for each sub-slab (default ``False``).
+        Plot every cut (default ``False``): the input slab with what was cut
+        away in grey, planes allowed as bottom / top surface in red / blue
+        (:func:`~taskerslabgen.advanced.plot_slab`).
     verbose : bool or None
         Print detailed cut information.
     bond_threshold, bond_distances
@@ -283,7 +289,6 @@ def cutslab(
                 stacklevel=2,
             )
         reduced_counts = compute_reduced_counts(atoms_z_matrix)
-    planes = planes_sorted
     n = len(planes_sorted)
     validation = {
         "charges_list": charges_list,
@@ -378,7 +383,6 @@ def cutslab(
         return sorted({i for i in range(n) if plane_names[i] in names} | exposable)
 
     bottom_indices, top_indices = boundary(bottom_names), boundary(top_names)
-    boundary_indices = sorted(set(bottom_indices) | set(top_indices))
 
     # ---- Absolute phase: surfaces exactly over the input slab's ----
     waves, cell2d_waves = _plane_waves(atoms, planes_sorted, axis)
@@ -399,7 +403,6 @@ def cutslab(
     if selection == "absolute":
         bottom_indices = [i for i in bottom_indices if in_phase(i, 0) >= _SAME_PLANE]
         top_indices = [i for i in top_indices if in_phase(i, n - 1) >= _SAME_PLANE]
-        boundary_indices = sorted(set(bottom_indices) | set(top_indices))
 
     # ---- Evaluate every candidate cut on the actual atoms ----
     q_all = np.asarray(charges_list, dtype=float)

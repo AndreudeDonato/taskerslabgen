@@ -1,3 +1,6 @@
+"""
+Plots of slabs and where they were cut (plot_slab), used by genslab and cutslab.
+"""
 from pathlib import Path
 
 import numpy as np
@@ -33,7 +36,9 @@ def plot_unitcell_atoms(
     title=None,
 ):
     """
-    Plot atoms along the stacking axis with plane annotations.
+    Plot atoms along the stacking axis with plane annotations (deprecated:
+    genslab and cutslab draw :func:`plot_slab` since 0.5; this will be
+    removed).
 
     Produces a 1-D projection of the unit cell showing atom positions,
     plane labels, compositions, charges, and (optionally) cut positions
@@ -69,6 +74,10 @@ def plot_unitcell_atoms(
     title : str or None
         Custom title.  When None the default Miller-index title is used.
     """
+    import warnings
+
+    warnings.warn("plot_unitcell_atoms is deprecated; use plot_slab, the plot of "
+                  "generate_slabs_for_miller and cutslab.", DeprecationWarning, stacklevel=2)
     z_uc = atoms_z[:, 1] % L
     z_uc_types = atoms_z[:, 0].astype(int)
     z_uc_colors = jmol_colors[z_uc_types]
@@ -228,6 +237,27 @@ def plot_slab(
     *top_ok* (those a selection allowed as bottom / top surface) are coloured
     like the cut lines, green if allowed as either.  Atoms in *removed*
     (deleted by a reconstruction) are drawn as open circles.
+
+    Parameters
+    ----------
+    atoms : Atoms
+        The slab (or a thicker slab containing it, the rest drawn grey).
+    planes : list of dict
+        Its planes bottom to top (``indices``, ``z_center``).
+    plane_names : list of str
+        Label of every plane.
+    out_png : str
+        Output image path (folders are created).
+    bottom, top : int
+        First and last plane of the slab shown (default: all planes).
+    axis : int
+        Surface normal.
+    bottom_ok, top_ok : iterable of int or None
+        Planes a selection allowed as bottom / top surface.
+    removed : iterable of int
+        Atoms drawn as removed.
+    title : str or None
+        Figure title.
     """
     from ase.data import covalent_radii
 

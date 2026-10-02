@@ -4,7 +4,7 @@ Cut a relaxed slab into a thickness series with cutslab(bulk_atoms=...).
 Relaxation moves the surface planes: they rumple, shift towards the bulk
 and stop matching the bulk planes exactly.  Passing the bulk lets cutslab
 assign every atom to the nearest bulk plane, so relaxed planes stay whole,
-and label each plane by its bulk plane (a prime, e.g. ``O4'``, marks a plane
+and label each plane by its bulk plane (``~``, e.g. ``O4~``, marks a plane
 deformed by more than ``deform_tol``).
 
 By default the script fakes a relaxation of IrO2 (110) from the shipped CIF
@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import numpy as np
 from ase.io import read, write
 
 from _requires import require_taskerslabgen
