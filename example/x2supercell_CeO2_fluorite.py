@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ase.io import read, write
 
-from taskerslabgen import cutslab, generate_slabs_for_miller
+from taskerslabgen import cutslab, generate_slabs_for_miller, plane_name_for_filename
 
 
 def main(argv=None):
@@ -93,8 +93,8 @@ def main(argv=None):
 
         print(f"\n  Generated {len(sub_slabs)} sub-slabs for {miller}")
         for cut_i, slab in enumerate(sub_slabs):
-            bp = slab.info.get("cut_bottom_plane", "?")
-            tp = slab.info.get("cut_top_plane", "?")
+            bp = plane_name_for_filename(slab.info.get("cut_bottom_plane", "?"))
+            tp = plane_name_for_filename(slab.info.get("cut_top_plane", "?"))
             fname = (
                 f"{stem}_hkl_{hkl_str}_between_{bp}_{tp}_cut_{cut_i}.{ext}"
             )

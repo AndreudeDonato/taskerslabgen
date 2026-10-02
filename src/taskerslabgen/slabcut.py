@@ -7,20 +7,27 @@ from scipy.optimize import linear_sum_assignment
 
 from .core import (
     _INDEX_KEY,
+    _SAME_PLANE,
+    SELECTIONS,
     _charges_to_list,
     _finalize_slab,
     _frac_distance,
     _make_plane,
     _plane_translations,
+    _plane_waves,
     _planes_from_bulk,
     _shift_matches,
+    _slab_plane_names,
+    _undeformed,
+    _wave_images,
+    _wave_similarity,
     _supercell_matrix,
     _tile_plane,
     identify_planes,
     compute_reduced_counts,
     apply_vacuum_to_slab,
-    assign_plane_names,
     is_stoichiometric_sequence,
+    plane_name_for_filename,
     plane_name_matches,
 )
 
@@ -44,6 +51,7 @@ def cutslab(
     bulk_atoms=None,
     miller=None,
     deform_tol=0.3,
+    selection="relative",
 ):
     """
     Cut an existing slab into thinner sub-slabs.
@@ -97,13 +105,15 @@ def cutslab(
     cut_at : str or list[str]
         Controls where cuts are placed:
 
-        - ``"termination"`` (default): cut only at planes with the labels
-          of the thick slab's top/bottom planes (a deformed, primed
-          surface plane such as ``O4'`` stands for ``O4``).
+        - ``"termination"`` (default): every sub-slab has the input slab's
+          bottom plane at the bottom and its top plane at the top, as
+          *selection* says (a deformed surface plane such as ``O4~`` stands
+          for ``O4``).
         - ``"all"``: cut at any plane that gives a stoichiometric,
           charge-neutral, zero-dipole sub-slab.
-        - A plane label (e.g. ``"O4"``, or a genslab ``plane_type``) or a
-          list of labels: cut only at planes with those labels.
+        - A plane label (e.g. ``"O4'"``) or a list of labels: both ends of
+          every sub-slab are planes with one of those labels.  A genslab
+          termination is ``[plane_type, top_plane_type]``.
     cuts : str
         ``"right"`` (default) -- fix bottom plane, peel from the top.
         ``"left"`` -- fix top plane, peel from the bottom.
@@ -118,15 +128,32 @@ def cutslab(
         slab's interior, from single atoms if relaxation split every plane),
         so relaxed surface planes that rumple or shift stay whole, and each
         plane is labelled by its bulk plane: the bulk label (e.g. ``O4``) if
-        it matches within *deform_tol*, a primed label (``O4'``) if it is
-        more deformed or has a different composition.  Without it, planes
-        come from z-clustering and are labelled from the slab alone.
+        it matches within *deform_tol*, with ``~`` (``O4~``) if it is more
+        deformed or has a different composition.  Without it, planes come
+        from z-clustering and are labelled from the slab itself: the repeat
+        unit is learned from the slab's interior, so copies one repeat apart
+        share a label as in the bulk (with genslab's ``stacking_labels``
+        from ``slab.info``, the names are genslab's).
     miller : tuple of int or None
         Miller index of the slab, needed with *bulk_atoms*; defaults to
         ``input_structure.info["miller"]`` (set by genslab).
     deform_tol : float
         RMSD (angstrom, after the best rigid shift) up to which a slab
         plane still counts as its bulk plane (default 0.3).
+    selection : {"relative", "absolute", "shape"}
+        How plane labels select cut planes.  A label is the plane's
+        arrangement plus its phase, i.e. how it is shifted and rotated in
+        the crystal: ``O``, ``O'``, ``O''`` are one arrangement in three
+        phases.
+
+        - ``"relative"`` (default): only that plane, i.e. the same arrangement in
+          the same phase relative to the crystal.  Copies one lattice repeat
+          apart count, even where the oblique stacking puts them sideways
+          in the slab.
+        - ``"absolute"``: also exactly over the input slab's own surface
+          plane (bottom ends against its bottom plane, top ends against its
+          top plane), e.g. only every second thickness of rutile (110).
+        - ``"shape"``: the arrangement in any phase.
 
     Returns
     -------
@@ -136,7 +163,12 @@ def cutslab(
         (:class:`SlabValidationError` otherwise).
         Each ``Atoms`` object has metadata in ``.info``:
         ``cut_bottom_plane``, ``cut_top_plane``, ``cut_bottom_idx``,
-        ``cut_top_idx``, ``cut_n_planes``.
+        ``cut_top_idx``, ``cut_n_planes``, ``cut_phase_overlap`` (overlap,
+        0-1, of the top plane with the bottom plane as they are: 1 when the
+        top lies exactly over the bottom, a---a; about 0 when shifted,
+        a---a', or a different arrangement) and, when the repeat unit is
+        known, ``stacking_labels`` (labels of one repeat unit from its
+        bottom plane).
     """
     from .plotting import plot_unitcell_atoms
 
@@ -150,6 +182,8 @@ def cutslab(
         raise ValueError(
             f"Unknown cuts mode: {cuts!r}. Must be 'right', 'left', or 'all'."
         )
+    if selection not in SELECTIONS:
+        raise ValueError(f"selection must be one of {SELECTIONS}, got {selection!r}")
 
     # ---- Parse input ----
     if hasattr(input_structure, "positions"):
@@ -206,6 +240,7 @@ def cutslab(
             atoms, charges_list, bulk_atoms, tuple(input_miller),
             plane_tol=plane_tol, charge_tol=charge_tol, deform_tol=deform_tol,
         )
+        repeat = None
         if recon is not None:
             planes_sorted, plane_names = _merge_surface_planes(
                 planes_sorted, plane_names, recon["recon_counts"], atoms_z_matrix, charge_tol
@@ -219,7 +254,17 @@ def cutslab(
             planes_sorted, _ = _merge_surface_planes(
                 planes_sorted, None, recon["recon_counts"], atoms_z_matrix, charge_tol
             )
-        plane_names, _ = assign_plane_names(planes_sorted, atoms=atoms, axis=axis)
+        plane_names, repeat = _slab_plane_names(
+            atoms, planes_sorted, axis, atoms.info.get("stacking_labels")
+        )
+        if repeat is None and len(planes_sorted) > 2 and cut_at != "all":
+            warnings.warn(
+                "cutslab could not find a repeat unit inside this slab (too thin or too "
+                "distorted), so planes are named by their phase in this slab alone: "
+                "copies one repeat unit apart may get different names.  Pass bulk_atoms= "
+                "to name planes by the bulk.",
+                stacklevel=2,
+            )
         reduced_counts = compute_reduced_counts(atoms_z_matrix)
     planes = planes_sorted
     n = len(planes_sorted)
@@ -240,6 +285,7 @@ def cutslab(
     # thick slab's outer planes if they are already reconstructed, and every
     # interior copy of the cut plane, which gets the pattern when a cut
     # exposes it.
+    bulk_names = list(plane_names)
     recon_label = None
     deletions = {}
     if recon is not None:
@@ -268,45 +314,75 @@ def cutslab(
     # A sub-slab is a contiguous run of planes [bottom, top] of the input
     # slab; it never wraps through the vacuum.
     known_names = set(plane_names) | ({recon_label} if recon_eligible else set())
+
+    def matching(query):
+        return {name for name in known_names if plane_name_matches(query, name, selection)}
+
     if cut_at == "all":
-        valid_boundary_names = set(plane_names)
+        bottom_names = top_names = set(plane_names)
     elif cut_at == "termination":
-        # A deformed (primed) surface plane stands for its bulk plane type.
-        ends = {plane_names[0].rstrip("'"), plane_names[-1].rstrip("'")}
-        valid_boundary_names = {name for name in plane_names if name.rstrip("'") in ends}
+        # The bottom of every sub-slab is the input slab's bottom plane, its
+        # top the input slab's top plane (a deformed surface plane, e.g.
+        # "O4~", stands for its bulk plane).
+        bottom_names = matching(_undeformed(plane_names[0]))
+        top_names = matching(_undeformed(plane_names[-1]))
     elif isinstance(cut_at, str):
-        matched = {name for name in known_names if plane_name_matches(cut_at, name)}
+        matched = matching(cut_at)
         if not matched:
             raise ValueError(
-                f"Plane name {cut_at!r} not found. "
+                f"Plane name {cut_at!r} not found (selection={selection!r}). "
                 f"Available: {sorted(set(plane_names))}.{label_hint}"
             )
-        valid_boundary_names = matched
+        bottom_names = top_names = matched
     elif isinstance(cut_at, list):
-        valid_boundary_names = set()
-        unknown = []
+        matched, unknown = set(), []
         for query in cut_at:
-            matched = {name for name in known_names if plane_name_matches(query, name)}
-            if not matched:
+            found = matching(query)
+            if not found:
                 unknown.append(query)
-            else:
-                valid_boundary_names |= matched
+            matched |= found
         if unknown:
             raise ValueError(
-                f"Unknown plane names: {unknown}. "
+                f"Unknown plane names: {unknown} (selection={selection!r}). "
                 f"Available: {sorted(set(plane_names))}.{label_hint}"
             )
+        bottom_names = top_names = matched
     else:
         raise ValueError(
             f"Invalid cut_at={cut_at!r}. Must be 'all', 'termination', "
             f"a plane name, or list of plane names."
         )
-    # Copies of the cut plane become surfaces only if its reconstructed
-    # label is among the requested ones.
-    exposable = recon_eligible if recon_label in valid_boundary_names else set()
-    boundary_indices = sorted(
-        {i for i in range(n) if plane_names[i] in valid_boundary_names} | exposable
-    )
+    valid_boundary_names = bottom_names | top_names
+
+    def boundary(names):
+        # Copies of the cut plane become surfaces only if its reconstructed
+        # label is among the requested ones.
+        exposable = recon_eligible if recon_label in names else set()
+        return sorted({i for i in range(n) if plane_names[i] in names} | exposable)
+
+    bottom_indices, top_indices = boundary(bottom_names), boundary(top_names)
+    boundary_indices = sorted(set(bottom_indices) | set(top_indices))
+
+    # ---- Absolute phase: surfaces exactly over the input slab's ----
+    waves, cell2d_waves = _plane_waves(atoms, planes_sorted, axis)
+    for i, wave in enumerate(waves):
+        keep = [k for k, idx in enumerate(planes_sorted[i]["indices"])
+                if idx not in deletions.get(i, set())]
+        waves[i] = wave[keep]
+        waves[i][:, 3] = 0.0  # compare in-plane phases only
+    wave_images = _wave_images(cell2d_waves)
+
+    def in_phase(i, j):
+        """Normalised overlap of the in-plane waves of planes i and j as they are."""
+        a, b = waves[i], waves[j]
+        if len(a) != len(b) or sorted(a[:, 0]) != sorted(b[:, 0]):
+            return 0.0
+        return _wave_similarity(a, b, cell2d_waves, images=wave_images)
+
+    if selection == "absolute":
+        bottom_indices = [i for i in bottom_indices if in_phase(i, 0) >= _SAME_PLANE]
+        top_indices = [i for i in top_indices if in_phase(i, n - 1) >= _SAME_PLANE]
+        boundary_indices = sorted(set(bottom_indices) | set(top_indices))
 
     # ---- Evaluate every candidate cut on the actual atoms ----
     q_all = np.asarray(charges_list, dtype=float)
@@ -329,8 +405,8 @@ def cutslab(
     deleted_sums = {p: aggregate(d) for p, d in deletions.items()}
 
     valid_cuts = []
-    for bi in boundary_indices:
-        for ti in boundary_indices:
+    for bi in bottom_indices:
+        for ti in top_indices:
             if ti < bi:
                 continue
             sums = prefix[ti + 1] - prefix[bi]
@@ -377,7 +453,7 @@ def cutslab(
 
     if verbose:
         print(f"\nPlane stacking: {' '.join(plane_names)}")
-        print(f"Valid boundary types: {sorted(valid_boundary_names)}")
+        print(f"Valid boundary types (selection={selection!r}): {sorted(valid_boundary_names)}")
         if recon_eligible:
             print(f"Reconstruction-eligible planes: {sorted(recon_eligible)}")
         print(f"\nValid cuts (mode={cuts!r}): {len(valid_cuts)}")
@@ -395,8 +471,8 @@ def cutslab(
     if (
         reconstruction is None and cut_at == "termination" and n > 2
         and [(c["bottom_plane"], c["top_plane"]) for c in valid_cuts] == [(0, n - 1)]
-        and not {plane_names[0].rstrip("'"), plane_names[-1].rstrip("'")}
-        & {name.rstrip("'") for name in plane_names[1:-1]}
+        and not {_undeformed(plane_names[0]), _undeformed(plane_names[-1])}
+        & {_undeformed(name) for name in plane_names[1:-1]}
     ):
         warnings.warn(
             f"cutslab returns only the input slab: its surface planes "
@@ -411,6 +487,13 @@ def cutslab(
             " If the slab is polar (Tasker III), build it with "
             "generate_slabs_for_miller and pass reconstruction=term['reconstruction']."
         )
+        if cut_at not in ("all", "termination") and selection != "shape":
+            polar_hint += (
+                f" This slab's surface planes are {plane_names[0]} (bottom) and "
+                f"{plane_names[-1]} (top): a sub-slab needs both ends selected, e.g. "
+                f"cut_at=[{_undeformed(plane_names[0])!r}, {_undeformed(plane_names[-1])!r}], "
+                "or selection='shape' to accept every phase of an arrangement."
+            )
         raise ValueError(
             "No stoichiometric, charge-neutral, zero-dipole cuts found "
             f"matching cut_at={cut_at!r} (charge_tol={charge_tol}, "
@@ -442,6 +525,11 @@ def cutslab(
         slab.info["cut_bottom_idx"] = bi
         slab.info["cut_top_idx"] = ti
         slab.info["cut_n_planes"] = cut["n_planes"]
+        # 1 when the top plane lies exactly over the bottom one (a---a),
+        # 0 when shifted or a different arrangement (a---a', a---b).
+        slab.info["cut_phase_overlap"] = round(float(in_phase(bi, ti)), 4)
+        if repeat is not None:
+            slab.info["stacking_labels"] = _repeat_labels(bulk_names, bi, repeat[0])
         _finalize_slab(slab, **validation)
 
         if plot:
@@ -453,7 +541,7 @@ def cutslab(
             ) if ti < n - 1 else 0.5 * (z_s[ti] + L)
             plot_path = (
                 f"{plot_out_dir}/{stem}_hkl_{miller_str}"
-                f"_cut_{cut_idx}_{bp}_{tp}.png"
+                f"_cut_{cut_idx}_{plane_name_for_filename(bp)}_{plane_name_for_filename(tp)}.png"
             )
             plot_unitcell_atoms(
                 atoms_z_matrix, L, plot_miller,
@@ -475,6 +563,22 @@ def cutslab(
 
 
 # ---- Private helpers -------------------------------------------------------
+
+
+def _repeat_labels(names, bottom, per):
+    """
+    Bulk labels of one repeat unit of planes starting at plane *bottom*
+    (``stacking_labels`` of a sub-slab).  Each is taken from an undeformed
+    copy of that plane anywhere in the input slab (copies are *per* planes
+    apart), so sub-slabs thinner than a repeat unit get them too.
+    """
+    labels = []
+    for k in range(per):
+        copies = [names[i] for i in range(bottom + k, len(names), per)]
+        copies += [names[i] for i in range(bottom + k - per, -1, -per)]
+        clean = [c for c in copies if not c.endswith("~")]
+        labels.append(_undeformed((clean or copies)[0]))
+    return labels
 
 
 def _put_vacuum_at_boundary(atoms, axis):

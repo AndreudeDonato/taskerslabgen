@@ -12,7 +12,7 @@ from pathlib import Path
 
 from ase.io import read, write
 
-from taskerslabgen import generate_slabs_for_miller
+from taskerslabgen import generate_slabs_for_miller, plane_name_for_filename
 
 
 def main(argv=None):
@@ -78,7 +78,7 @@ def main(argv=None):
         hkl = "".join(str(i) for i in miller)
         for tid, info in terminations.items():
             slab = info["atoms"][0]
-            fname = f"{stem}_hkl_{hkl}_term_{tid}_{info['plane_type']}.cif"
+            fname = f"{stem}_hkl_{hkl}_term_{tid}_{plane_name_for_filename(info['plane_type'])}.cif"
             write((output_dir / fname).as_posix(), slab)
             print(
                 f"    ID {tid}: {len(slab)} atoms, Tasker {info['tasker_type']}  "

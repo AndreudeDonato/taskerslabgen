@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.5.0 (unreleased)
+
+Plane labels now carry the stacking: a label is the plane's arrangement plus
+its phase (how it is shifted and rotated in the crystal).  Labels, and the
+cutslab thickness series selected by them, change.
+
+### Plane phases
+- **Planes as waves.** Planes are compared by the normalised overlap of
+  smooth periodic densities (one Gaussian of 0.5 Å per atom, image sums
+  converged, no cutoffs) instead of matching atoms within a tolerance.  Same
+  arrangement: some rotation of the in-plane lattice and some shift make the
+  waves overlap; same phase: they overlap as they are.
+- **Labels** are ``composition[-letter][phase][-recon][~]``: ``O``, ``O'``,
+  ``O''``, ``O'''``, ``O'4`` are one arrangement in different phases; letters
+  (``IrO2-a``) are reserved for different arrangements.  Rutile (001) planes
+  are ``IrO2`` / ``IrO2'`` (one arrangement rotated by 90°), formerly
+  ``IrO2-a`` / ``IrO2-b``.  Deformed planes (``bulk_atoms=``) are marked
+  ``O4~`` instead of ``O4'``.
+- **Relative phase.**  Copies of a plane one lattice repeat apart share a
+  label: genslab finds the lattice repeat of the bulk cell (fewer planes than
+  the cell for centred cells or supercell bulks), and cutslab learns it from
+  the slab's most bulk-like region by comparing each plane together with its
+  neighbours, or takes genslab's ``slab.info["stacking_labels"]``.
+- **selection=** in ``generate_slabs_for_miller`` (``prefer_plane``) and
+  ``cutslab`` (``cut_at``): ``"relative"`` (default, only that plane),
+  ``"absolute"`` (cutslab: also exactly over the input slab's surface plane)
+  or ``"shape"`` (the arrangement in any phase).
+- **cut_at="termination"** keeps the input's bottom plane at the bottom and
+  its top plane at the top.  This fixes mixed terminations: with a loose
+  ``dipole_tol`` (as relaxed slabs need), anatase (101) series contained the
+  other termination (Ti 0.15 Å under the surface O instead of 0.73 Å), and
+  PbO2 (111) relaxed slabs gave cuts ending on the other O phase.  Series
+  that alternated two stackings now keep one, e.g. half as many sub-slabs
+  for rutile (100) and (001); ``selection="shape"`` gives the 0.4 series.
+- Sub-slabs report ``cut_phase_overlap`` (1 when the top plane lies exactly
+  over the bottom one) and ``stacking_labels``.
+- New ``plane_name_for_filename`` (``O4'`` → ``O4p``), used for plot names;
+  ``plane_name_matches(query, name, selection)``; ``assign_plane_names``
+  takes ``same_plane=`` (overlap) instead of ``xy_tol=``.  A ``cut_at`` that
+  selects no slab names the slab's two surface planes in the error.
+- genslab builds the same structures as 0.4.0 (checked on 58 facets); only
+  labels, and the order of equally ranked terminations, change.
+
+### Fixes
+- Slabs no longer carry the bulk CIF's ``spacegroup``, ``unit_cell`` and
+  ``occupancy`` info: occupancies are keyed by tags, so the ASE GUI drew
+  slab atoms with the wrong species.
+
+### Examples
+- New ``example/plane_phases.py``: the three cases (relative phase, absolute
+  phase, rotation) with ASE GUI views; tutorial section on plane phases.
+- ``batch_unitcell_slabs.py`` has ``SELECTION``.
+
 ## 0.4.0 — 2026-10-02
 
 Bug-fix pass from a review of 0.3.1.  Several

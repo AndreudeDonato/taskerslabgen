@@ -17,8 +17,9 @@ The library:
 - performs Tasker III surface reconstruction (symmetric deletion; exact slab
   dipole from the atoms that remain; ranking by dangling bonds on the true bulk
   lattice, then a Coulomb-energy distribution score that spreads like charges apart)
-- plane labels from composition (`O4`, `Ce2O4`, `IrO2-a`) that are identical in the bulk,
-  in cut slabs and for any bulk origin
+- plane labels from arrangement and phase (`O`, `O'`, `IrO2-a`): planes are compared
+  as smooth periodic densities, so shifted or rotated copies of a plane (different
+  stackings) get different labels, while copies one repeat unit apart share one
 - cuts thick slabs into thinner sub-slabs preserving termination
 - per-cut plots with unique Miller-index-aware filenames
 - checks every returned slab: stoichiometric, neutral, non-polar
@@ -76,6 +77,12 @@ python example/NaAlSi3O8_albite.py
 python example/x2supercell_CeO2_fluorite.py
 ```
 
+### Plane phases (shape / relative / absolute selection)
+
+```bash
+python example/plane_phases.py --view
+```
+
 ### Cutting a relaxed slab (`cutslab(bulk_atoms=...)`)
 
 ```bash
@@ -91,6 +98,43 @@ python example/batch_unitcell_slabs.py --quick
 
 See [`example/TUTORIAL.md`](example/TUTORIAL.md) for a short narrative walkthrough
 and [`example/BATCH_SLABS.md`](example/BATCH_SLABS.md) for batch setup.
+
+---
+
+## Plane labels: arrangement and phase
+
+Every plane is treated as a wave: a smooth periodic density with one Gaussian
+per atom (no cutoffs).  Two planes have the same **arrangement** when one wave
+overlaps the other after some in-plane shift or rotation, and the same
+**phase** when they overlap as they are.  A label is both:
+
+| Label | Meaning |
+|---|---|
+| `O4`, `Ce2O4` | composition per surface cell (metals first) |
+| `O`, `O'`, `O''`, `O'''`, `O'4` | one arrangement in different phases: shifted or rotated copies of the same plane, i.e. different stackings |
+| `IrO2-a`, `IrO2-b` | different arrangements of one composition (no shift or rotation maps one onto the other) |
+| `O4-recon` | Tasker III reconstructed plane |
+| `O4~` | relaxed plane deformed beyond `deform_tol` (with `bulk_atoms=`) |
+
+Phases are relative to the crystal: a plane and its copy one repeat unit
+higher share a label, even where the tilted repeat vector puts the copy
+sideways in the slab.  Phases are numbered bottom to top in the bulk cell
+(rotated phases by a fingerprint that does not depend on the bulk origin).
+
+`prefer_plane` (genslab) and `cut_at` (cutslab) select planes by label, as
+`selection` says:
+
+| `selection` | `"O'"` selects | Example |
+|---|---|---|
+| `"relative"` (default) | only `O'`: same arrangement, same phase in the crystal | anatase (101): keeps the termination; the other O₂ phases (Ti 0.15 Å under the surface instead of 0.73 Å) are excluded |
+| `"absolute"` (cutslab) | also exactly over the input slab's own surface plane | rutile (110): only every second thickness, where the top bridging-O row sits over the bottom one as in the input |
+| `"shape"` | `O`, `O'`, `O''`, ...: the arrangement in any phase | rutile (100): adds the half repeat units ending on another O phase |
+
+Every sub-slab reports `cut_phase_overlap` (1 when its top plane lies exactly
+over its bottom plane, a---a; about 0 when shifted, a---a').  A genslab
+termination is `[plane_type, top_plane_type]`; pass both to `cut_at`.  For
+file names use `plane_name_for_filename("O4'") == "O4p"`.
+`example/plane_phases.py` walks through the three cases with ASE GUI views.
 
 ---
 
@@ -139,8 +183,8 @@ When working with relaxed supercells, the recommended workflow is:
 **Relaxed slabs.** Pass the bulk: `cutslab(relaxed, Q, bulk_atoms=bulk,
 dipole_tol=0.3)`.  Planes are then matched to the bulk planes, so rumpled or
 shifted surface planes stay whole and keep their bulk label; a surface that
-deviates more than `deform_tol` (or changed composition) is labelled with a
-prime (`O4'`) and still counts as an `O4` termination.  Stoichiometry, charge
+deviates more than `deform_tol` (or changed composition) is labelled with
+`~` (`O4~`) and still counts as an `O4` termination.  Stoichiometry, charge
 and dipole of every cut are evaluated on the actual relaxed atoms, so a cut
 that keeps one relaxed surface can be rejected as polar; relaxed slabs
 usually need `dipole_tol≈0.3`.
@@ -181,6 +225,7 @@ result = generate_slabs_for_miller(
     surface_supercell=None,
     max_masks=200000,
     dipole_tol_max=None,
+    selection="relative",
 )
 ```
 
@@ -212,6 +257,7 @@ classifies each surface as Tasker I/II (zero dipole) or Tasker III
 | `max_masks` | `int` | `200000` | Largest number of Tasker III deletion patterns to enumerate (before symmetry reduction); above it a `ValueError` is raised instead of running for hours. |
 | `surface_supercell` | `(n1, n2)` or `None` | `None` | Repeat the surface cell in-plane before cutting (e.g. a Tasker III plane with an odd excess per surface).  Keeps the facet, unlike `bulk_atoms * (2, 2, 1)`.  Labels then count supercell atoms. |
 | `dipole_tol_max` | `float` or `None` | `None` | Opt-in fallback for slightly distorted (e.g. relaxed) bulks: when no slab of a facet is non-polar within `dipole_tol`, rebuild it with the smallest tolerance that works, up to this cap, and warn.  Facets that succeed are unaffected; the tolerance used is returned as `info["dipole_tol"]` (pass it to `cutslab`).  `None` raises `PolarSurfaceError`. |
+| `selection` | `str` | `"relative"` | How a plane label in `prefer_plane` selects: `"relative"` only that plane (arrangement and phase), `"shape"` the arrangement in any phase. See [Plane labels](#plane-labels-arrangement-and-phase). |
 
 **`bond_distances` format**
 
@@ -244,7 +290,7 @@ bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
 | `int` (e.g. `0`) | Keep only the termination with that numeric ID. |
 | `list[int]` (e.g. `[0, 2]`) | Keep terminations with those IDs. |
 | `str` element (e.g. `"O"`) | Keep terminations whose cut plane consists **exclusively** of that element. `"O"` matches pure-O planes but NOT mixed CeO planes. |
-| `str` plane label (e.g. `"O4"`) | Keep terminations whose plane label matches. `"IrO2"` matches `IrO2-a` / `IrO2-b` / `IrO2-a-recon`; `"IrO2-a"` matches `IrO2-a` and `IrO2-a-recon`. |
+| `str` plane label (e.g. `"O4'"`) | Keep terminations whose bottom plane label matches, as `selection` says: only `O4'` (and `O4'-recon`) with `"relative"`, every phase `O4`, `O4'`, ... with `"shape"`. See [Plane labels](#plane-labels-arrangement-and-phase). |
 | `list[str]` (e.g. `["O", "Ce"]`) | Keep terminations matching **any** entry. Each element match is exclusive — `["O", "Ce"]` keeps pure-O OR pure-Ce planes but not mixed CeO. |
 
 **`candidates` options**
@@ -298,6 +344,7 @@ sub_slabs = cutslab(
     bulk_atoms=None,
     miller=None,
     deform_tol=0.3,
+    selection="relative",
 )
 ```
 
@@ -323,18 +370,19 @@ termination.
 | `cut_at` | `str` or `list[str]` | `"termination"` | Where to place cuts (see below). |
 | `cuts` | `str` | `"right"` | Direction of cuts (see below). |
 | `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of every sub-slab. |
-| `bulk_atoms` | `Atoms` or `None` | `None` | Bulk the slab was built from: its unit cell or a supercell of it (e.g. a relaxed bulk calculation), up to a few per cent of strain. Each atom is assigned to the nearest bulk plane (registry learned from the slab interior), so relaxed surface planes that rumple or shift stay whole; each plane gets its bulk label (`O4`), or a primed label (`O4'`) if it deviates by more than `deform_tol` or its composition changed. Recommended for relaxed slabs. |
+| `bulk_atoms` | `Atoms` or `None` | `None` | Bulk the slab was built from: its unit cell or a supercell of it (e.g. a relaxed bulk calculation), up to a few per cent of strain. Each atom is assigned to the nearest bulk plane (registry learned from the slab interior), so relaxed surface planes that rumple or shift stay whole; each plane gets its bulk label (`O4`), or `O4~` if it deviates by more than `deform_tol` or its composition changed. Recommended for relaxed slabs. |
 | `miller` | `tuple` or `None` | `None` | Miller index of the slab, needed with `bulk_atoms`; defaults to `slab.info["miller"]` (set by genslab). |
 | `deform_tol` | `float` | `0.3` | RMSD (Å, after the best rigid shift) up to which a slab plane still counts as its bulk plane. |
+| `selection` | `str` | `"relative"` | How plane labels select cut planes: `"relative"` (that plane, any repeat unit), `"absolute"` (also exactly over the input slab's surface plane), `"shape"` (the arrangement in any phase). See [Plane labels](#plane-labels-arrangement-and-phase). |
 
 **`cut_at` options**
 
 | Value | Behaviour |
 |---|---|
-| `"termination"` | Cut only at planes with the labels of the thick slab's top/bottom planes. |
+| `"termination"` | Every sub-slab has the input's bottom plane at the bottom and its top plane at the top (matched as `selection` says). |
 | `"all"` | Cut at any plane that gives a stoichiometric, charge-neutral, zero-dipole sub-slab (contiguous runs of planes only, never across the vacuum). Automatically forced to `"termination"` when `reconstruction` is provided. |
-| `str` (e.g. `"O4"`, or genslab's `plane_type`) | Cut at planes whose label matches. `"IrO2"` selects every `IrO2-*` variant; `"IrO2-a"` selects that variant (and `IrO2-a-recon`). |
-| `list[str]` (e.g. `["O4", "Ce4"]`) | Cut at planes matching any of the listed labels. |
+| `str` (e.g. `"O4'"`) | Both ends of every sub-slab are planes with this label (as `selection` says). |
+| `list[str]` (e.g. genslab's `[plane_type, top_plane_type]`) | Both ends are planes matching any of the listed labels. |
 
 **`cuts` options**
 
@@ -397,29 +445,33 @@ Returns an `(N, N)` integer `ndarray` (symmetric bond counts).
 ```python
 from taskerslabgen.advanced import assign_plane_names
 
-names, name_map = assign_plane_names(planes_sorted, atoms=None, axis=2, xy_tol=0.5)
+names, name_map = assign_plane_names(planes_sorted, atoms=None, axis=2, same_plane=0.9)
 ```
 
-Label planes by composition (e.g. ``O4``, ``Ce4``, ``Ir2O2``).  A label
-depends only on the plane itself, so the same plane gets the same label in the
-bulk cell (genslab), in slabs cut from it (cutslab) and for any bulk origin.
+Label planes by arrangement and phase (see
+[Plane labels](#plane-labels-arrangement-and-phase)): ``O4``, ``O4'``,
+``IrO2-a``.  Planes are compared by the normalised overlap of their smooth
+densities (Gaussian width 0.5 Å, converged image sums): same arrangement if
+some lattice rotation and shift makes them overlap, same phase if they overlap
+as they are.  Phases are numbered in the order of *planes_sorted*; genslab
+and cutslab call it on one bulk repeat unit so that copies a lattice repeat
+apart share a label.
 
-- Elements are written metals first, then non-metals, each alphabetically
-  (ASE's `"metal"` formula format), e.g. `TiO2`, `SrTiO3`, `Ir2O2`.
-- **Variant letter** — when one composition occurs in several geometries not
-  related by an in-plane translation, a letter is appended: IrO₂ (001)
-  diagonal vs anti-diagonal planes are ``IrO2-a`` / ``IrO2-b``.  Letters
-  follow a translation-invariant key of the geometry, not stacking order.
-- Reconstructed planes get ``-recon`` (e.g. ``O4-recon``), added by
-  genslab/cutslab; with `cutslab(bulk_atoms=...)`, planes that deviate from
-  their bulk plane get a prime (``O4'``).
-
-Helpers: `plane_name_base("IrO2-a-recon") == "IrO2"`;
-`plane_name_matches("IrO2", "IrO2-a")` is True.  Use these semantics in
-`prefer_plane` / `cut_at="IrO2"`.
+Helpers: `plane_name_base("IrO2-a'-recon") == "IrO2"`;
+`plane_name_matches(query, name, selection)` implements `prefer_plane` /
+`cut_at`; `plane_name_for_filename("O4'") == "O4p"`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `planes_sorted` | `list[dict]` | *required* | Planes in stacking order. |
+| `atoms` | `Atoms` or `None` | `None` | Provide to compare geometries (otherwise composition only). |
+| `axis` | `int` | `2` | Stacking axis. |
+| `same_plane` | `float` | `0.9` | Normalised overlap (0-1) from which two planes count as the same. |
+
+Returns `(names, name_map)` where `names[i]` is the label of
+`planes_sorted[i]` and `name_map` is `{label: counts_dict}`.
+
+---|---|---|---|
 | `planes_sorted` | `list[dict]` | *required* | Planes sorted by z-centre. |
 | `atoms` | `Atoms` or `None` | `None` | Provide to tell geometric variants apart (otherwise composition only). |
 | `axis` | `int` | `2` | Stacking axis. |

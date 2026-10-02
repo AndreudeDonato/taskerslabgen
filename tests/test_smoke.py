@@ -282,9 +282,10 @@ def test_iro2_001_plane_variants(iro2_bulk):
     )
     names, _ = assign_plane_names(planes, atoms=surf)
 
-    # Mirror-related IrO2 planes: same composition, two geometric variants.
+    # The two IrO2 planes are one arrangement rotated by 90 degrees: two
+    # phases of the same plane, not two arrangements.
     assert len(names) == 2
-    assert sorted(names) == ["IrO2-a", "IrO2-b"]
+    assert sorted(names) == ["IrO2", "IrO2'"]
     assert plane_name_base(names[0]) == "IrO2"
     assert plane_name_base(names[1]) == "IrO2"
 
@@ -321,13 +322,14 @@ def test_plane_name_matches_semantics():
     assert plane_name_base("IrO2-a-recon") == "IrO2"
     assert plane_name_base("O4-recon") == "O4"
     assert plane_name_base("Ce2O4") == "Ce2O4"
+    assert plane_name_base("IrO2'") == "IrO2"
 
-    assert plane_name_matches("IrO2", "IrO2-a")
-    assert plane_name_matches("IrO2", "IrO2-b")
-    assert plane_name_matches("IrO2", "IrO2-a-recon")
+    assert plane_name_matches("IrO2", "IrO2-a", "shape")
+    assert plane_name_matches("IrO2", "IrO2'", "shape")
     assert plane_name_matches("IrO2-a", "IrO2-a-recon")
     assert plane_name_matches("O4", "O4-recon")
     assert plane_name_matches("O4-recon", "O4-recon")
+    assert not plane_name_matches("IrO2", "IrO2'")
     assert not plane_name_matches("IrO2-a", "IrO2-b")
     assert not plane_name_matches("O4", "O2")
 

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ase.io import read, write
 
-from taskerslabgen import generate_slabs_for_miller
+from taskerslabgen import generate_slabs_for_miller, plane_name_for_filename
 
 
 def main(argv=None):
@@ -76,7 +76,7 @@ def main(argv=None):
         for tid, info in terminations.items():
             slab = info["atoms"][0]
             slabs.append(slab)
-            fname = f"CeO2_hkl_001_term_{tid}_{info['plane_type']}.cif"
+            fname = f"CeO2_hkl_001_term_{tid}_{plane_name_for_filename(info['plane_type'])}.cif"
             out_path = output_dir / fname
             write(out_path.as_posix(), slab)
             cand = info["candidate"]

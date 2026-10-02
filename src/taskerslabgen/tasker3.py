@@ -1,5 +1,5 @@
 import warnings
-from itertools import combinations, product
+from itertools import combinations
 from math import comb
 
 import numpy as np
@@ -10,6 +10,8 @@ from ase.neighborlist import neighbor_list
 
 from .core import (
     PolarSurfaceError,
+    _gauss_reduce_basis,
+    _lattice_point_ops,
     _formula_label,
     apply_vacuum_to_slab,
     build_surface,
@@ -206,43 +208,6 @@ def _compute_plane_excess(plane_counts, reduced_counts):
             return excess, j
 
     return None, None
-
-
-def _gauss_reduce_basis(cell2d):
-    """Integer unimodular ``P`` such that ``P @ cell2d`` is a Lagrange-Gauss reduced basis."""
-    P = np.eye(2, dtype=int)
-    B = np.array(cell2d, dtype=float)
-    for _ in range(100):
-        if np.dot(B[1], B[1]) < np.dot(B[0], B[0]):
-            B = B[::-1].copy()
-            P = P[::-1].copy()
-        mu = int(np.round(np.dot(B[0], B[1]) / np.dot(B[0], B[0])))
-        if mu == 0:
-            break
-        B[1] -= mu * B[0]
-        P[1] -= mu * P[0]
-    return P
-
-
-def _lattice_point_ops(cell2d, tol=1e-3):
-    """
-    Point-group operations of the 2D lattice with basis rows *cell2d*, as
-    integer matrices ``W`` with ``W @ cell2d`` the rotated basis: 8 for a
-    square lattice, 12 hexagonal, 4 (centred) rectangular, 2 oblique.
-    """
-    P = _gauss_reduce_basis(cell2d)
-    P_inv = np.round(np.linalg.inv(P)).astype(int)
-    reduced = P @ np.asarray(cell2d, dtype=float)
-    G = reduced @ reduced.T
-    atol = tol * float(np.max(np.abs(G)))
-    ops = []
-    for entries in product((-1, 0, 1), repeat=4):
-        W = np.array(entries, dtype=int).reshape(2, 2)
-        if abs(round(np.linalg.det(W))) != 1:
-            continue
-        if np.allclose(W @ G @ W.T, G, atol=atol):
-            ops.append(P_inv @ W @ P)
-    return ops
 
 
 def _stacking_symmetry(numbers, positions, cell, tol=0.1):

@@ -11,7 +11,8 @@ Workflow
 
 Also here: :func:`validate_slab` / :class:`SlabValidationError`,
 :class:`PolarSurfaceError`, the label
-helpers :func:`plane_name_matches` / :func:`plane_name_base`, and
+helpers :func:`plane_name_matches` / :func:`plane_name_base` /
+:func:`plane_name_for_filename`, and
 :func:`parse_hirshfeld_fhi_aims`.  Lower-level steps (plane clustering, cut
 enumeration, bonding, Tasker III candidates, builders) are in
 :mod:`taskerslabgen.advanced`.
@@ -25,6 +26,7 @@ from .core import (
     PolarSurfaceError,
     SlabValidationError,
     plane_name_base,
+    plane_name_for_filename,
     plane_name_matches,
     validate_slab,
 )
@@ -41,6 +43,7 @@ __all__ = [
     "PolarSurfaceError",
     "plane_name_matches",
     "plane_name_base",
+    "plane_name_for_filename",
     "parse_hirshfeld_fhi_aims",
 ]
 

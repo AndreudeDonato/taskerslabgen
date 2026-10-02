@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taskerslabgen"
-version = "0.4.0"
+version = "0.5.0.dev0"
 description = "Tasker I/II/III slab generation and cutting utilities for ASE."
 readme = "README.md"
 license = { text = "MIT" }

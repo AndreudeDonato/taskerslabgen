@@ -21,13 +21,15 @@ from .core import (
     enumerate_cut_pairs,
     select_best_sequence,
     compute_cut_positions,
-    assign_plane_names,
+    _repeat_names,
+    _surface_a3_xy,
+    plane_name_for_filename,
     plane_name_matches,
     surface_bulk_cell,
 )
 
 
-def _filter_by_prefer_plane(terminations, prefer_plane):
+def _filter_by_prefer_plane(terminations, prefer_plane, selection="relative"):
     """
     Filter a {plane_id: info} dict by prefer_plane.
 
@@ -35,10 +37,10 @@ def _filter_by_prefer_plane(terminations, prefer_plane):
       - ``None``        → no filter (keep everything)
       - ``int``         → keep that single termination ID
       - ``list[int]``   → keep those termination IDs
-      - ``str``         → element symbol (e.g. ``"O"``) or plane label
-                           (e.g. ``"IrO2"`` matches ``IrO2-a``/``IrO2-b``/
-                           ``IrO2-a-recon``; ``"IrO2-a"`` matches ``IrO2-a``
-                           and ``IrO2-a-recon``).
+      - ``str``         → element symbol (e.g. ``"O"``) or plane label,
+                           matched by :func:`plane_name_matches` with
+                           *selection* (``"O4"`` selects ``O4`` and
+                           ``O4-recon``; with ``"shape"`` also ``O4'``).
       - ``list[str]``   → match any of the listed strings
 
     Element matching is **exclusive**: ``"O"`` keeps only planes whose
@@ -92,7 +94,7 @@ def _filter_by_prefer_plane(terminations, prefer_plane):
 
         if plane_type_names:
             pt = term.get("plane_type", "")
-            if any(plane_name_matches(q, pt) for q in plane_type_names):
+            if any(plane_name_matches(q, pt, selection) for q in plane_type_names):
                 selected[tid] = term
                 continue
 
@@ -126,6 +128,7 @@ def generate_slabs_for_miller(
     surface_supercell=None,
     max_masks=200000,
     dipole_tol_max=None,
+    selection="relative",
 ):
     """
     Generate non-polar slabs for one or more Miller indices.
@@ -187,9 +190,9 @@ def generate_slabs_for_miller(
           whose cut plane is **exclusively** that element.  A mixed
           CeO plane would NOT match ``"O"``.
         - ``str`` (plane label, e.g. ``"O4"``): keep terminations whose
-          plane label matches.  ``"IrO2"`` matches ``IrO2-a``, ``IrO2-b``
-          and ``IrO2-a-recon``; ``"IrO2-a"`` matches ``IrO2-a`` and
-          ``IrO2-a-recon``.
+          bottom plane label matches, as *selection* says: ``"O4'"``
+          selects ``O4'`` and ``O4'-recon`` (``"relative"``), or every
+          phase ``O4``, ``O4'``, ... (``"shape"``).
         - ``list[str]``: match any entry.  ``["O", "Ce"]`` keeps pure-O
           planes OR pure-Ce planes, but not mixed CeO planes.
     candidates : str
@@ -211,6 +214,14 @@ def generate_slabs_for_miller(
         Largest number of Tasker III deletion patterns to enumerate before
         symmetry reduction (default 200000); larger surface cells raise a
         ``ValueError`` instead of running for hours.
+    selection : {"relative", "shape"}
+        How a plane label in *prefer_plane* selects planes.  A label is the
+        plane's arrangement plus its phase, i.e. how it is shifted and
+        rotated in the crystal (``O``, ``O'``, ``O''`` are one arrangement in
+        three phases).  ``"relative"`` (default) keeps only that plane;
+        ``"shape"`` keeps the arrangement in any phase.  (``"absolute"``
+        compares against an existing slab, so it belongs to
+        :func:`cutslab`.)
     dipole_tol_max : float or None
         Opt-in fallback for slightly distorted bulks (e.g. relaxed ones that
         lost a symmetry).  When no termination or reconstruction of a facet
@@ -258,6 +269,11 @@ def generate_slabs_for_miller(
     """
     if candidates not in ("best", "all"):
         raise ValueError(f"candidates must be 'best' or 'all', got {candidates!r}")
+    if selection not in ("relative", "shape"):
+        raise ValueError(
+            f"selection must be 'relative' or 'shape' here, got {selection!r} "
+            "('absolute' compares against an existing slab: use it in cutslab)."
+        )
     if dipole_tol_max is not None and dipole_tol_max < dipole_tol:
         raise ValueError(
             f"dipole_tol_max ({dipole_tol_max}) must be at least dipole_tol ({dipole_tol})."
@@ -270,7 +286,7 @@ def generate_slabs_for_miller(
         layers=tuple(layer_thickness_list), bulk_name=bulk_name, plane_tol=plane_tol,
         charge_tol=charge_tol, dipole_tol=dipole_tol, vacuum=vacuum, plot=plot,
         plot_out_dir=plot_out_dir, verbose=verbose, bond_threshold=bond_threshold,
-        bond_distances=bond_distances, max_masks=max_masks,
+        bond_distances=bond_distances, max_masks=max_masks, selection=selection,
     )
     # A plain loop: the fallback's warning points at the caller (stacklevel=3).
     results = {}
@@ -332,6 +348,7 @@ class _Options:
     bond_threshold: tuple = (0.85, 1.15)
     bond_distances: object = None
     max_masks: int = 200000
+    selection: str = "relative"
 
 
 @dataclass
@@ -349,6 +366,7 @@ class _Facet:
     name_map: dict
     reduced_counts: dict
     charges_list: list   # charge of every atom of the input bulk
+    repeat: int = 0      # planes in one lattice repeat (fewer than len(planes) for centred cells)
 
     def validation(self, opts):
         """Keyword arguments of :func:`_finalize_slab`."""
@@ -359,12 +377,17 @@ class _Facet:
             "dipole_tol": opts.dipole_tol,
         }
 
-    def finalize(self, slabs, opts):
-        """Validate slabs, drop the index tag, add ``bulk_name``/``miller`` info."""
+    def finalize(self, slabs, opts, bottom):
+        """Validate slabs, drop the index tag, add ``bulk_name``, ``miller``
+        and ``stacking_labels`` (one lattice repeat of plane labels from the
+        bottom plane *bottom* up, so cutslab names the planes alike) info."""
+        n = len(self.names)
+        stacking = [self.names[(bottom + k) % n] for k in range(self.repeat)]
         for slab in slabs:
             _finalize_slab(slab, **self.validation(opts))
             slab.info["bulk_name"] = opts.bulk_name
             slab.info["miller"] = self.out_miller
+            slab.info["stacking_labels"] = list(stacking)
         return slabs
 
 
@@ -392,11 +415,13 @@ def _analyse_facet(bulk_atoms, charges, miller, opts, surface_supercell=None):
         identify_planes(atoms_z, L, plane_tol=opts.plane_tol, charge_tol=opts.charge_tol),
         key=lambda p: p["z_center"] % L,
     )
-    names, name_map = assign_plane_names(planes, atoms=surf_bulk)
+    a3_xy = _surface_a3_xy(bulk, miller, surf_bulk.cell[:2, :2])
+    names, name_map, repeat = _repeat_names(planes, surf_bulk, L, a3_xy)
     return _Facet(
         bulk=bulk, miller=tuple(miller), out_miller=out_miller, surf_bulk=surf_bulk,
         atoms_z=atoms_z, L=L, planes=planes, names=names, name_map=name_map,
         reduced_counts=compute_reduced_counts(atoms_z), charges_list=charges_list,
+        repeat=repeat,
     )
 
 
@@ -445,9 +470,9 @@ def _generate_for_one_miller(bulk_atoms, charges, miller, opts, prefer_plane, ca
         raise
 
 
-def _select(terminations, prefer_plane, candidates_mode):
+def _select(terminations, prefer_plane, candidates_mode, selection="relative"):
     """Apply prefer_plane, then keep the best (lowest ID) if asked."""
-    filtered = _filter_by_prefer_plane(terminations, prefer_plane)
+    filtered = _filter_by_prefer_plane(terminations, prefer_plane, selection)
     if candidates_mode == "best" and filtered:
         best_tid = min(filtered)  # IDs are in rank order
         return {best_tid: filtered[best_tid]}
@@ -518,7 +543,7 @@ def _tasker12_path(facet, sequences, opts, prefer_plane, candidates_mode, saveca
         }
         for tid, (_, seq, bot) in enumerate(ranked)
     }
-    selected = _select(terminations, prefer_plane, candidates_mode)
+    selected = _select(terminations, prefer_plane, candidates_mode, opts.selection)
 
     def build(seq, layers):
         zbot, ztop = compute_cut_positions(planes, L, seq["bottom_cut"], seq["top_cut"])
@@ -530,10 +555,11 @@ def _tasker12_path(facet, sequences, opts, prefer_plane, candidates_mode, saveca
     output = {}
     for tid, term in selected.items():
         seq = term["sequence"]
-        slabs = facet.finalize(build(seq, opts.layers), opts)
+        slabs = facet.finalize(build(seq, opts.layers), opts, bottom=(seq["bottom_cut"] + 1) % n_pl)
         if opts.plot:
             zbot, ztop = compute_cut_positions(planes, L, seq["bottom_cut"], seq["top_cut"])
-            bp, tp = names[(seq["bottom_cut"] + 1) % n_pl], names[seq["top_cut"]]
+            bp = plane_name_for_filename(names[(seq["bottom_cut"] + 1) % n_pl])
+            tp = plane_name_for_filename(names[seq["top_cut"]])
             plot_unitcell_atoms(
                 facet.atoms_z, L, facet.out_miller,
                 out_png=f"{opts.plot_out_dir}/{opts.bulk_name}_hkl_{h}{k}{l}_{bp}_{tp}_{tid}.png",
@@ -603,7 +629,7 @@ def _tasker3_termination(facet, opts, cand, plot_path=None):
         cand, facet.planes, facet.names, facet.name_map,
         facet.atoms_z, facet.surf_bulk, facet.bulk, facet.miller, facet.L,
     )
-    slabs = facet.finalize(_tasker3_slabs(facet, opts, cand, opts.layers), opts)
+    slabs = facet.finalize(_tasker3_slabs(facet, opts, cand, opts.layers), opts, bottom=i)
     if opts.verbose:
         def composition(counts):
             return "+".join(
@@ -640,7 +666,7 @@ def _tasker3_path(facet, opts, prefer_plane, candidates_mode, savecandidates):
         }
         for tid, cand in enumerate(valid)
     }
-    selected = _select(terminations, prefer_plane, candidates_mode)
+    selected = _select(terminations, prefer_plane, candidates_mode, opts.selection)
 
     if savecandidates:
         _save_candidates([_tasker3_slabs(facet, opts, cand, [opts.layers[0]])[0] for cand in valid],
@@ -655,7 +681,8 @@ def _tasker3_path(facet, opts, prefer_plane, candidates_mode, savecandidates):
             print(f"  Termination {tid}:", end="")
         slabs, reconstruction = _tasker3_termination(
             facet, opts, cand,
-            plot_path=f"{opts.plot_out_dir}/{opts.bulk_name}_hkl_{h}{k}{l}_{label}_{label}_{tid}.png",
+            plot_path=(f"{opts.plot_out_dir}/{opts.bulk_name}_hkl_{h}{k}{l}_"
+                       f"{plane_name_for_filename(label)}_{plane_name_for_filename(label)}_{tid}.png"),
         )
         output[tid] = {
             "atoms": slabs,

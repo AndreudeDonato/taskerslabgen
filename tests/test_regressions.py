@@ -290,22 +290,27 @@ def test_adjacency_with_bulk_requires_miller():
 
 
 # ------------------------------------------------------------------
-# C6: plane names must not depend on in-plane translation
+# C6 / 0.5: a plane's label is its arrangement and its relative phase
 # ------------------------------------------------------------------
-def test_translated_identical_planes_share_a_name(ceo2_111_slab):
-    from taskerslabgen.advanced import assign_plane_names, identify_planes
-    from taskerslabgen.core import _charges_to_list
+def test_labels_give_arrangement_and_relative_phase(ceo2_111_slab):
+    """Copies one lattice repeat apart share a label; the same arrangement
+    in another phase (shifted or rotated) gets a prime."""
+    from taskerslabgen.advanced import identify_planes
+    from taskerslabgen.core import _charges_to_list, _slab_plane_names
 
     slab = ceo2_111_slab
     atoms_z = np.column_stack([
         slab.numbers, slab.positions[:, 2], _charges_to_list(slab, Q_CEO2)
     ])
     planes = sorted(identify_planes(atoms_z, slab.cell[2, 2]), key=lambda p: p["z_center"])
-    names, _ = assign_plane_names(planes, atoms=slab)
-    by_comp = {}
-    for p, name in zip(planes, names):
-        by_comp.setdefault(tuple(sorted(p["counts"].items())), set()).add(name)
-    assert all(len(v) == 1 for v in by_comp.values()), f"names: {names}"
+    names, repeat = _slab_plane_names(slab, planes)
+    assert repeat is not None and repeat[0] == 3
+    assert names == ["O4", "Ce4", "O4'"] * 3, names
+    # Without genslab's hint the slab is labelled from its own interior.
+    bare = slab.copy()
+    bare.info.pop("stacking_labels", None)
+    names_bare, _ = _slab_plane_names(bare, planes)
+    assert [n.rstrip("'") for n in names_bare] == ["O4", "Ce4", "O4"] * 3
 
 
 # ------------------------------------------------------------------
@@ -328,11 +333,13 @@ def test_genslab_label_selects_same_planes_in_cutslab(atoms, charges, hkl, kwarg
     for term in res[hkl].values():
         slab, label = term["atoms"][0], term["plane_type"]
         recon = term["reconstruction"]
-        # cutslab gives the slab's bottom plane the label genslab reported ...
+        top = term["top_plane_type"]
+        # cutslab gives the slab's surface planes the labels genslab reported ...
         by_termination = cutslab(slab, charges, reconstruction=recon)
         assert {s.info["cut_bottom_plane"] for s in by_termination} == {label}
-        # ... so genslab's label can be passed straight to cut_at.
-        by_label = cutslab(slab, charges, cut_at=label, reconstruction=recon)
+        assert {s.info["cut_top_plane"] for s in by_termination} == {top}
+        # ... so genslab's labels can be passed straight to cut_at.
+        by_label = cutslab(slab, charges, cut_at=[label, top], reconstruction=recon)
         assert by_label
         assert {s.info["cut_bottom_plane"] for s in by_label} == {label}
 
@@ -533,17 +540,17 @@ def test_bulk_matching_keeps_rumpled_surface_plane_whole(ceo2_111_slab):
     rumpled = _relax_surfaces(ceo2_111_slab, "rumpled")
     subs = cutslab(rumpled, Q_CEO2, bulk_atoms=CEO2, dipole_tol=0.3)
     assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
-    assert {(s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in subs} == {("O4", "O4")}
+    assert {(s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in subs} == {("O4", "O4'")}
 
 
-def test_deformed_surface_plane_gets_primed_label(ceo2_111_slab):
+def test_deformed_surface_plane_gets_tilde_label(ceo2_111_slab):
     from taskerslabgen import cutslab
 
     shifted = _relax_surfaces(ceo2_111_slab, "shifted")
     subs = cutslab(shifted, Q_CEO2, bulk_atoms=CEO2)
     assert [s.get_chemical_formula() for s in subs] == ["Ce4O8", "Ce8O16", "Ce12O24"]
     surfaces = [(s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in subs]
-    assert surfaces == [("O4'", "O4"), ("O4'", "O4"), ("O4'", "O4'")]
+    assert surfaces == [("O4~", "O4'"), ("O4~", "O4'"), ("O4~", "O4'~")]
 
 
 def test_cut_dipoles_use_relaxed_positions(ceo2_111_slab):
@@ -592,15 +599,26 @@ def test_bulk_matching_needs_miller(ceo2_111_slab):
         cutslab(slab, Q_CEO2, bulk_atoms=CEO2)
 
 
-def test_primed_label_matching():
+def test_label_grammar_and_selection():
     from taskerslabgen import plane_name_base, plane_name_matches
+    from taskerslabgen.core import _parse_plane_name
 
-    assert plane_name_base("O4'") == "O4"
+    assert _parse_plane_name("IrO2-a''-recon~") == ("IrO2", "a", 2, True, True)
+    assert _parse_plane_name("O'5") == ("O", None, 5, False, False)
+    assert plane_name_base("O4~") == "O4"
     assert plane_name_base("IrO2-a'") == "IrO2"
-    assert plane_name_matches("O4", "O4'")
-    assert plane_name_matches("IrO2-a", "IrO2-a'")
-    assert plane_name_matches("IrO2", "IrO2-b'")
-    assert not plane_name_matches("O4'", "O4")
+    # relative (default): only that plane; deformed and reconstructed copies count
+    assert plane_name_matches("O4", "O4~")
+    assert plane_name_matches("O4'", "O4'-recon")
+    assert not plane_name_matches("O4", "O4'")
+    assert not plane_name_matches("O4~", "O4")
+    assert not plane_name_matches("IrO2", "IrO2-a")
+    # shape: the arrangement in any phase
+    assert plane_name_matches("O4", "O4''", "shape")
+    assert plane_name_matches("IrO2", "IrO2-b'", "shape")
+    assert not plane_name_matches("IrO2-a", "IrO2-b", "shape")
+    with pytest.raises(ValueError, match="selection"):
+        plane_name_matches("O4", "O4", "loose")
 
 
 # ------------------------------------------------------------------
@@ -1072,8 +1090,12 @@ def test_bulk_matching_when_relaxation_splits_every_plane():
     split.positions[order[0::2], 2] += 0.12
     split.positions[order[1::2], 2] -= 0.12
     subs = cutslab(split, Q_IRO2, bulk_atoms=IRO2, dipole_tol=0.3)
-    assert [len(s) for s in subs] == [3 * m for m in range(1, 9)]
-    assert {s.info["cut_bottom_plane"].rstrip("'") for s in subs} <= {"IrO2-a", "IrO2-b"}
+    # The planes alternate IrO2 / IrO2' (rotated): keeping the input's top
+    # plane takes every second thickness, any phase takes all of them.
+    assert [len(s) for s in subs] == [6 * m for m in range(1, 5)]
+    assert {s.info["cut_bottom_plane"] for s in subs} == {"IrO2'~"}
+    loose = cutslab(split, Q_IRO2, bulk_atoms=IRO2, dipole_tol=0.3, selection="shape")
+    assert [len(s) for s in loose] == [3 * m for m in range(1, 9)]
 
 
 def test_cutslab_reconstruction_with_supercell_bulk():
@@ -1232,3 +1254,122 @@ def test_dipole_tol_max_below_dipole_tol_is_rejected():
 
     with pytest.raises(ValueError, match="dipole_tol_max"):
         generate_slabs_for_miller(IRO2, Q_IRO2, (1, 1, 0), [2], dipole_tol=0.3, dipole_tol_max=0.1)
+
+
+# ------------------------------------------------------------------
+# 0.5: phases -- selection="relative" / "absolute" / "shape"
+# ------------------------------------------------------------------
+def _ti_depth(slab):
+    """Depth (A) of the topmost Ti below the topmost atom."""
+    z = slab.positions[:, 2]
+    return round(float(z.max() - z[slab.numbers == 22].max()), 2)
+
+
+def test_termination_keeps_relative_phase_anatase101():
+    """Anatase (101) has four O2 planes in one repeat unit.  With a loose
+    dipole_tol, matching labels without phase mixed the second termination
+    (Ti 0.15 A under the top O instead of 0.73 A) into the thickness series."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    q = {"Ti": 4.0, "O": -2.0}
+    term = generate_slabs_for_miller(ANATASE, q, (1, 0, 1), [6], dipole_tol=0.3)[(1, 0, 1)][0]
+    thick = term["atoms"][0]
+    subs = cutslab(thick, q, dipole_tol=0.3)
+    assert [len(s) for s in subs] == [12 * m for m in range(1, 7)]
+    assert {_ti_depth(s) for s in subs} == {_ti_depth(thick)}
+    assert {s.info["cut_top_plane"] for s in subs} == {term["top_plane_type"]}
+    every_phase = cutslab(thick, q, dipole_tol=0.3, selection="shape")
+    assert len(every_phase) > len(subs)
+    assert {_ti_depth(s) for s in every_phase} > {_ti_depth(thick)}
+
+
+def test_absolute_phase_and_phase_overlap_rutile110():
+    """Rutile (110): one repeat unit up is half a cell sideways.  The top
+    bridging-O row lies over the bottom one for odd layer counts only."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    term = generate_slabs_for_miller(IRO2, Q_IRO2, (1, 1, 0), [4])[(1, 1, 0)][0]
+    thick = term["atoms"][0]
+    relative = cutslab(thick, Q_IRO2)
+    assert [len(s) for s in relative] == [6, 12, 18, 24]
+    assert [round(s.info["cut_phase_overlap"]) for s in relative] == [1, 0, 1, 0]
+    # absolute: same registry as the 4-layer input (top shifted from bottom)
+    absolute = cutslab(thick, Q_IRO2, selection="absolute")
+    assert [len(s) for s in absolute] == [12, 24]
+
+
+def test_shape_selection_adds_other_phases_rutile100():
+    """Rutile (100): half a repeat unit ends on another O phase (O'')."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    term = generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [4])[(1, 0, 0)][0]
+    thick = term["atoms"][0]
+    relative = cutslab(thick, Q_IRO2)
+    assert {s.info["cut_top_plane"] for s in relative} == {term["top_plane_type"]}
+    shape = cutslab(thick, Q_IRO2, selection="shape")
+    assert len(shape) == 2 * len(relative)
+    assert {s.info["cut_top_plane"] for s in shape} == {"O", "O''"}
+
+
+def test_lattice_copies_in_a_centred_cell_share_labels():
+    """Body-centred anatase: the (001) cell holds every plane twice, a lattice
+    translation apart, so the labels repeat after half the cell."""
+    from taskerslabgen.advanced import build_surface, identify_planes
+    from taskerslabgen.core import _repeat_names, _surface_a3_xy
+
+    surf = build_surface(ANATASE, (0, 0, 1), layers=1)
+    L = surf.cell[2, 2]
+    atoms_z = np.column_stack([surf.numbers, surf.positions[:, 2], np.zeros(len(surf))])
+    planes = sorted(identify_planes(atoms_z, L), key=lambda p: p["z_center"])
+    names, _, per = _repeat_names(planes, surf, L, _surface_a3_xy(ANATASE, (0, 0, 1), surf.cell[:2, :2]))
+    assert per == len(planes) // 2
+    assert names[:per] == names[per:]
+
+
+def test_rotated_phases_named_independently_of_origin():
+    """The two IrO2 planes of rutile (001) are one arrangement rotated by 90
+    degrees; which one is primed must not depend on the bulk origin."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    rng = np.random.default_rng(11)
+    seen = set()
+    for shift in [np.zeros(3)] + [rng.random(3) for _ in range(4)]:
+        res = generate_slabs_for_miller(_shifted(IRO2, shift), Q_IRO2, (0, 0, 1), [2], candidates="all")
+        seen.add(frozenset((t["plane_type"], _bottom_plane_descriptor(t["atoms"][0]))
+                           for t in res[(0, 0, 1)].values()))
+    assert len(seen) == 1
+
+
+def test_genslab_selection_modes():
+    from taskerslabgen import generate_slabs_for_miller
+
+    res = generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [2], candidates="all")[(1, 0, 0)]
+    labels = {t["plane_type"] for t in res.values()}
+    base = sorted(labels)[0].rstrip("'")
+    strict = generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [2], candidates="all",
+                                       prefer_plane=sorted(labels)[0])[(1, 0, 0)]
+    loose = generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [2], candidates="all",
+                                      prefer_plane=base, selection="shape")[(1, 0, 0)]
+    assert {t["plane_type"] for t in strict.values()} == {sorted(labels)[0]}
+    assert {t["plane_type"] for t in loose.values()} == labels
+    with pytest.raises(ValueError, match="cutslab"):
+        generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [2], selection="absolute")
+
+
+def test_cut_at_hint_names_both_surface_planes(ceo2_111_slab):
+    from taskerslabgen import cutslab
+
+    with pytest.raises(ValueError, match=r"cut_at=\['O4', \"O4'\"\]"):
+        cutslab(ceo2_111_slab, Q_CEO2, cut_at="O4")
+
+
+def test_slabs_drop_bulk_cif_metadata():
+    """CIF occupancies are keyed by tags; on a slab the ASE GUI drew every
+    atom with the species of tag 0."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    assert "occupancy" in IRO2.info
+    slab = generate_slabs_for_miller(IRO2, Q_IRO2, (1, 1, 0), [2])[(1, 1, 0)][0]["atoms"][0]
+    sub = cutslab(slab, Q_IRO2)[0]
+    for atoms in (slab, sub):
+        assert not {"occupancy", "spacegroup", "unit_cell"} & set(atoms.info)

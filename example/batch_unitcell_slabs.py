@@ -152,6 +152,11 @@ DIPOLE_TOL_CUTSLAB = 0.3
 # tolerance that works, up to this cap, with a warning (e.g. dimerised MoO2
 # needs ~0.45).  Genuinely polar facets need ~1-6, so they still fail.
 DIPOLE_TOL_MAX = 1.0
+# How cutslab keeps the termination of the thick slab: "relative" cuts only at
+# copies of its surface planes (same arrangement and phase in the crystal);
+# "shape" also at the same arrangement shifted or rotated, which adds the
+# slabs ending half a repeat unit off (0.4 behaviour, mixed stackings).
+SELECTION = "relative"
 VERBOSE = False
 
 
@@ -285,6 +290,7 @@ def process_miller(
         plane_tol=plane_tol,
         vacuum=VACUUM,
         cuts="right",
+        selection=SELECTION,
         verbose=VERBOSE,
     )
 

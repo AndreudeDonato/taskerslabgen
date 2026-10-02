@@ -98,6 +98,10 @@ All in the top of `batch_unitcell_slabs.py`:
   The default 0.1 Å absorbs relaxation noise; PtO2 marcasite (001) uses
   0.05 Å because its two O planes 0.07 Å apart allow a better Tasker II cut.
 - `DIPOLE_TOL_*` — 0.3 e·Å per formula unit, for relaxed bulks.
+- `SELECTION` — `"relative"` (default) keeps the thick slab's surface planes
+  exactly (same arrangement and phase); `"shape"` also cuts at shifted or
+  rotated copies, adding the slabs that end half a repeat unit off.  See the
+  plane phases section of `example/TUTORIAL.md`.
 - `DIPOLE_TOL_MAX` — facets with no slab within 0.3 are rebuilt with the
   smallest tolerance that works, up to 1.0, with a warning; cutslab then uses
   the same tolerance.
