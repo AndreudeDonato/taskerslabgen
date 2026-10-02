@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 (unreleased)
+## 0.5.0 — 2026-10-02
 
 Plane labels now carry the stacking: a label is the plane's arrangement plus
 its phase (how it is shifted and rotated in the crystal).  Labels, and the
