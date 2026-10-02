@@ -82,9 +82,13 @@ def case1():
             print(f"     {len(s):3d} atoms  top {s.info['cut_top_plane']:6s} "
                   f"Ti {ti_depth(s):.2f} A below the top O")
         views[selection] = subs
-    wrong = [s for s in views["shape"] if abs(ti_depth(s) - ti_depth(thick)) > 0.1]
-    return [save("anatase101_right_termination", views["relative"][:2]),
-            save("anatase101_wrong_termination", wrong[:1])]
+    # One structure per file: the first slab with the wrong termination, and
+    # the correct slab closest to it in thickness.
+    wrong = next(s for s in views["shape"] if abs(ti_depth(s) - ti_depth(thick)) > 0.1)
+    right = min(views["relative"], key=lambda s: (abs(len(s) - len(wrong)), -len(s)))
+    print(f"   saved: right termination {len(right)} atoms, wrong termination {len(wrong)} atoms")
+    return [save("anatase101_right_termination", [right]),
+            save("anatase101_wrong_termination", [wrong])]
 
 
 def case2():
