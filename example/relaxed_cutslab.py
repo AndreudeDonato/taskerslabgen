@@ -3,7 +3,7 @@ Cut a relaxed slab into a thickness series with cutslab(bulk_atoms=...).
 
 Relaxation moves the surface planes: they rumple, shift towards the bulk
 and stop matching the bulk planes exactly.  Passing the bulk lets cutslab
-assign every atom to the nearest bulk plane, so relaxed planes stay whole,
+put every atom on its own bulk site, so relaxed planes stay whole,
 and label each plane by its bulk plane (``~``, e.g. ``O4~``, marks a plane
 deformed by more than ``deform_tol``).
 

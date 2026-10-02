@@ -138,10 +138,12 @@ def cutslab(
     bulk_atoms : Atoms or None
         Bulk the slab was built from: its unit cell or a supercell of it
         (e.g. a relaxed bulk calculation), up to a few per cent of strain.
-        When given, every atom is assigned to the nearest plane of the bulk
-        (the registry and the period along the normal are learned from the
-        slab's interior, from single atoms if relaxation split every plane),
-        so relaxed surface planes that rumple or shift stay whole, and each
+        When given, the slab is registered on the bulk crystal (one in-plane
+        shift, a height and a strain along the normal, from how well its
+        atoms sit on bulk sites of their element, so bulk-like atoms decide)
+        and every atom takes its own bulk site, the slab being a run of bulk
+        planes.  Relaxed surface planes that rumple or shift thus stay whole,
+        also where bulk planes lie a fraction of an angstrom apart, and each
         plane is labelled by its bulk plane: the bulk label (e.g. ``O4``) if
         it matches within *deform_tol*, with ``~`` (``O4~``) if it is more
         deformed or has a different composition.  Without it, planes come
@@ -494,14 +496,15 @@ def cutslab(
     if (
         reconstruction is None and cut_at == "termination" and n > 2
         and [(c["bottom_plane"], c["top_plane"]) for c in valid_cuts] == [(0, n - 1)]
-        and not {_undeformed(plane_names[0]), _undeformed(plane_names[-1])}
-        & {_undeformed(name) for name in plane_names[1:-1]}
+        and not any(_undeformed(plane_names[i]) == _undeformed(plane_names[k])
+                    and planes_sorted[i]["counts"] == planes_sorted[k]["counts"]
+                    for i in (0, n - 1) for k in range(1, n - 1))
     ):
         warnings.warn(
             f"cutslab returns only the input slab: its surface planes "
-            f"({plane_names[0]}, {plane_names[-1]}) occur nowhere inside it.  For a "
-            "reconstructed (Tasker III) slab pass reconstruction=term['reconstruction'] "
-            "from generate_slabs_for_miller.",
+            f"({plane_names[0]}, {plane_names[-1]}) occur nowhere inside it with the "
+            "same atoms.  For a reconstructed (Tasker III) slab pass "
+            "reconstruction=term['reconstruction'] from generate_slabs_for_miller.",
             stacklevel=2,
         )
 

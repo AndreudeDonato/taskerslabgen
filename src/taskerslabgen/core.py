@@ -1737,18 +1737,273 @@ def _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, site_tol=0.3, a3_xy=(0.0, 
         entry["label"] = label
 
 
+class _BulkSites:
+    """
+    The bulk crystal as sites in the slab frame: the atoms of the plane
+    catalog (in the slab's in-plane cell), repeated along the stacking vector
+    (in-plane part *a3_xy*, fractional; height *L*).  A slab atom ``(f, z)``
+    sits on site ``s`` of repeat ``m`` under the registry ``(t, offset,
+    scale)`` when ``f = f_s + m * a3_xy + t`` (mod 1) and ``z = offset +
+    scale * (z_s + m * L)``.
+    """
+
+    def __init__(self, catalog, L, cell2d, a3_xy, bulk_cell2d=None):
+        self.L, self.cell2d = float(L), np.asarray(cell2d, dtype=float)
+        self.a3_xy = np.asarray(a3_xy, dtype=float)
+        # In-plane lattice of the sites: the bulk surface cell when the slab
+        # cell is a supercell of it (shifts by its vectors are equivalent).
+        self.lattice = self.cell2d
+        if bulk_cell2d is not None:
+            M = self.cell2d @ np.linalg.inv(bulk_cell2d)
+            if np.allclose(M, np.round(M), atol=0.02) and abs(round(np.linalg.det(np.round(M)))) > 1:
+                self.lattice = np.linalg.inv(np.round(M)) @ self.cell2d
+        rows = [(Z, fx, fy, entry["z"] + dz, k)
+                for k, entry in enumerate(catalog) for Z, fx, fy, dz in entry["atoms"]]
+        rows = np.array(rows, dtype=float)
+        self.Z, self.f, self.z, self.plane = rows[:, 0], rows[:, 1:3], rows[:, 3], rows[:, 4].astype(int)
+        # Rounding the fractional difference finds the nearest image of every
+        # pair closer than half the cell's smallest height; neighbouring
+        # images are checked only when that is within reach of the densities.
+        heights = abs(np.linalg.det(self.cell2d)) / np.linalg.norm(self.cell2d, axis=1)[::-1]
+        reach = np.sqrt(-4.0 * _WAVE_SIGMA ** 2 * np.log(1e-12))
+        self.images = (np.array([(i, j) for i in (-1, 0, 1) for j in (-1, 0, 1)], dtype=float)
+                       if heights.min() / 2 < reach else np.zeros((1, 2)))
+        # Squared distance from every site to the nearest other site of its
+        # element: the cost of one hop.
+        own, _, _, df, dz = self.pairs(self.Z, self.f, self.z, (0.0, 0.0), 0.0, 1.0)
+        d2 = np.sum((df @ self.cell2d) ** 2, axis=1) + dz ** 2
+        d2[d2 < 1e-6] = np.inf
+        self.hop2 = np.full(len(self.Z), np.inf)
+        np.minimum.at(self.hop2, own, d2)
+
+    def pairs(self, numbers, frac, z, t, offset, scale):
+        """
+        For every atom, its displacement from the same-element sites of the
+        nearest repeats (nearest in-plane image): ``(atom, site, m, d_frac,
+        dz)`` arrays, flattened over sites and repeats.
+        """
+        out = []
+        for Z in np.unique(numbers):
+            ia, js = np.flatnonzero(numbers == Z), np.flatnonzero(self.Z == Z)
+            zb = (z[ia] - offset) / scale
+            m0 = np.round((zb[:, None] - self.z[js][None, :]) / self.L)
+            for dm in (-1, 0, 1):
+                m = m0 + dm
+                df = (frac[ia][:, None, :] - self.f[js][None, :, :]
+                      - m[..., None] * self.a3_xy - np.asarray(t, dtype=float))
+                df -= np.round(df)
+                cand = df[:, :, None, :] + self.images[None, None, :, :]
+                near = np.argmin(np.sum((cand @ self.cell2d) ** 2, axis=-1), axis=-1)
+                df = np.take_along_axis(cand, near[:, :, None, None], axis=2)[:, :, 0, :]
+                dz = z[ia][:, None] - offset - scale * (self.z[js][None, :] + m * self.L)
+                shape = dz.shape
+                out.append((np.broadcast_to(ia[:, None], shape).ravel(),
+                            np.broadcast_to(js[None, :], shape).ravel(),
+                            m.ravel(), df.reshape(-1, 2), dz.ravel()))
+        return [np.concatenate(col) for col in zip(*out)]
+
+    def reduce(self, t):
+        """In-plane shift *t* (fractional in the slab cell) brought into one
+        cell of the site lattice."""
+        u = np.linalg.solve(self.lattice.T, np.asarray(t, dtype=float) @ self.cell2d) % 1.0
+        return np.linalg.solve(self.cell2d.T, u @ self.lattice) % 1.0
+
+    def weights(self, d_frac, dz, sigma):
+        """Overlap of an atom and a site, both Gaussians of width *sigma*."""
+        d2 = np.sum((d_frac @ self.cell2d) ** 2, axis=1) + dz ** 2
+        return np.exp(-d2 / (4.0 * sigma ** 2))
+
+
+def _bulk_registry(atoms, sites, sigma=_WAVE_SIGMA):
+    """
+    Register a slab on the bulk crystal: the in-plane shift *t*
+    (fractional), height *offset* and strain *scale* along the normal that
+    maximise the overlap of the slab's atoms with the bulk sites of their
+    element (see :class:`_BulkSites`).  Every atom counts by how well it sits
+    on a site, so bulk-like atoms decide and relaxed ones barely count; the
+    in-plane positions tell apart planes only a fraction of an angstrom apart
+    in height, and one shift for the whole slab keeps planes related by a
+    glide or screw axis in their own phase.
+
+    Registries start from putting an atom of the rarest element, taken at
+    several heights, on each bulk site of that element, and are refined by
+    mean-shift steps; the strain is then fitted on the best one, with the
+    density sharpened step by step so that relaxed atoms drop out.  Among
+    registries that fit equally well the one with the smallest shift is kept,
+    so slabs cut by genslab keep its labels.  Returns ``(t, offset, scale)``.
+    """
+    numbers = atoms.numbers.astype(float)
+    frac = atoms.get_scaled_positions(wrap=False)[:, :2]
+    z = atoms.positions[:, 2]
+    L, a3_xy, cell2d = sites.L, sites.a3_xy, sites.cell2d
+
+    def normalise(t, offset):
+        k = -np.floor(offset / L)
+        return (np.asarray(t) + k * a3_xy) % 1.0, offset + k * L
+
+    def refine(t, offset, scale, sigma, steps, fit_scale=False):
+        for _ in range(steps):
+            ia, js, m, df, dz = sites.pairs(numbers, frac, z, t, offset, scale)
+            w = sites.weights(df, dz, sigma)
+            if w.sum() <= 0:
+                break
+            step = (w[:, None] * df).sum(axis=0) / w.sum()
+            t = t + step
+            zb = sites.z[js] + m * L
+            mean_zb = np.average(zb, weights=w)
+            spread = np.sqrt(np.average((zb - mean_zb) ** 2, weights=w))
+            if fit_scale and spread > 0.25 * L:
+                previous = offset + scale * mean_zb
+                scale, offset = (float(v) for v in np.polyfit(zb, z[ia], 1, w=np.sqrt(w)))
+                dz_step = offset + scale * mean_zb - previous
+            else:
+                dz_step = np.average(dz, weights=w)
+                offset = offset + dz_step
+            if np.linalg.norm(step @ cell2d) < 1e-7 and abs(dz_step) < 1e-7:
+                break
+        return t, offset, scale
+
+    def score(t, offset, scale):
+        _, _, _, df, dz = sites.pairs(numbers, frac, z, t, offset, scale)
+        return float(sites.weights(df, dz, sigma).sum())
+
+    elements, counts = np.unique(numbers, return_counts=True)
+    rare = elements[np.argmin(counts)]
+    pool = np.flatnonzero(numbers == rare)
+    pool = pool[np.argsort(z[pool])]
+    seeds = sorted({int(pool[int(round(q * (len(pool) - 1)))]) for q in (0.1, 0.3, 0.5, 0.7, 0.9)})
+    starts = []
+    for i in seeds:
+        for j in np.flatnonzero(sites.Z == rare):
+            t, offset = normalise(frac[i] - sites.f[j], z[i] - sites.z[j])
+            t = sites.reduce(t)
+            if not any(abs(offset - o) < 0.05 and np.linalg.norm(((t - u + 0.5) % 1.0 - 0.5) @ cell2d) < 0.05
+                       for u, o in starts):
+                starts.append((t, offset))
+    # Screen every start once; refine those within reach of the best.
+    screened = [(score(t, offset, 1.0), t, offset) for t, offset in starts]
+    top = max(sc for sc, _, _ in screened)
+    best = None
+    for s0, t, offset in sorted(screened, key=lambda x: -x[0]):
+        if s0 < 0.5 * top:
+            break
+        t, offset, _ = refine(t, offset, 1.0, sigma, 50)
+        t, offset = normalise(sites.reduce(t), offset)
+        s = score(t, offset, 1.0)
+        size = float(np.linalg.norm(((t + 0.5) % 1.0 - 0.5) @ cell2d))
+        key = (s, -round(size, 3), -round(offset, 3))
+        if best is None or s > best[0][0] * (1 + 1e-4) or (
+                abs(s - best[0][0]) <= 1e-4 * best[0][0] and key[1:] > best[0][1:]):
+            best = (key, t, offset)
+    _, t, offset = best
+    scale = 1.0
+    for width in (sigma, 0.6 * sigma, 0.4 * sigma):
+        t, offset, scale = refine(t, offset, scale, width, 20, fit_scale=True)
+    return t % 1.0, offset, scale
+
+
+def _assign_to_sites(numbers, frac, z, sites, t, offset, scale):
+    """
+    Assign every atom to its own bulk site under the registry, as a slab
+    made of bulk planes: the contiguous run of bulk planes, and the
+    assignment of atoms to its sites (one atom per site), that minimise the
+    summed squared distance between atoms and their sites plus, for every
+    site of the run left empty, the squared distance between neighbouring
+    sites of its element (leaving a site empty costs as much as one hop).
+    A relaxed surface atom that moved towards a site of the plane above thus
+    stays in its own plane, and the half-occupied outer planes of a Tasker
+    III slab are part of the run instead of the planes being shifted.
+
+    Returns ``{(catalog plane, repeat m): [atom indices]}``.
+    """
+    L, cell2d = sites.L, sites.cell2d
+    ia, js, m, df, dz = sites.pairs(numbers, frac, z, t, offset, scale)
+    d2 = np.sum((df @ cell2d) ** 2, axis=1) + dz ** 2
+    # Shortest distance of every atom to every (site, repeat) it may occupy.
+    m = m.astype(int)
+    span = int(m.max() - m.min()) + 1
+    keys, inverse = np.unique(js * span + (m - m.min()), return_inverse=True)
+    key_site, key_m = keys // span, keys % span + int(m.min())
+    cost = np.full((len(numbers), len(keys)), np.inf)
+    np.minimum.at(cost, (ia, inverse.ravel()), d2)
+    plane_of = [(int(sites.plane[j]), int(mm)) for j, mm in zip(key_site, key_m)]
+    centre = {k: sites.z[sites.plane == k].mean() for k in set(sites.plane.tolist())}
+    height = {pl: offset + scale * (centre[pl[0]] + pl[1] * L) for pl in set(plane_of)}
+    planes = sorted(height, key=height.get)
+    index = {pl: n for n, pl in enumerate(planes)}
+    site_plane = np.array([index[pl] for pl in plane_of])
+    site_Z = sites.Z[key_site]
+    vacancy = sites.hop2[key_site]
+    need = Counter(numbers.tolist())
+    elements = sorted(need)
+
+    # Candidate runs: every start within a repeat of the slab's bottom, ends
+    # from the first with room for every atom to one repeat beyond.
+    runs = []
+    for a, start_plane in enumerate(planes):
+        if height[start_plane] > z.min() + L:
+            break
+        if height[start_plane] < z.min() - L:
+            continue
+        first = None
+        for b in range(a, len(planes)):
+            if first is not None and height[planes[b]] > height[planes[first]] + L:
+                break
+            in_run = (site_plane >= a) & (site_plane <= b)
+            have = Counter(site_Z[in_run].tolist())
+            if all(have[Z] >= n for Z, n in need.items()):
+                first = b if first is None else first
+                cols = np.flatnonzero(in_run)
+                # Lower bound: every atom on its nearest site of the run, and
+                # the cheapest sites left empty.
+                vac = np.sort(vacancy[cols])
+                bound = float(np.sum(np.min(cost[:, cols], axis=1))) + float(vac[:len(cols) - len(numbers)].sum())
+                runs.append((bound, cols))
+
+    best = None
+    for bound, cols in sorted(runs, key=lambda r: r[0]):
+        if best is not None and bound >= best[0]:
+            break
+        total, rows_all, picked_all, used = 0.0, [], [], np.zeros(len(cols), dtype=bool)
+        for Z in elements:
+            r = np.flatnonzero(numbers == Z)
+            c = np.flatnonzero(site_Z[cols] == Z)
+            sub = cost[np.ix_(r, cols[c])]
+            if not np.isfinite(sub).any(axis=1).all():
+                total = np.inf
+                break
+            rr, cc = linear_sum_assignment(np.where(np.isfinite(sub), sub, 1e12))
+            total += float(sub[rr, cc].sum())
+            used[c[cc]] = True
+            rows_all.extend(r[rr])
+            picked_all.extend(cols[c[cc]])
+        if not np.isfinite(total):
+            continue
+        total += float(vacancy[cols][~used].sum())
+        if best is None or total < best[0]:
+            best = (total, rows_all, picked_all)
+    groups = {}
+    pairs = (zip(best[1], best[2]) if best is not None
+             else enumerate(np.argmin(cost, axis=1)))  # no run fits: nearest sites
+    for i, c in pairs:
+        groups.setdefault(plane_of[c], []).append(int(i))
+    return groups
+
+
 def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
                       charge_tol=1e-3, deform_tol=0.3):
     """
     Assign the atoms of a slab to the planes of its bulk and label them.
 
-    The vertical registry between slab and bulk is learned from the slab's
-    bulk-like interior; every atom then goes to the nearest bulk plane that
-    contains its species, so rumpled or relaxed surface planes stay whole.
-    A plane gets the bulk label (e.g. ``O4``) when it matches its bulk plane
-    within *deform_tol* (RMSD in angstrom after the best rigid shift) and a
-    label with ``~`` (``O4~``) when it is more deformed or has a different
-    composition.
+    The slab is registered on the bulk crystal (:func:`_bulk_registry`: one
+    in-plane shift, a height and a strain along the normal, from how well its
+    atoms sit on bulk sites of their element), and every atom goes to the
+    plane of its nearest bulk site of that element, so rumpled or relaxed
+    surface planes stay whole, even where bulk planes lie a fraction of an
+    angstrom apart.  A plane gets the bulk label (e.g. ``O4``) when it matches
+    its bulk plane within *deform_tol* (RMSD in angstrom after the best rigid
+    shift) and a label with ``~`` (``O4~``) when it is more deformed or has a
+    different composition.
 
     Returns ``(planes_sorted, labels, reduced_counts)`` with planes in the
     format of :func:`identify_planes`.
@@ -1762,154 +2017,26 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
     z = atoms.positions[:, 2]
     q = np.asarray(charges_list, dtype=float)
     atoms_z = np.column_stack([numbers, z, q])
-    slab_planes = sorted(
-        identify_planes(atoms_z, float(atoms.cell[2, 2]), plane_tol=plane_tol),
-        key=lambda p: p["z_center"],
-    )
-
-    def wrap(dz):
-        return ((dz + 0.5 * L) % L) - 0.5 * L
-
-    # Registry offset: z_slab = z_bulk + offset (mod L), scored on all planes,
-    # candidates taken from the bulk-like middle of the slab.
-    n_sp = len(slab_planes)
-    middle = slab_planes[n_sp // 4: n_sp - n_sp // 4] or slab_planes
-    candidates = [
-        (p["z_center"] - b["z"]) % L
-        for p in middle for b in catalog if b["counts"] == p["counts"]
-    ]
-    # Atoms of the middle half of the slab, for registering single atoms when
-    # relaxation split every plane (no slab plane has a bulk composition).
-    span = z.max() - z.min()
-    inner = np.flatnonzero(np.abs(z - (z.min() + 0.5 * span)) <= 0.25 * span + 1e-9)
-    species_planes = {
-        int(Zi): np.array([b["z"] for b in catalog if int(Zi) in b["counts"]])
-        for Zi in set(numbers.tolist())
-    }
-    if any(len(v) == 0 for v in species_planes.values()):
+    missing = set(numbers.tolist()) - {Z for entry in catalog for Z in entry["counts"]}
+    if missing:
         raise ValueError(
             f"The slab contains elements absent from the {tuple(miller)} planes of the "
             "bulk; check bulk_atoms and miller."
         )
 
-    def atom_cost(offset):
-        """Summed distance of the inner atoms to the nearest bulk plane of their species."""
-        return float(sum(
-            np.min(np.abs(((z[i] - species_planes[int(numbers[i])] - offset + 0.5 * L) % L) - 0.5 * L))
-            for i in inner
-        ))
+    sites = _BulkSites(catalog, L, cell2d, a3_xy, bulk_cell2d)
+    t, offset, scale = _bulk_registry(atoms, sites)
 
-    frac = atoms.get_scaled_positions()
+    frac = atoms.get_scaled_positions(wrap=False)
+    groups = _assign_to_sites(numbers.astype(float), frac[:, :2], z, sites, t, offset, scale)
 
     def geometry(idx, zc):
-        return [(int(numbers[i]), frac[i, 0], frac[i, 1], z[i] - zc) for i in idx]
-
-    slab_geoms = [geometry(p["indices"], p["z_center"]) for p in slab_planes]
-
-    rmsd_cache = {}
-
-    def rmsd(k, c):
-        """RMSD of slab plane k against catalog plane c (independent of the offset)."""
-        if (k, c) not in rmsd_cache:
-            rmsd_cache[(k, c)] = _plane_rmsd(catalog[c]["atoms"], slab_geoms[k], cell2d)
-        return rmsd_cache[(k, c)]
-
-    def matched(offset):
-        """(slab plane, bulk plane, rmsd) pairs aligned by this offset."""
-        return [
-            (k, b, rmsd(k, c))
-            for k, p in enumerate(slab_planes) for c, b in enumerate(catalog)
-            if b["counts"] == p["counts"] and abs(wrap(p["z_center"] - b["z"] - offset)) < 0.3
-        ]
-
-    def score(offset):
-        # Atoms in planes that match their bulk plane geometrically; planes of
-        # equal composition (e.g. mirror variants) are told apart this way.
-        good = [(len(slab_planes[k]["indices"]), r) for k, _, r in matched(offset) if r <= deform_tol]
-        return (sum(n for n, _ in good), -sum(r for _, r in good))
-
-    images = _wave_images(cell2d)
-
-    def phase_consistency(offset):
-        """
-        Atoms of the matched planes whose in-plane shift onto their bulk
-        plane agrees with one translation of the whole slab (a copy *m*
-        repeat units up also moves by *m* times the in-plane part of the
-        stacking vector).  Registries related by a glide or screw axis match
-        plane by plane but need a mirror or rotation to match as one slab,
-        so this keeps the planes' phases.
-        """
-        shifts = []
-        for k, c, b in ((k, c, b) for k, p in enumerate(slab_planes) for c, b in enumerate(catalog)
-                        if b["counts"] == p["counts"]
-                        and abs(wrap(p["z_center"] - b["z"] - offset)) < 0.3):
-            if rmsd(k, c) > deform_tol:
-                continue
-            m = int(np.round((slab_planes[k]["z_center"] - b["z"] - offset) / L))
-            ref = _wave_rows(b["atoms"])
-            ref[:, 1:3] = (ref[:, 1:3] + m * a3_xy) % 1.0
-            ref[:, 3] = 0.0
-            tgt = _wave_rows(slab_geoms[k])
-            tgt[:, 3] = 0.0
-            shifts.append((len(slab_planes[k]["indices"]),
-                           _wave_shifts(ref, tgt, cell2d, images=images)))
-        best = 0
-        for _, options in shifts:
-            for t0 in options:
-                best = max(best, sum(n for n, opts in shifts
-                                     if any(_frac_distance(t, t0, cell2d) < 0.3 for t in opts)))
-        return best
-
-    if candidates:
-        candidates = sorted({round(c, 4) for c in candidates})
-        scores = {c: score(c) for c in candidates}
-        top = max(scores.values())
-        tied = [c for c in candidates
-                if scores[c][0] == top[0] and abs(scores[c][1] - top[1]) < 1e-3 * max(1, n_sp)]
-        offset = max(tied, key=phase_consistency) if len(tied) > 1 else tied[0]
-        in_middle = {id(p) for p in middle}
-        pairs = [
-            (slab_planes[k], b) for k, b, r in matched(offset)
-            if r <= deform_tol and id(slab_planes[k]) in in_middle
-        ] or [(slab_planes[k], b) for k, b, _ in matched(offset)]
-        z_ref = [b["z"] for _, b in pairs]
-        z_slab = np.array([p["z_center"] for p, _ in pairs])
-    else:
-        candidates = sorted({
-            round((z[i] - zb) % L, 4) for i in inner for zb in species_planes[int(numbers[i])]
-        })
-        offset = min(candidates, key=atom_cost)
-        z_ref = []
-        for i in inner:
-            zb = species_planes[int(numbers[i])]
-            d = ((z[i] - zb - offset + 0.5 * L) % L) - 0.5 * L
-            z_ref.append(float(zb[np.argmin(np.abs(d))]))
-        z_slab = z[inner]
-    # z_slab = offset + scale * z_bulk, fitted on the bulk-like interior: the
-    # slab may be strained along the normal relative to bulk_atoms (e.g.
-    # built from another calculation), which adds up over many layers.
-    z_ref = np.asarray(z_ref, dtype=float)
-    z_bulk = z_ref + L * np.round((z_slab - z_ref - offset) / L)
-    if np.ptp(z_bulk) > 0.5 * L:
-        scale, offset = (float(v) for v in np.polyfit(z_bulk, z_slab, 1))
-    else:
-        scale, offset = 1.0, float(np.mean(z_slab - z_bulk))
-
-    # Species-aware nearest bulk plane for every atom.
-    groups = {}
-    for i, (Zi, zi) in enumerate(zip(numbers, z)):
-        options = [k for k, b in enumerate(catalog) if int(Zi) in b["counts"]] or range(len(catalog))
-        best = None
-        for k in options:
-            m = int(np.round(((zi - offset) / scale - catalog[k]["z"]) / L))
-            dist = abs(zi - (offset + scale * (catalog[k]["z"] + m * L)))
-            if best is None or dist < best[0]:
-                best = (dist, k, m)
-        groups.setdefault((best[1], best[2]), []).append(i)
+        return [(int(numbers[i]), frac[i, 0] % 1.0, frac[i, 1] % 1.0, z[i] - zc) for i in idx]
 
     keyed = sorted(groups.items(), key=lambda kv: catalog[kv[0][0]]["z"] + kv[0][1] * L)
     planes_sorted, labels = [], []
     for (k, _), idx in keyed:
+        idx = sorted(idx)
         plane = _make_plane(idx, z[idx], atoms_z, charge_tol)
         deviation = _plane_rmsd(catalog[k]["atoms"], geometry(idx, plane["z_center"]), cell2d)
         planes_sorted.append(plane)

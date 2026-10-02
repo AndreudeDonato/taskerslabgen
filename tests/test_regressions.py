@@ -1103,7 +1103,9 @@ def test_bulk_matching_tolerates_small_strain():
 
 
 def test_bulk_matching_when_relaxation_splits_every_plane():
-    """No slab plane has a bulk composition: register single atoms instead."""
+    """No slab plane has a bulk composition at plane_tol: atoms still find
+    their bulk sites, and the labels are genslab's (the O moved 0.12 A, within
+    deform_tol).  Before 0.5.1 the phases came out swapped and deformed."""
     from taskerslabgen import cutslab, generate_slabs_for_miller
 
     slab = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, (0, 0, 1), [4])[(0, 0, 1)].values()))["atoms"][0]
@@ -1118,7 +1120,7 @@ def test_bulk_matching_when_relaxation_splits_every_plane():
     # The planes alternate IrO2 / IrO2' (rotated): keeping the input's top
     # plane takes every second thickness, any phase takes all of them.
     assert [len(s) for s in subs] == [6 * m for m in range(1, 5)]
-    assert {s.info["cut_bottom_plane"] for s in subs} == {"IrO2'~"}
+    assert {s.info["cut_bottom_plane"] for s in subs} == {"IrO2"}
     loose = cutslab(split, Q_IRO2, bulk_atoms=IRO2, dipole_tol=0.05, selection="shape")
     assert [len(s) for s in loose] == [3 * m for m in range(1, 9)]
 
@@ -1511,3 +1513,99 @@ def test_old_ase_with_numpy2_fails_with_a_clear_message(monkeypatch):
         taskerslabgen._check_ase_numpy()
     monkeypatch.setattr(ase, "__version__", "3.29.0")
     taskerslabgen._check_ase_numpy()
+
+
+# ---------------------------------------------------------------------------
+# 0.5.1: bulk mode registers the slab on the bulk crystal in 3D
+# ---------------------------------------------------------------------------
+DATA_DIR = Path(__file__).resolve().parent / "data"
+BROOKITE = read((DATA_DIR / "TiO2_brookite.cif").as_posix())
+Q_TIO2 = {"Ti": 4.0, "O": -2.0}
+
+
+@pytest.mark.parametrize("fixed", ["0.2", "0.4"])
+def test_bulk_mode_relaxed_brookite_keeps_the_cut(fixed):
+    """Brookite (210): ten planes per 2.3 A repeat, some 0.15 A apart.  Two
+    MACE relaxations of a 5-layer genslab slab (bottom 20 % / 40 % fixed on
+    the cut) lost planes and, for 40 %, read every label one phase off,
+    fixed bottom included."""
+    from taskerslabgen import cutslab
+
+    slab = read((DATA_DIR / f"brookite210_5layers_fixed{fixed}.extxyz").as_posix())
+    subs = sorted(cutslab(slab, Q_TIO2, bulk_atoms=BROOKITE, miller=(2, 1, 0), dipole_tol=0.05), key=len)
+    full = subs[-1]
+    assert [len(s) for s in subs] == [24, 48, 72, 96, 120]
+    assert full.info["cut_n_planes"] == 50
+    assert full.info["cut_bottom_plane"] == "TiO2"
+    assert full.info["cut_top_plane"] in ("TiO2'''", "TiO2'''~")
+
+
+def _relax_like(slab, rng):
+    """Bottom 30 % fixed; above, noise, a 1 % outward expansion, and the top
+    2 A moved sideways and up, as a relaxation might."""
+    slab = slab.copy()
+    z = slab.positions[:, 2]
+    lo, hi = z.min(), z.max()
+    zf = lo + 0.3 * (hi - lo)
+    free, top = z > zf, z > hi - 2.0
+    slab.positions[free] += rng.normal(0, 0.05, (free.sum(), 3))
+    slab.positions[free, 2] += 0.01 * (z[free] - zf)
+    slab.positions[top, :2] += rng.normal(0, 0.3, (top.sum(), 2))
+    slab.positions[top, 2] += 0.15
+    return slab
+
+
+@pytest.mark.parametrize("bulk_name,miller", [("brookite", (2, 1, 0)), ("brookite", (0, 0, 1)),
+                                              ("IrO2", (2, 1, 0))])
+def test_bulk_mode_recovers_genslab_planes_of_relaxed_slabs(bulk_name, miller):
+    """Every termination, exact and 'relaxed': bulk mode finds genslab's
+    surface labels and the slab's number of planes (before 0.5.1 it missed
+    some even on unrelaxed slabs of these facets)."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+    from taskerslabgen.core import _undeformed
+
+    atoms = BROOKITE if bulk_name == "brookite" else IRO2
+    q = Q_TIO2 if bulk_name == "brookite" else Q_IRO2
+    rng = np.random.default_rng(0)
+    terms = generate_slabs_for_miller(atoms, q, miller, [4], candidates="all", dipole_tol=0.05)[miller]
+    for term in terms.values():
+        expected = (term["plane_type"], term["top_plane_type"])
+        n_planes = None
+        for slab in (term["atoms"][0], _relax_like(term["atoms"][0], rng)):
+            full = max(cutslab(slab, q, bulk_atoms=atoms, miller=miller, dipole_tol=0.05), key=len)
+            got = (_undeformed(full.info["cut_bottom_plane"]), _undeformed(full.info["cut_top_plane"]))
+            assert got == expected
+            n_planes = n_planes or full.info["cut_n_planes"]
+            assert full.info["cut_n_planes"] == n_planes
+
+
+def test_bulk_mode_does_not_depend_on_atom_order_or_wrapping():
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    term = next(iter(generate_slabs_for_miller(BROOKITE, Q_TIO2, (2, 1, 0), [4], dipole_tol=0.05)[(2, 1, 0)].values()))
+    rng = np.random.default_rng(1)
+    slab = _relax_like(term["atoms"][0], rng)
+    shuffled = slab[rng.permutation(len(slab))]
+    unwrapped = slab.copy()
+    frac = unwrapped.get_scaled_positions(wrap=False)
+    frac[:, :2] += rng.integers(-2, 3, (len(slab), 2))
+    unwrapped.set_scaled_positions(frac)
+
+    def ends(s):
+        subs = sorted(cutslab(s, Q_TIO2, bulk_atoms=BROOKITE, miller=(2, 1, 0), dipole_tol=0.05), key=len)
+        return [len(x) for x in subs], subs[-1].info["cut_bottom_plane"], subs[-1].info["cut_top_plane"]
+
+    assert ends(shuffled) == ends(slab) == ends(unwrapped)
+
+
+def test_half_occupied_surface_planes_hint_at_reconstruction():
+    """Bulk mode keeps the half-occupied outer planes of a Tasker III slab as
+    such; without reconstruction= cutslab says why it returns the input."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    term = next(iter(generate_slabs_for_miller(
+        CEO2, Q_CEO2, (0, 0, 1), [3], prefer_plane="O", bond_distances=BOND_DISTS_CEO2
+    )[(0, 0, 1)].values()))
+    with pytest.warns(UserWarning, match="with the same atoms"):
+        subs = cutslab(term["atoms"][0], Q_CEO2, bulk_atoms=CEO2)
+    assert len(subs) == 1

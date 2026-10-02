@@ -3,11 +3,25 @@
 ## 0.5.1 — unreleased
 
 ### Fixes
-- **cutslab(bulk_atoms=)** could pick a symmetry-equivalent height registry
-  (glide or screw: rutile (100), anatase (001)) and so name a termination by
-  another phase (``O'``/``O`` for genslab's ``O'''``/``O''``).  Registries
-  that fit equally well are now told apart by whether every plane aligns with
-  one in-plane translation of the whole slab.
+- **cutslab(bulk_atoms=) on close planes.**  Bulk mode matched whole planes
+  within 0.3 Å and then sent every atom to the nearest plane by height, both
+  coarser than the planes of brookite (210) (ten in 2.3 Å, some 0.15 Å
+  apart): relaxed slabs lost planes and could read every label one phase off,
+  fixed bottom included.  The slab is now registered on the bulk crystal in
+  3D (one in-plane shift, a height and a strain along the normal, maximising
+  the smooth overlap of its atoms with the bulk sites of their element), and
+  every atom takes its own bulk site, the slab being the run of bulk planes
+  that explains it best (an empty site costs as much as one hop between
+  sites).  Planes related by a glide or screw axis keep their phase (one
+  shift for the whole slab: rutile (100), anatase (001)).  On genslab
+  terminations of six materials, exact and relaxed-like, bulk mode now finds
+  genslab's surface labels and plane counts in 122 of 122 runs (0.5.0: 84);
+  19 of 111 relaxed FHI-aims slabs change, mostly from phase-shifted or
+  spuriously deformed labels to genslab's, and several recover their
+  thickness series.
+- A slab whose surface planes are half-occupied bulk planes (Tasker III)
+  now gets the hint to pass ``reconstruction=`` when cutslab can only return
+  it whole.
 - **Slab-only labels** merged phases when the reference repeat unit wrapped
   round (anatase (001) ``O''``/``O'''``, the two bridging-O rows of relaxed
   rutile (110) slabs).  Slab-only and genslab labels now group the planes

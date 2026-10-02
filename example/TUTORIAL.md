@@ -128,8 +128,14 @@ sub_slabs = cutslab(
 )
 ```
 
-Every atom is assigned to the nearest bulk plane, so rumpled surface planes
-stay whole, and a plane deformed beyond `deform_tol` gets `~` (`O4~`).
+cutslab registers the slab on the bulk crystal in 3D: one in-plane shift, a
+height and a strain along the normal, chosen by how well the atoms sit on bulk
+sites of their element, so the bulk-like atoms decide and relaxed ones barely
+count.  Every atom then takes its own bulk site, the slab being a run of whole
+bulk planes (the half-occupied surface planes of a Tasker III slab included).
+Rumpled surface planes stay whole, even where bulk planes lie a fraction of an
+ångström apart (brookite (210): ten planes in 2.3 Å), and a plane deformed
+beyond `deform_tol` gets `~` (`O4~`).
 `charges=None` reads charges stored on the `Atoms` object instead.
 
 ## 6. Plane tolerance
