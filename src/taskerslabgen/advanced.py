@@ -23,7 +23,7 @@ from .core import (
     select_best_sequence,
     surface_bulk_cell,
 )
-from .plotting import plot_unitcell_atoms
+from .plotting import plot_cut, plot_unitcell_atoms
 from .tasker3 import (
     build_adjacency_matrix,
     build_tasker3_slabs,
@@ -46,6 +46,7 @@ __all__ = [
     "find_tasker3_candidates",
     "identify_planes",
     "is_stoichiometric_sequence",
+    "plot_cut",
     "plot_unitcell_atoms",
     "print_adjacency_matrix",
     "select_best_sequence",

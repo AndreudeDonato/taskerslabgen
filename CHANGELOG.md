@@ -48,9 +48,16 @@ cutslab thickness series selected by them, change.
   ``occupancy`` info: occupancies are keyed by tags, so the ASE GUI drew
   slab atoms with the wrong species.
 
+- ``cutslab(plot=True)`` draws a new picture per cut (``plot_cut``): the
+  input slab from the side with the sub-slab in colour, and its planes
+  labelled and coloured by what the selection allowed as bottom and top
+  surface.  The old plot put the bottom cut line in the vacuum when a
+  sub-slab started at the first plane, and its labels overlapped.
+
 ### Examples
 - New ``example/plane_phases.py``: the three cases (relative phase, absolute
-  phase, rotation) with ASE GUI views; tutorial section on plane phases.
+  phase, rotation) in one trajectory with a cut picture each; tutorial
+  section on plane phases.
 - ``batch_unitcell_slabs.py`` has ``SELECTION``.
 
 ## 0.4.0 — 2026-10-02

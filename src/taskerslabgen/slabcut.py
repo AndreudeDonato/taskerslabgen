@@ -170,7 +170,7 @@ def cutslab(
         known, ``stacking_labels`` (labels of one repeat unit from its
         bottom plane).
     """
-    from .plotting import plot_unitcell_atoms
+    from .plotting import plot_cut
 
     if bond_threshold is not None or bond_distances is not None:
         warnings.warn(
@@ -502,11 +502,6 @@ def cutslab(
             "bulk_atoms=." + polar_hint
         )
 
-    # ---- Prepare plot names ----
-    highlight_set = set(boundary_indices) | recon_eligible
-
-    z_s = np.array([p["z_center"] % L for p in planes_sorted])
-
     # ---- Build sub-slabs ----
     slab_atoms = []
     for cut_idx, cut in enumerate(valid_cuts):
@@ -533,27 +528,26 @@ def cutslab(
         _finalize_slab(slab, **validation)
 
         if plot:
-            zbot_mid = 0.5 * (
-                z_s[(bi - 1) % n] + z_s[bi]
-            ) if bi > 0 else z_s[bi] * 0.5
-            ztop_mid = 0.5 * (
-                z_s[ti] + z_s[(ti + 1) % n]
-            ) if ti < n - 1 else 0.5 * (z_s[ti] + L)
             plot_path = (
                 f"{plot_out_dir}/{stem}_hkl_{miller_str}"
                 f"_cut_{cut_idx}_{plane_name_for_filename(bp)}_{plane_name_for_filename(tp)}.png"
             )
-            plot_unitcell_atoms(
-                atoms_z_matrix, L, plot_miller,
-                out_png=plot_path, plane_tol=plane_tol, planes=planes,
-                zbot=zbot_mid, ztop=ztop_mid, dipole=cut["net_dipole"],
-                matched_planes=highlight_set,
-                plane_names=plot_names,
-                title=(
-                    f"cutslab {stem} hkl={miller_str} "
-                    f"cut {cut_idx} ({bp}-{tp}, "
-                    f"{cut['n_planes']} planes)"
-                ),
+            notes = [
+                f"cut_at={cut_at!r}, selection={selection!r}, cuts={cuts!r}",
+                f"{cut['n_planes']} plane{'s' if cut['n_planes'] != 1 else ''}, {len(slab)} atoms "
+                f"({cut['stoich_k']} formula units)",
+                f"dipole {abs(cut['net_dipole']) / cut['stoich_k']:.3f} e*A per formula unit "
+                f"(dipole_tol={dipole_tol})",
+                f"top/bottom phase overlap {slab.info['cut_phase_overlap']:.2f} "
+                "(1: top exactly over bottom)",
+            ]
+            # Only this sub-slab's surfaces carry the reconstructed label.
+            names_here = [plot_names[k] if k in (bi, ti) else plane_names[k] for k in range(n)]
+            plot_cut(
+                atoms, planes_sorted, names_here, bi, ti, plot_path, axis=axis,
+                candidates=set(bottom_indices), top_candidates=set(top_indices), removed=drop,
+                notes=notes,
+                title=f"cutslab {stem} ({miller_str}): cut {cut_idx}, {bp} to {tp}",
             )
 
         slab_atoms.append(slab)

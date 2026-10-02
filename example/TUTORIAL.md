@@ -156,22 +156,24 @@ label.  Their **absolute** phase (as seen in the slab) alternates.
 | `"absolute"` (cutslab) | also exactly over the input slab's own surface plane |
 | `"shape"` | `O`, `O'`, `O''`, ...: the arrangement in any phase |
 
-`example/plane_phases.py` shows the three cases and writes structures to
-open in the ASE GUI (`--view`, or `ase gui <file>` for the top view along
-the normal, `ase gui -R -90x <file>` for a side view):
+`example/plane_phases.py` shows the three cases.  It writes every sub-slab
+to one trajectory, `output_phases/plane_phases.traj` (frame table printed;
+open with `--view`, `ase gui <file>` for the top view along the normal or
+`ase gui -R -90x <file>` for a side view), and a picture of every cut in
+`output_phases/<case>/<selection>/`: the input slab from the side with the
+sub-slab in colour, and its planes coloured by what the selection allowed
+as the bottom (red) and top (blue) surface.
 
 1. **Same arrangement, different relative phase (a vs a').**  Anatase
    (101) has four O₂ planes per repeat unit.  Over the correct termination
    the top O sits 0.73 Å above the Ti; over another phase of the same O₂
    plane only 0.15 Å.  `selection="relative"` keeps the termination
-   through the whole thickness series; `"shape"` mixes both
-   (`anatase101_right_termination.traj`, `anatase101_wrong_termination.traj`).
+   through the whole thickness series; `"shape"` mixes both.
 2. **Same relative phase, different absolute phase (a---a vs a---a').**
    Rutile IrO₂ (110): the top bridging-O row lies exactly over the bottom one
    for 1, 3, 5 layers (`cut_phase_overlap` = 1) and half a cell off for 2,
    4, 6 (`cut_phase_overlap` = 0).  `"relative"` keeps all thicknesses;
-   `"absolute"` keeps the ones in phase with the input slab
-   (`IrO2_110_1layer_in_phase.traj`, `IrO2_110_2layers_out_of_phase.traj`).
+   `"absolute"` keeps the ones in phase with the input slab.
 3. **A rotation is a phase too.**  The two IrO₂ planes of rutile (001) are
    one arrangement rotated by 90°: `IrO2` and `IrO2'`.  `"relative"` keeps
    slabs ending on the same plane as the input (an even number of planes);

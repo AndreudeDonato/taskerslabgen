@@ -553,9 +553,11 @@ Import these from `taskerslabgen.advanced` (except `validate_slab` and
 
 The example scripts write into `example/output*/`:
 
-- `*_hkl_{miller}_cut_{idx}_{bot}_{top}.png` — per-cut plot of atoms
-  along z with plane IDs, compositions, charges, and cut boundary lines
-  (only when `--plot` is passed).
+- `*_hkl_{miller}_cut_{idx}_{bot}_{top}.png` — one picture per cutslab cut
+  (only when `--plot` is passed): a side view of the input slab with the
+  sub-slab in colour and the rest grey, and its planes with their labels,
+  coloured by the planes the selection allowed as the bottom (red) and top
+  (blue) surfaces, with both cuts as dashed lines.
 - Structure files for each slab / sub-slab (CIF by default in demos).
 
 ## Running tests
