@@ -85,6 +85,13 @@ Fixes from the code review of 0.5.1 (2026-10-18).
   cut enumeration and the built slab failed validation instead of getting
   the Tasker III verdict.  Plane charges are kept exact; the ``charge_tol``
   parameter of ``identify_planes`` is accepted and ignored.
+- **cutslab(cuts="top") anchors on the input's surface.**  The series was
+  anchored on the lowest plane of any valid cut, so when the input's
+  relaxed bottom plane was too polar for ``dipole_tol`` the sub-slabs
+  silently started on an interior plane and the relaxed surface was lost
+  (the mirror for ``cuts="bottom"``).  The anchor is now the lowest plane
+  ``cut_at`` allows as a bottom (plane 0 for ``"termination"`` and
+  ``"all"``); when no valid cut starts there, cutslab raises and says so.
 
 ## 0.5.1 — 2026-10-02
 

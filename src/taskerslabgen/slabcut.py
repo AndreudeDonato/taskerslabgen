@@ -133,7 +133,11 @@ def cutslab(
           every sub-slab are planes with one of those labels.  A genslab
           termination is ``[plane_type, top_plane_type]``.
     cuts : str
-        ``"top"`` (default) -- keep the bottom plane and cut from the top.
+        ``"top"`` (default) -- keep the bottom plane and cut from the top:
+        every sub-slab starts at the lowest plane *cut_at* allows as a
+        bottom (the input's bottom plane for ``"termination"`` and
+        ``"all"``).  If no valid cut starts there (a relaxed surface too
+        polar for *dipole_tol*), none is returned.
         ``"bottom"`` -- keep the top plane and cut from the bottom.
         ``"all"`` -- keep every valid cut.
         (``"right"`` and ``"left"``, the names before 0.5, still work as
@@ -496,16 +500,16 @@ def cutslab(
     for i in recon_eligible:
         plot_names[i] = recon_label
 
-    if valid_cuts and cuts == "top":
-        fixed_bot = min(c["bottom_plane"] for c in valid_cuts)
-        valid_cuts = [
-            c for c in valid_cuts if c["bottom_plane"] == fixed_bot
-        ]
-    elif valid_cuts and cuts == "bottom":
-        fixed_top = max(c["top_plane"] for c in valid_cuts)
-        valid_cuts = [
-            c for c in valid_cuts if c["top_plane"] == fixed_top
-        ]
+    # Anchor on the lowest plane allowed as a bottom (highest as a top), not
+    # on the lowest valid cut: a relaxed surface plane that no valid cut
+    # starts from must not be silently replaced by an interior plane.
+    unanchored = len(valid_cuts)
+    if cuts == "top" and bottom_indices:
+        anchor = min(bottom_indices)
+        valid_cuts = [c for c in valid_cuts if c["bottom_plane"] == anchor]
+    elif cuts == "bottom" and top_indices:
+        anchor = max(top_indices)
+        valid_cuts = [c for c in valid_cuts if c["top_plane"] == anchor]
 
     if verbose:
         print(f"\nPlane stacking: {' '.join(plane_names)}")
@@ -544,6 +548,14 @@ def cutslab(
             " If the slab is polar (Tasker III), build it with "
             "generate_slabs_for_miller and pass reconstruction=term['reconstruction']."
         )
+        if unanchored:
+            end = ("bottom", plane_names[anchor]) if cuts == "top" else ("top", plane_names[anchor])
+            polar_hint += (
+                f" {unanchored} valid cut(s) exist, but cuts={cuts!r} keeps the input's "
+                f"{end[0]} plane ({end[1]}, plane {anchor}) in every sub-slab and no "
+                "valid cut ends there: that surface is too polar for this dipole_tol; "
+                "cuts='all' lists every valid cut."
+            )
         if cut_at not in ("all", "termination") and selection != "shape":
             polar_hint += (
                 f" This slab's surface planes are {plane_names[0]} (bottom) and "

@@ -1958,3 +1958,34 @@ def test_plane_charges_are_not_zeroed_by_an_absolute_tolerance():
         pass  # polar and no reconstruction of whole Ce2O4 planes: the honest verdict
     else:
         assert {t["tasker_type"] for t in res[(1, 1, 0)].values()} == {"III"}
+
+
+def test_cuts_top_anchors_on_the_input_surface_or_raises():
+    """Finding 11: cuts='top' anchored on the lowest plane of any valid cut,
+    so when the input's relaxed bottom plane was too polar for dipole_tol
+    the series silently started on an interior plane (the relaxed surface
+    was lost); the mirror for cuts='bottom'."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    slab = next(iter(generate_slabs_for_miller(CEO2, Q_CEO2, (1, 1, 1), [4])[(1, 1, 1)].values()))["atoms"][0]
+    z = slab.positions[:, 2]
+    n_planes = 12
+
+    def moved(outward_at_bottom):
+        out = slab.copy()
+        edge = np.flatnonzero(np.abs(z - (z.min() if outward_at_bottom else z.max())) < 0.1)
+        out.positions[edge, 2] += -0.4 if outward_at_bottom else 0.4
+        return out
+
+    with pytest.raises(ValueError, match="keeps the input's bottom plane"):
+        cutslab(moved(True), Q_CEO2, dipole_tol=0.02, cuts="top")
+    subs = cutslab(moved(True), Q_CEO2, dipole_tol=0.05, cuts="top")
+    assert len(subs) == 4 and {s.info["cut_bottom_idx"] for s in subs} == {0}
+    with pytest.raises(ValueError, match="keeps the input's top plane"):
+        cutslab(moved(False), Q_CEO2, dipole_tol=0.02, cuts="bottom")
+    subs = cutslab(moved(False), Q_CEO2, dipole_tol=0.05, cuts="bottom")
+    assert len(subs) == 4 and {s.info["cut_top_idx"] for s in subs} == {n_planes - 1}
+    # cuts='all' still lists the interior cuts.
+    assert cutslab(moved(True), Q_CEO2, dipole_tol=0.02, cuts="all", cut_at="all")
+
+
