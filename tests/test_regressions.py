@@ -1850,3 +1850,34 @@ def test_bulk_mode_accepts_strained_supercell_slabs():
     one.set_cell(cell, scale_atoms=True)
     subs = cutslab(one, Q_IRO2, bulk_atoms=IRO2.repeat((2, 2, 1)), miller=(1, 1, 0), dipole_tol=0.05)
     assert [len(s) for s in subs] == [len(s) for s in cutslab(slab, Q_IRO2, bulk_atoms=IRO2, dipole_tol=0.05)]
+
+
+def test_tasker3_orbits_keep_valid_patterns_of_a_broken_symmetry():
+    """Finding 8: a symmetry orbit was represented by its lowest-index
+    pattern whether or not that one was valid, so when a rumpled plane (or
+    per-atom charges) broke the symmetry, the valid members of a mixed orbit
+    vanished from candidates='all', and multiplicity counted invalid ones."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    def deleted(term):
+        return sorted((round(fx, 3), round(fy, 3)) for _, fx, fy in term["reconstruction"]["delete_info"])
+
+    def y_row(term):  # both deleted O in one row along y: same fx
+        (fx1, fy1), (fx2, fy2) = deleted(term)
+        return fx1 == fx2 and abs(fy1 - fy2) == 0.5
+
+    # O planes rumpled by +/-0.04 A (fy < 1/2 up, fy > 1/2 down): the x-rows are polar, the y-rows not.
+    rumpled = CEO2.copy()
+    f = rumpled.get_scaled_positions()
+    rumpled.positions[:, 2] += np.where(rumpled.numbers == 8, np.where(f[:, 1] < 0.5, 0.04, -0.04), 0.0)
+    res = generate_slabs_for_miller(rumpled, Q_CEO2, (0, 0, 1), [2], candidates="all", plane_tol=0.2)[(0, 0, 1)]
+    o_terms = [t for t in res.values() if t["plane_type"] == "O4-recon"]
+    assert len(o_terms) == 2 and any(y_row(t) for t in o_terms)
+    assert sum(t["candidate"]["multiplicity"] for t in o_terms) == 8  # the valid O4 patterns
+    # Per-atom charges that break the symmetry (O -3 at fy < 1/2, -1 at fy > 1/2): same.
+    q = [4.0 if s == "Ce" else (-3.0 if fy < 0.5 else -1.0)
+         for s, (_, fy, _) in zip(CEO2.get_chemical_symbols(), CEO2.get_scaled_positions())]
+    res = generate_slabs_for_miller(CEO2, q, (0, 0, 1), [2], candidates="all")[(0, 0, 1)]
+    o_terms = [t for t in res.values() if t["plane_type"] == "O4-recon"]
+    assert len(o_terms) == 2 and any(y_row(t) for t in o_terms)
+    assert sum(t["candidate"]["multiplicity"] for t in o_terms) == 8

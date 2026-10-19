@@ -216,7 +216,7 @@ def _compute_plane_excess(plane_counts, reduced_counts):
     return None, None
 
 
-def _stacking_symmetry(numbers, positions, cell, tol=0.1):
+def _stacking_symmetry(numbers, positions, cell, tol=0.1, charges=None, charge_tol=1e-3):
     """
     Atom permutations of the symmetry operations of a crystal that keep the
     stacking direction (in-plane rotation or mirror, any translation, z only
@@ -224,11 +224,14 @@ def _stacking_symmetry(numbers, positions, cell, tol=0.1):
 
     *positions* and the true lattice *cell* (rows ``a1``, ``a2`` in-plane,
     ``a3``) describe one bulk repeat unit, e.g. the one-layer cell of
-    :func:`build_surface` with :func:`surface_bulk_cell`.  Returns a list of
-    arrays ``perm`` (``perm[a]`` is the image of atom ``a``), identity first.
+    :func:`build_surface` with :func:`surface_bulk_cell`.  With *charges*
+    (one per atom), an operation must map every atom onto an atom whose
+    charge is the same within *charge_tol*.  Returns a list of arrays
+    ``perm`` (``perm[a]`` is the image of atom ``a``), identity first.
     """
     cell = np.asarray(cell, dtype=float)
     numbers = np.asarray(numbers)
+    charges = None if charges is None else np.asarray(charges, dtype=float)
     frac = np.asarray(positions, dtype=float) @ np.linalg.inv(cell)
     cell2d = cell[:2, :2]
     inv2d = np.linalg.inv(cell2d)
@@ -253,6 +256,8 @@ def _stacking_symmetry(numbers, positions, cell, tol=0.1):
             d -= np.round(d)
             dist = np.linalg.norm(d @ cell, axis=-1)
             dist[numbers[:, None] != numbers[None, :]] = np.inf
+            if charges is not None:
+                dist[np.abs(charges[:, None] - charges[None, :]) > charge_tol] = np.inf
             perm = np.argmin(dist, axis=1)
             if dist[np.arange(len(perm)), perm].max() > tol or len(set(perm)) != len(perm):
                 continue
@@ -365,15 +370,19 @@ def _tasker3_slab_moments(q, r, plane_idx, mask, L, atoms_per_fu, min_layers=1,
     dipole (about the mean height) and net charge of the ``min_layers``
     slab, the largest |dipole| / *area* and the largest |charge| per formula
     unit over every thickness from *min_layers* to *max_layers* (or a
-    spread of thicknesses up to ``10 * min_layers`` if not given).
+    spread of thicknesses up to ``10 * min_layers`` if not given).  *mask*
+    may also be a 2D integer array, one mask per row: the four results are
+    then arrays, one entry per mask.
     """
     q = np.asarray(q, dtype=float)
     r = np.asarray(r, dtype=float)
     P = np.asarray(plane_idx, dtype=int)
-    M = np.asarray(list(mask), dtype=int)
+    M = np.asarray(mask if isinstance(mask, np.ndarray) else list(mask), dtype=int)
+    single = M.ndim == 1
+    M = M.reshape(1, -1) if single else M
     Nu, Qu, Du, Ru = len(q), q.sum(), q @ r, r.sum()
     NP, QP, DP, RP = len(P), q[P].sum(), q[P] @ r[P], r[P].sum()
-    NM, QM, DM, RM = len(M), q[M].sum(), q[M] @ r[M], r[M].sum()
+    NM, QM, DM, RM = M.shape[1], q[M].sum(axis=1), (q[M] * r[M]).sum(axis=1), r[M].sum(axis=1)
 
     def moments(lt):
         qz = lt * Du + L * Qu * lt * (lt - 1) / 2 + DP + lt * L * QP - 2 * DM - lt * L * QM
@@ -382,7 +391,7 @@ def _tasker3_slab_moments(q, r, plane_idx, mask, L, atoms_per_fu, min_layers=1,
         Q = lt * Qu + QP - 2 * QM
         mu = qz - Q * z / n
         k = n / atoms_per_fu
-        return mu, Q, abs(mu) / area, abs(Q) / k
+        return mu, Q, np.abs(mu) / area, np.abs(Q) / k
 
     if max_layers is None:
         lts = sorted({min_layers, min_layers + 1, min_layers + 3, 10 * min_layers})
@@ -390,9 +399,11 @@ def _tasker3_slab_moments(q, r, plane_idx, mask, L, atoms_per_fu, min_layers=1,
         lts = range(min_layers, max(min_layers, max_layers) + 1)
     values = [moments(lt) for lt in lts]
     mu0, Q0 = values[0][0], values[0][1]
-    dipole_per_area = max(v[2] for v in values)
-    charge_per_fu = max([v[3] for v in values] + [abs(Qu) / (Nu / atoms_per_fu)])
-    return float(mu0), float(Q0), float(dipole_per_area), float(charge_per_fu)
+    dipole_per_area = np.max([v[2] for v in values], axis=0)
+    charge_per_fu = np.maximum(np.max([v[3] for v in values], axis=0), abs(Qu) / (Nu / atoms_per_fu))
+    if single:
+        return float(mu0[0]), float(Q0[0]), float(dipole_per_area[0]), float(charge_per_fu[0])
+    return mu0, Q0, dipole_per_area, charge_per_fu
 
 
 def _prefer_matches(prefer_plane, label, counts):
@@ -499,11 +510,15 @@ def find_tasker3_candidates(
     - **distribution score** of the kept atoms of the surface plane (see
       :func:`_compute_distribution_score`).
 
-    Patterns related by a symmetry operation of the crystal that keeps the
-    stacking direction (in-plane rotations and mirrors, translations,
-    screw axes) give the same slab up to that operation; only one of each
-    set is scored, and its ``multiplicity`` is the size of the set.  This
-    also merges symmetry-equivalent planes of the cell.
+    Every pattern's charge and dipole are evaluated on its own.  Patterns
+    related by a symmetry operation of the crystal that keeps the stacking
+    direction (in-plane rotations and mirrors, translations, screw axes)
+    and maps atoms onto atoms of the same charge give the same slab up to
+    that operation, so they are one termination: it is represented by the
+    lowest-index valid pattern of the set, and its ``multiplicity`` is the
+    number of valid patterns in the set (an approximate symmetry, e.g. a
+    rumpled plane, may leave only some of them valid).  This also merges
+    symmetry-equivalent planes of the cell.
 
     Parameters
     ----------
@@ -594,7 +609,8 @@ def find_tasker3_candidates(
         bi, bj, D = _bond_pairs(periodic, bond_threshold, bond_distances)
         bonds = (bi, bj, D[:, 2])
         dists = surf_bulk.get_all_distances(mic=True)
-        perms = _stacking_symmetry(surf_bulk.numbers, surf_bulk.positions, cell)
+        perms = _stacking_symmetry(surf_bulk.numbers, surf_bulk.positions, cell,
+                                   charges=q, charge_tol=charge_tol)
 
     # Number of patterns before enumerating them: the count is combinatorial
     # in the size of the surface cell.
@@ -619,83 +635,108 @@ def find_tasker3_candidates(
     for i, plane in enumerate(planes_sorted):
         plane_of[plane["indices"]] = i
 
-    def orbit(i, mask):
-        """Symmetry images (plane, sorted mask) of a pattern, or None if a
-        smaller image exists (so the pattern is not its set's representative)."""
-        key = (i, tuple(sorted(int(a) for a in mask)))
-        images = {key}
-        for perm in perms or ():
-            image = perm[list(mask)]
-            other = (int(plane_of[image[0]]), tuple(sorted(int(a) for a in image)))
-            if other < key:
-                return None
-            images.add(other)
-        return images
-
-    plane_masks = []
+    # Every deletion pattern of every plane with its exact moments: each
+    # member of a symmetry orbit is judged on its own.
+    per_plane = {}
     for i, excess, k in plane_excess:
-        masks = []
-        for mask in _enumerate_deletion_masks(planes_sorted[i]["indices"], atoms_z_matrix, excess):
-            images = orbit(i, mask)
-            if images is not None:
-                masks.append((mask, len(images)))
-        if masks:
-            plane_masks.append((i, excess, k, masks))
-
-    candidates = []
-    for i, excess, k, masks in plane_masks:
         plane = planes_sorted[i]
-        label = f"{plane_names[i]}-recon"
+        masks = _enumerate_deletion_masks(plane["indices"], atoms_z_matrix, excess)
+        if not masks:
+            continue
         zbot, ztop = compute_cut_positions(planes_sorted, L, (i - 1) % n, i)
         r_bot = (z - zbot) % L
         span = (ztop - zbot) % L or L
         r_top = (span - r_bot) % L  # depth below the top cut
-        if bonds is not None:
-            terms_bot = _dangling_terms(r_bot, bonds[0], bonds[1], bonds[2], L)
-            terms_top = _dangling_terms(r_top, bonds[0], bonds[1], -bonds[2], L)
-        matches = _prefer_matches(prefer_plane, label, plane["counts"])
-        plane_charge = float(q[plane["indices"]].sum())
+        keys = [tuple(sorted(int(a) for a in mask)) for mask in masks]
+        mu, total_q, dipole_per_area, charge_per_fu = _tasker3_slab_moments(
+            q, r_bot, plane["indices"], np.array(keys, dtype=int), L, atoms_per_fu,
+            min_layers, max_layers, area,
+        )
+        is_neutral = charge_per_fu <= charge_tol
+        per_plane[i] = {
+            "excess": excess, "k": k, "masks": masks, "keys": keys,
+            "index": {key: pos for pos, key in enumerate(keys)},
+            "mu": mu, "total_charge": total_q, "dipole_per_area": dipole_per_area,
+            "charge_per_fu": charge_per_fu, "is_neutral": is_neutral,
+            "is_valid": is_neutral & (dipole_per_area <= dipole_tol),
+            "terms": ((_dangling_terms(r_bot, bonds[0], bonds[1], bonds[2], L),
+                       _dangling_terms(r_top, bonds[0], bonds[1], -bonds[2], L))
+                      if bonds is not None else None),
+        }
 
-        for mask, multiplicity in masks:
-            mu, total_q, dipole_per_area, charge_per_fu = _tasker3_slab_moments(
-                q, r_bot, plane["indices"], mask, L, atoms_per_fu, min_layers,
-                max_layers, area,
-            )
-            if bonds is not None:
-                broken_bottom = _dangling_bonds(mask, terms_bot)
-                broken_top = _dangling_bonds(mask, terms_top)
+    def position(member):
+        """Where a (plane, sorted mask) pattern sits in its plane's enumeration."""
+        j, key = member
+        return per_plane[j]["index"].get(key) if j in per_plane else None
+
+    def is_valid(member):
+        pos = position(member)
+        return pos is not None and bool(per_plane[member[0]]["is_valid"][pos])
+
+    # Symmetry orbits, each expanded once from its first pattern: the
+    # representative is the lowest-index valid member (or the lowest member
+    # when none is valid) and the multiplicity counts the valid members.
+    seen = set()
+    representatives = []
+    for i in per_plane:
+        for key in per_plane[i]["keys"]:
+            if (i, key) in seen:
+                continue
+            images = {(i, key)}
+            for perm in perms or ():
+                image = perm[list(key)]
+                images.add((int(plane_of[image[0]]), tuple(sorted(int(a) for a in image))))
+            seen |= images
+            members = sorted(m for m in images if position(m) is not None)
+            valid_members = [m for m in members if is_valid(m)]
+            if valid_members:
+                representatives.append((valid_members[0], len(valid_members)))
             else:
-                broken_bottom = broken_top = 0
-            kept = [idx for idx in plane["indices"] if idx not in set(mask)]
-            dist_score = (
-                _compute_distribution_score(kept, atoms_z_matrix, numbers, dists, bond_distances)
-                if dists is not None else 0.0
-            )
-            is_neutral = charge_per_fu <= charge_tol
-            candidates.append({
-                "cut_plane_idx": i,
-                "recon_label": label,
-                "plane_z": plane["z_center"],
-                "plane_counts": dict(plane["counts"]),
-                "deletion_mask": tuple(int(m) for m in mask),
-                "excess": {Z: v for Z, v in excess.items() if v > 0},
-                "n_deleted": len(mask),
-                "formula_units_kept": k,
-                "bond_score": broken_top + broken_bottom,
-                "broken_top": broken_top,
-                "broken_bottom": broken_bottom,
-                "net_dipole": mu,
-                "abs_dipole": abs(mu),
-                "dipole_per_area": dipole_per_area,
-                "total_charge": total_q,
-                "charge_per_fu": charge_per_fu,
-                "is_neutral": is_neutral,
-                "is_valid": is_neutral and dipole_per_area <= dipole_tol,
-                "q_recon": plane_charge - float(q[list(mask)].sum()),
-                "distribution_score": dist_score,
-                "multiplicity": multiplicity,
-                "matches_prefer_plane": matches,
-            })
+                representatives.append((members[0], len(members)))
+
+    candidates = []
+    matches = {i: _prefer_matches(prefer_plane, f"{plane_names[i]}-recon", planes_sorted[i]["counts"])
+               for i in per_plane}
+    for (i, key), multiplicity in representatives:
+        info = per_plane[i]
+        pos = info["index"][key]
+        plane = planes_sorted[i]
+        label = f"{plane_names[i]}-recon"
+        mask = info["masks"][pos]
+        if info["terms"] is not None:
+            broken_bottom = _dangling_bonds(mask, info["terms"][0])
+            broken_top = _dangling_bonds(mask, info["terms"][1])
+        else:
+            broken_bottom = broken_top = 0
+        kept = [idx for idx in plane["indices"] if idx not in set(mask)]
+        dist_score = (
+            _compute_distribution_score(kept, atoms_z_matrix, numbers, dists, bond_distances)
+            if dists is not None else 0.0
+        )
+        candidates.append({
+            "cut_plane_idx": i,
+            "recon_label": label,
+            "plane_z": plane["z_center"],
+            "plane_counts": dict(plane["counts"]),
+            "deletion_mask": tuple(int(m) for m in mask),
+            "excess": {Z: v for Z, v in info["excess"].items() if v > 0},
+            "n_deleted": len(mask),
+            "formula_units_kept": info["k"],
+            "bond_score": broken_top + broken_bottom,
+            "broken_top": broken_top,
+            "broken_bottom": broken_bottom,
+            "net_dipole": float(info["mu"][pos]),
+            "abs_dipole": abs(float(info["mu"][pos])),
+            "dipole_per_area": float(info["dipole_per_area"][pos]),
+            "total_charge": float(info["total_charge"][pos]),
+            "charge_per_fu": float(info["charge_per_fu"][pos]),
+            "is_neutral": bool(info["is_neutral"][pos]),
+            "is_valid": bool(info["is_valid"][pos]),
+            "q_recon": float(q[plane["indices"]].sum() - q[list(mask)].sum()),
+            "distribution_score": dist_score,
+            "multiplicity": multiplicity,
+            "matches_prefer_plane": matches[i],
+        })
 
     def _rank(c):
         return (

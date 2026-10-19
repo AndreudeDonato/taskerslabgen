@@ -58,6 +58,20 @@ Fixes from the code review of 0.5.1 (2026-10-18).
   with the supercell (a 2x2 relaxed slab at 1.5 % strain was rejected).  One
   helper now tests the relative strain of every cell vector (up to 5 %) at
   all four sites.
+- **Tasker III orbits with a broken symmetry.**  Symmetry-equivalent
+  deletion patterns were represented by the lowest-index pattern of the
+  orbit whether or not it was valid, and the symmetry ignored the charges
+  and distortions below 0.1 Å: when a rumpled plane or per-atom charges
+  broke the symmetry, the valid members of a mixed orbit vanished from
+  ``candidates="all"`` (CeO2 (001) with O planes rumpled by 0.04 Å lost the
+  O4 row termination), ``multiplicity`` counted invalid patterns, and
+  per-atom charges could raise "No charge-neutral Tasker III
+  reconstruction" although valid patterns existed.  Every pattern's charge
+  and dipole are now evaluated (vectorised), the orbit is represented by
+  its lowest-index valid pattern, ``multiplicity`` counts the valid ones,
+  and the symmetry operations must map atoms onto atoms of the same charge
+  (within ``charge_tol``).  Orbits are expanded once each, so the
+  enumeration is faster.
 
 ## 0.5.1 — 2026-10-02
 
