@@ -1,6 +1,8 @@
 """
 Tasker III reconstructions: enumerate, score (broken bonds, charge distribution,
-exact slab dipoles) and build symmetry-distinct deletion patterns.
+exact slab dipoles) and build deletion patterns, one per set of patterns
+related by a symmetry of the crystal that keeps the surface normal (up to
+its sense).
 """
 import warnings
 from itertools import combinations
@@ -219,8 +221,10 @@ def _compute_plane_excess(plane_counts, reduced_counts):
 def _stacking_symmetry(numbers, positions, cell, tol=0.1, charges=None, charge_tol=1e-3):
     """
     Atom permutations of the symmetry operations of a crystal that keep the
-    stacking direction (in-plane rotation or mirror, any translation, z only
-    shifted).
+    stacking axis (in-plane rotation or mirror, any translation, z shifted
+    or reversed).  A z-reversing operation turns a slab upside down; for a
+    slab with the same pattern on both surfaces that is the same
+    termination.
 
     *positions* and the true lattice *cell* (rows ``a1``, ``a2`` in-plane,
     ``a3``) describe one bulk repeat unit, e.g. the one-layer cell of
@@ -240,30 +244,34 @@ def _stacking_symmetry(numbers, positions, cell, tol=0.1, charges=None, charge_t
     perms = [np.arange(len(numbers))]
     seen = {tuple(perms[0])}
     for W in _lattice_point_ops(cell2d):
-        # In-plane rotation R (Cartesian): cell2d @ R.T = W @ cell2d.  It is a
-        # lattice operation only if it moves a3 by an in-plane lattice vector.
+        # In-plane rotation R (Cartesian): cell2d @ R.T = W @ cell2d, with z
+        # kept (s = 1) or reversed (s = -1).  It is a lattice operation only
+        # if the image of a3, its in-plane part rotated and s * a3 along z,
+        # is a lattice vector: s * a3 plus an in-plane lattice vector k.
         RT = inv2d @ W @ cell2d
-        k = (cell[2, :2] @ RT - cell[2, :2]) @ inv2d
-        if not np.allclose(k, np.round(k), atol=1e-3):
-            continue
-        W3 = np.eye(3)
-        W3[:2, :2] = W
-        W3[2, :2] = np.round(k)
-        rotated = frac @ W3
-        for b in np.flatnonzero(numbers == numbers[anchor]):
-            t = frac[b] - rotated[anchor]
-            d = (rotated + t)[:, None, :] - frac[None, :, :]
-            d -= np.round(d)
-            dist = np.linalg.norm(d @ cell, axis=-1)
-            dist[numbers[:, None] != numbers[None, :]] = np.inf
-            if charges is not None:
-                dist[np.abs(charges[:, None] - charges[None, :]) > charge_tol] = np.inf
-            perm = np.argmin(dist, axis=1)
-            if dist[np.arange(len(perm)), perm].max() > tol or len(set(perm)) != len(perm):
+        for s in (1, -1):
+            k = (cell[2, :2] @ RT - s * cell[2, :2]) @ inv2d
+            if not np.allclose(k, np.round(k), atol=1e-3):
                 continue
-            if tuple(perm) not in seen:
-                seen.add(tuple(perm))
-                perms.append(perm)
+            W3 = np.eye(3)
+            W3[:2, :2] = W
+            W3[2, :2] = np.round(k)
+            W3[2, 2] = s
+            rotated = frac @ W3
+            for b in np.flatnonzero(numbers == numbers[anchor]):
+                t = frac[b] - rotated[anchor]
+                d = (rotated + t)[:, None, :] - frac[None, :, :]
+                d -= np.round(d)
+                dist = np.linalg.norm(d @ cell, axis=-1)
+                dist[numbers[:, None] != numbers[None, :]] = np.inf
+                if charges is not None:
+                    dist[np.abs(charges[:, None] - charges[None, :]) > charge_tol] = np.inf
+                perm = np.argmin(dist, axis=1)
+                if dist[np.arange(len(perm)), perm].max() > tol or len(set(perm)) != len(perm):
+                    continue
+                if tuple(perm) not in seen:
+                    seen.add(tuple(perm))
+                    perms.append(perm)
     return perms
 
 
@@ -512,7 +520,8 @@ def find_tasker3_candidates(
 
     Every pattern's charge and dipole are evaluated on its own.  Patterns
     related by a symmetry operation of the crystal that keeps the stacking
-    direction (in-plane rotations and mirrors, translations, screw axes)
+    axis (in-plane rotations and mirrors, translations, screw axes, and
+    operations that reverse the normal, which turn the slab upside down)
     and maps atoms onto atoms of the same charge give the same slab up to
     that operation, so they are one termination: it is represented by the
     lowest-index valid pattern of the set, and its ``multiplicity`` is the

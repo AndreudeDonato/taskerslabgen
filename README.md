@@ -322,7 +322,7 @@ bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
 
 | Value | Behaviour |
 |---|---|
-| `"best"` | Return only the single best candidate per Miller index. Tasker I/II: fewest bulk bonds broken at the cut, then densest surface planes (`candidate["broken_bonds"]`, `candidate["broken_bonds_by_pair"]`, `candidate["surface_density"]`); IDs follow this ranking. Tasker III: candidates must stay neutral and non-polar for every thickness from the thinnest requested one up; ranked by `bond_score` (bulk bonds the slab's atoms lose at both surfaces), then `distribution_score`; IDs follow this ranking.  Deletion patterns related by a symmetry of the crystal that keeps the stacking direction are one termination (`candidate["multiplicity"]` counts them). |
+| `"best"` | Return only the single best candidate per Miller index. Tasker I/II: fewest bulk bonds broken at the cut, then densest surface planes (`candidate["broken_bonds"]`, `candidate["broken_bonds_by_pair"]`, `candidate["surface_density"]`); IDs follow this ranking. Tasker III: candidates must stay neutral and non-polar for every thickness from the thinnest requested one up; ranked by `bond_score` (bulk bonds the slab's atoms lose at both surfaces), then `distribution_score`; IDs follow this ranking.  Deletion patterns related by a symmetry of the crystal that keeps the surface normal, up to its sense (so also patterns that are the same slab turned upside down), are one termination, represented by its lowest-index valid pattern; `candidate["multiplicity"]` counts the valid patterns it stands for. |
 | `"all"` | Return every valid candidate, generating a separate plot for each. |
 
 **Returns**
