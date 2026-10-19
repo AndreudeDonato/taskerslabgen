@@ -1881,3 +1881,50 @@ def test_tasker3_orbits_keep_valid_patterns_of_a_broken_symmetry():
     o_terms = [t for t in res.values() if t["plane_type"] == "O4-recon"]
     assert len(o_terms) == 2 and any(y_row(t) for t in o_terms)
     assert sum(t["candidate"]["multiplicity"] for t in o_terms) == 8
+
+
+def test_cutslab_enumeration_and_validation_use_the_same_charge_scale(ceo2_111_slab):
+    """Finding 9: the cut enumeration normalised charges and dipoles by the
+    whole slab's mean |q|, validate_slab by the sub-slab's own, so with
+    computed charges that vary between planes a cut passed the enumeration
+    and failed validation (SlabValidationError aborted the whole call), or
+    the other way round (a valid cut silently dropped)."""
+    from taskerslabgen import cutslab
+    from taskerslabgen.advanced import identify_planes, is_stoichiometric_sequence
+    from taskerslabgen.core import _charge_scale, _surface_area
+
+    slab = ceo2_111_slab
+    z = slab.positions[:, 2]
+    planes = sorted(identify_planes(np.column_stack([slab.numbers, z, np.zeros(len(slab))]), slab.cell[2, 2]),
+                    key=lambda p: p["z_center"])
+    n = len(planes)
+    # Hirshfeld-like: smaller charges on the outer planes, a little noise, exactly neutral.
+    rng = np.random.default_rng(0)
+    q = np.where(slab.numbers == 58, 1.2, -0.6)
+    for k, f in ((0, 0.85), (1, 0.93), (n - 2, 0.93), (n - 1, 0.85)):
+        q[planes[k]["indices"]] *= f
+    q += rng.uniform(-0.01, 0.01, len(q))
+    q -= q.mean()
+    area, scale_all, charge_tol = _surface_area(slab.cell), _charge_scale(q), 0.05
+    # Every stoichiometric cut: its polarity as the enumeration saw it (whole-slab
+    # scale) and as validate_slab judges it (its own scale), and its neutrality.
+    table = []
+    for bi in range(n):
+        for ti in range(bi, n):
+            idx = [i for p in planes[bi:ti + 1] for i in p["indices"]]
+            ok, k = is_stoichiometric_sequence(Counter(int(Z) for Z in slab.numbers[idx]), {58: 1, 8: 2})
+            if not ok:
+                continue
+            mu = abs(np.sum(q[idx] * (z[idx] - z[idx].mean())))
+            own = _charge_scale(q[idx])
+            table.append((bi, ti, mu / (area * scale_all), mu / (area * own),
+                          abs(q[idx].sum()) <= charge_tol * k * own))
+    windows = [(seen, judged) for _, _, seen, judged, _ in table if judged > seen * 1.001]
+    assert windows
+    for seen, judged in windows:
+        dipole_tol = 0.5 * (seen + judged)  # used to abort the call
+        subs = cutslab(slab, list(q), cut_at="all", cuts="all", charge_tol=charge_tol, dipole_tol=dipole_tol)
+        expected = {(bi, ti) for bi, ti, _, judged, neutral in table if neutral and judged <= dipole_tol}
+        assert {(s.info["cut_bottom_idx"], s.info["cut_top_idx"]) for s in subs} == expected
+
+

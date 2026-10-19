@@ -72,6 +72,12 @@ Fixes from the code review of 0.5.1 (2026-10-18).
   and the symmetry operations must map atoms onto atoms of the same charge
   (within ``charge_tol``).  Orbits are expanded once each, so the
   enumeration is faster.
+- **cutslab's cut enumeration and validation agree.**  The enumeration
+  normalised charges and dipoles by the whole slab's mean |q|,
+  ``validate_slab`` by the sub-slab's own; with computed charges that vary
+  between planes a cut could pass the enumeration and fail validation
+  (``SlabValidationError`` aborted the whole call) or be dropped although
+  valid.  The enumeration now uses each sub-slab's own scale.
 
 ## 0.5.1 — 2026-10-02
 

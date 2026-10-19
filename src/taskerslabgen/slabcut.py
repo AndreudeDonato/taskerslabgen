@@ -16,7 +16,6 @@ from scipy.optimize import linear_sum_assignment
 from .core import (
     DEFAULT_DIPOLE_TOL,
     _INDEX_KEY,
-    _charge_scale,
     _surface_area,
     _SAME_PLANE,
     SELECTIONS,
@@ -439,22 +438,22 @@ def cutslab(
 
     # ---- Evaluate every candidate cut on the actual atoms ----
     q_all = np.asarray(charges_list, dtype=float)
-    # Charges in units of their mean absolute value, dipoles per surface area.
-    q_scale = _charge_scale(q_all)
+    # Charges in units of the sub-slab's own mean absolute value (as
+    # validate_slab judges it), dipoles per surface area.
     area = _surface_area(atoms.cell, axis)
     species = sorted({int(Z) for Z in atoms.numbers} | {int(Z) for Z in reduced_counts})
     column = {Z: k for k, Z in enumerate(species)}
 
     def aggregate(indices):
-        """[n, sum q, sum z, sum q*z] and element counts of a set of atoms."""
+        """[n, sum q, sum z, sum q*z, sum |q|] and element counts of a set of atoms."""
         idx = np.fromiter(indices, dtype=int)
         counts = np.zeros(len(species), dtype=int)
         np.add.at(counts, [column[int(Z)] for Z in atoms.numbers[idx]], 1)
         q, z = q_all[idx], coords[idx]
-        return np.array([len(idx), q.sum(), z.sum(), (q * z).sum()]), counts
+        return np.array([len(idx), q.sum(), z.sum(), (q * z).sum(), np.abs(q).sum()]), counts
 
     plane_sums = [aggregate(p["indices"]) for p in planes_sorted]
-    prefix = np.vstack([np.zeros(4), np.cumsum([s for s, _ in plane_sums], axis=0)])
+    prefix = np.vstack([np.zeros(5), np.cumsum([s for s, _ in plane_sums], axis=0)])
     prefix_counts = np.vstack(
         [np.zeros(len(species), dtype=int), np.cumsum([c for _, c in plane_sums], axis=0)]
     )
@@ -474,7 +473,8 @@ def cutslab(
             is_stoich, stoich_k = is_stoichiometric_sequence(count_map, reduced_counts)
             if not is_stoich or set(count_map) - set(reduced_counts):
                 continue
-            n_atoms, total_q, sum_z, sum_qz = sums
+            n_atoms, total_q, sum_z, sum_qz, sum_abs_q = sums
+            q_scale = sum_abs_q / n_atoms if sum_abs_q > 0 else 1.0  # _charge_scale of the sub-slab
             if abs(total_q) > charge_tol * stoich_k * q_scale:
                 continue
             mu = float(sum_qz - total_q * sum_z / n_atoms)  # about the mean height
