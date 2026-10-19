@@ -900,7 +900,8 @@ def build_tasker3_slabs(
         Index into *planes_sorted* identifying the reconstruction plane.
     deletion_mask : tuple
         Indices (into the 1-layer cell / *atoms_z_matrix*) of the atoms to
-        delete from the reconstruction plane.
+        delete from the reconstruction plane: distinct atoms of
+        ``planes_sorted[cut_plane_idx]`` (``ValueError`` otherwise).
     planes_sorted : list of dict
         Planes sorted by z-centre.
     atoms_z_matrix : ndarray
@@ -923,6 +924,16 @@ def build_tasker3_slabs(
                       DeprecationWarning, stacklevel=2)
     n_uc = len(atoms_z_matrix)
     n_planes = len(planes_sorted)
+    if not 0 <= int(cut_plane_idx) < n_planes:
+        raise ValueError(f"cut_plane_idx must index planes_sorted (0..{n_planes - 1}), got {cut_plane_idx!r}.")
+    plane_atoms = {int(i) for i in planes_sorted[cut_plane_idx]["indices"]}
+    mask = [int(i) for i in deletion_mask]
+    if len(set(mask)) != len(mask) or not set(mask) <= plane_atoms:
+        raise ValueError(
+            f"deletion_mask must hold distinct indices of atoms of plane {cut_plane_idx} "
+            f"({sorted(plane_atoms)}), got {tuple(deletion_mask)}: atoms outside the plane "
+            "or listed twice would not be deleted and the slab would not be stoichiometric."
+        )
 
     # The cut plane is the only plane between these two cuts.
     zbot, ztop = compute_cut_positions(

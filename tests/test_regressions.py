@@ -2004,3 +2004,48 @@ def test_one_tasker12_termination_per_lattice_inequivalent_cut(atoms, charges, h
     descriptors = [_slab_descriptor(t["atoms"][0]) for t in res.values()]
     assert len(descriptors) == len(set(descriptors)) == expected
     assert sorted(res) == list(range(expected))
+
+
+def test_tasker3_terminations_related_by_a_z_reversing_symmetry_are_one():
+    """Finding 14: the symmetry reduction used only operations that keep
+    the sense of the normal, so on the 2x2 CeO2 (001) cell 30 pairs of
+    terminations were the same slab turned upside down."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    def inverted(slab):
+        out = slab.copy()
+        out.positions = -slab.positions
+        return out
+
+    res = generate_slabs_for_miller(CEO2, Q_CEO2, (0, 0, 1), [1], candidates="all", surface_supercell=(2, 2))
+    terms = res[(0, 0, 1)]
+    upright = {tid: _slab_descriptor(t["atoms"][0]) for tid, t in terms.items()}
+    flipped = {tid: _slab_descriptor(inverted(t["atoms"][0])) for tid, t in terms.items()}
+    assert len(set(upright.values())) == len(terms)
+    pairs = [(a, b) for a in terms for b in terms if a < b and flipped[a] == upright[b]]
+    assert pairs == []
+    # Nothing is lost: every valid pattern is counted in some multiplicity.
+    assert sum(t["candidate"]["multiplicity"] for t in terms.values()) == 2 * (12870 + 70)
+
+
+def test_build_tasker3_slabs_rejects_masks_off_the_plane():
+    """Finding 15: build_tasker3_slabs silently ignored deletion_mask
+    indices outside the cut plane (or listed twice) and returned a
+    non-stoichiometric slab."""
+    from taskerslabgen.advanced import build_surface, build_tasker3_slabs, compute_projection, identify_planes
+
+    surf = build_surface(CEO2, (0, 0, 1), layers=1)
+    atoms_z, L = compute_projection(CEO2, surf, Q_CEO2, (0, 0, 1))
+    planes = sorted(identify_planes(atoms_z, L), key=lambda p: p["z_center"])
+    i_o = next(i for i, p in enumerate(planes) if p["counts"] == {8: 4})
+    o_atoms = planes[i_o]["indices"]
+    ce_atom = next(i for p in planes for i in p["indices"] if int(atoms_z[i, 0]) == 58)
+    slab = build_tasker3_slabs(CEO2, (0, 0, 1), [2], i_o, tuple(o_atoms[:2]), planes, atoms_z, L)[0]
+    assert slab.get_chemical_formula() == "Ce8O16"
+    for bad in ((o_atoms[0], ce_atom), (o_atoms[0], o_atoms[0]), (o_atoms[0], 99)):
+        with pytest.raises(ValueError, match="deletion_mask"):
+            build_tasker3_slabs(CEO2, (0, 0, 1), [2], i_o, bad, planes, atoms_z, L)
+    with pytest.raises(ValueError, match="cut_plane_idx"):
+        build_tasker3_slabs(CEO2, (0, 0, 1), [2], len(planes), tuple(o_atoms[:2]), planes, atoms_z, L)
+
+

@@ -96,6 +96,14 @@ Fixes from the code review of 0.5.1 (2026-10-18).
   ASE cell holds more than one lattice repeat along the normal
   (conventional CeO2 (110), body-centred anatase (001)), cuts one repeat
   apart gave the same slab moved by a lattice vector under different IDs.
+- **Tasker III terminations that are one slab turned upside down.**  The
+  symmetry reduction used only operations that keep the sense of the
+  normal, so on a 2x2 CeO2 (001) cell 30 of 255 terminations were listed
+  twice (``candidates="all"``).  Operations that reverse the normal are now
+  included; README and docstrings say so.
+- ``build_tasker3_slabs`` raises ``ValueError`` for a ``deletion_mask``
+  with indices outside the cut plane or listed twice (it silently returned
+  a non-stoichiometric slab).
 
 ## 0.5.1 — 2026-10-02
 
