@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 — 2026-10-19
 
 Fixes from the code review of 0.5.1 (2026-10-18).
 
