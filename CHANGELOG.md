@@ -92,6 +92,10 @@ Fixes from the code review of 0.5.1 (2026-10-18).
   (the mirror for ``cuts="bottom"``).  The anchor is now the lowest plane
   ``cut_at`` allows as a bottom (plane 0 for ``"termination"`` and
   ``"all"``); when no valid cut starts there, cutslab raises and says so.
+- **One Tasker I/II termination per lattice-inequivalent cut.**  When the
+  ASE cell holds more than one lattice repeat along the normal
+  (conventional CeO2 (110), body-centred anatase (001)), cuts one repeat
+  apart gave the same slab moved by a lattice vector under different IDs.
 
 ## 0.5.1 — 2026-10-02
 

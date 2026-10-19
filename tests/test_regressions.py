@@ -1989,3 +1989,18 @@ def test_cuts_top_anchors_on_the_input_surface_or_raises():
     assert cutslab(moved(True), Q_CEO2, dipole_tol=0.02, cuts="all", cut_at="all")
 
 
+@pytest.mark.parametrize(
+    "atoms, charges, hkl, expected",
+    [(CEO2, Q_CEO2, (1, 1, 0), 1), (ANATASE, Q_TIO2, (0, 0, 1), 2)],
+    ids=["CeO2conv110", "anatase001"],
+)
+def test_one_tasker12_termination_per_lattice_inequivalent_cut(atoms, charges, hkl, expected):
+    """Finding 12: when the ASE cell holds more than one lattice repeat
+    (conventional CeO2 (110), body-centred anatase (001)), cuts a repeat
+    apart gave the same slab moved by a lattice vector under different IDs."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    res = generate_slabs_for_miller(atoms, charges, hkl, [2], candidates="all")[hkl]
+    descriptors = [_slab_descriptor(t["atoms"][0]) for t in res.values()]
+    assert len(descriptors) == len(set(descriptors)) == expected
+    assert sorted(res) == list(range(expected))

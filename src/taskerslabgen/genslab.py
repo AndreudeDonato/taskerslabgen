@@ -567,10 +567,12 @@ def _tasker12_path(facet, sequences, opts, prefer_plane, candidates_mode, saveca
     h, k, l = facet.out_miller
 
     # One entry per zero-dipole bulk repeat unit (full period); each gives
-    # slabs of exactly `lt` repeat units.  Ranked by bulk bonds broken at the
-    # cut, then by surface atom density (denser = more compact), then by
-    # label, so the order does not depend on the bulk origin.  IDs follow
-    # the ranking (ID 0 = best).
+    # slabs of exactly `lt` repeat units.  Cuts a lattice repeat apart give
+    # the same slab moved by a lattice vector (centred cells, supercell
+    # bulks), so only the cuts of one repeat are kept.  Ranked by bulk bonds
+    # broken at the cut, then by surface atom density (denser = more
+    # compact), then by label, so the order does not depend on the bulk
+    # origin.  IDs follow the ranking (ID 0 = best).
     periodic = Atoms(
         numbers=facet.surf_bulk.numbers, positions=facet.surf_bulk.positions,
         cell=surface_bulk_cell(facet.bulk, facet.miller), pbc=True,
@@ -583,6 +585,8 @@ def _tasker12_path(facet, sequences, opts, prefer_plane, candidates_mode, saveca
                 and s["dipole_per_area"] * max(opts.layers) <= opts.dipole_tol):
             continue
         cut = s["bottom_cut"]
+        if cut >= facet.repeat:
+            continue
         bot, top = (cut + 1) % n_pl, cut
         z_cut, _ = compute_cut_positions(planes, L, cut, cut)
         seq = dict(s)
