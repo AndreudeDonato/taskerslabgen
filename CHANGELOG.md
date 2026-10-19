@@ -11,6 +11,12 @@ Fixes from the code review of 0.5.1 (2026-10-18).
   after ``.traj``/extxyz round trips).  ``_charges_to_list`` now raises and
   says to pass an explicit zero dict (``{'Pt': 0.0}``) for a metal; explicit
   zero dicts and lists stay accepted.
+- **cutslab(bulk_atoms=) stacking_labels.**  Bulk mode gave every sub-slab
+  the input's ``stacking_labels`` verbatim, so a sub-slab cut from an
+  interior plane carried labels that started at the wrong plane; re-cutting
+  it without ``bulk_atoms`` selected the other termination.  Sub-slabs now
+  get one lattice repeat of the bulk's labels from their own bottom plane.
+
 ## 0.5.1 — 2026-10-02
 
 ### Fixes

@@ -1641,3 +1641,26 @@ def test_all_zero_stored_charges_are_rejected():
         assert cutslab(polar, {"Ce": 0.0, "O": 0.0}, cut_at="all", cuts="all")
 
 
+def test_bulk_mode_sub_slabs_get_their_own_stacking_labels():
+    """Finding 2: bulk mode gave every sub-slab the input's stacking_labels
+    verbatim, so a sub-slab cut from an interior plane, re-cut without
+    bulk_atoms, selected the other termination."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    slab = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [4])[(1, 0, 0)].values()))["atoms"][0]
+    cycle = slab.info["stacking_labels"]
+    per = len(cycle)
+    subs = cutslab(slab, Q_IRO2, bulk_atoms=IRO2, cut_at="all", cuts="all")
+    for sub in subs:
+        bi = sub.info["cut_bottom_idx"]
+        assert sub.info["stacking_labels"] == [cycle[(bi + k) % per] for k in range(per)]
+    inner = max((s for s in subs if s.info["cut_bottom_idx"] % per), key=len)
+    assert inner.info["cut_n_planes"] >= 2 * per + 2  # thick enough to learn its repeat
+    want = [inner.info["cut_bottom_plane"], inner.info["cut_top_plane"]]
+
+    def table(sub_slabs):
+        return sorted((s.info["cut_bottom_idx"], s.info["cut_top_idx"]) for s in sub_slabs)
+
+    truth = table(cutslab(inner, Q_IRO2, bulk_atoms=IRO2, cut_at=want, cuts="all"))
+    assert len(truth) > 1 and truth[0][0] == 0
+    assert table(cutslab(inner, Q_IRO2, cut_at=want, cuts="all")) == truth

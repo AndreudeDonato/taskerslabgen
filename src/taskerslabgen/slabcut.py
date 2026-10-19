@@ -261,15 +261,19 @@ def cutslab(
                 "bulk_atoms needs the slab's Miller index: pass miller=, or use a slab "
                 "from generate_slabs_for_miller (it stores slab.info['miller'])."
             )
-        planes_sorted, plane_names, reduced_counts = _planes_from_bulk(
+        planes_sorted, plane_names, reduced_counts, bulk_stacking = _planes_from_bulk(
             atoms, charges_list, bulk_atoms, tuple(input_miller),
             plane_tol=plane_tol, charge_tol=charge_tol, deform_tol=deform_tol,
         )
         repeat = None
         if recon is not None:
-            planes_sorted, plane_names = _merge_surface_planes(
-                planes_sorted, plane_names, recon["recon_counts"], atoms_z_matrix, charge_tol
+            planes_sorted, merged = _merge_surface_planes(
+                planes_sorted, list(zip(plane_names, bulk_stacking)), recon["recon_counts"],
+                atoms_z_matrix, charge_tol,
             )
+            plane_names, bulk_stacking = (list(x) for x in zip(*merged))
+        # Every sub-slab gets the bulk's labels from its own bottom plane up.
+        stacking_from = {i: list(labels) for i, labels in enumerate(bulk_stacking)}
     else:
         planes_sorted = sorted(
             identify_planes(atoms_z_matrix, L, plane_tol=plane_tol, charge_tol=charge_tol),
@@ -291,6 +295,7 @@ def cutslab(
                 stacklevel=2,
             )
         reduced_counts = compute_reduced_counts(atoms_z_matrix)
+        stacking_from = {}
     n = len(planes_sorted)
     validation = {
         "charges_list": charges_list,
@@ -550,7 +555,9 @@ def cutslab(
         # 1 when the top plane lies exactly over the bottom one (a---a),
         # 0 when shifted or a different arrangement (a---a', a---b).
         slab.info["cut_phase_overlap"] = round(float(in_phase(bi, ti)), 4)
-        if repeat is not None:
+        if bi in stacking_from:
+            slab.info["stacking_labels"] = stacking_from[bi]
+        elif repeat is not None:
             slab.info["stacking_labels"] = _repeat_labels(bulk_names, bi, repeat[0])
         _finalize_slab(slab, **validation)
 

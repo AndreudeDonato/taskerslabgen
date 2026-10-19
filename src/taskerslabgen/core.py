@@ -1583,17 +1583,18 @@ def _bulk_plane_catalog(bulk_atoms, miller, plane_tol=None):
     """
     Planes of one bulk repeat unit in the frame of :func:`build_surface`.
 
-    Returns ``(catalog, L, cell2d)`` where each catalog entry has the
+    Returns ``(catalog, L, cell2d, per)`` where each catalog entry has the
     plane ``label`` (as genslab names it), ``counts``, ``z`` (centre, mod L)
     and ``atoms``: ``(Z, fx, fy, dz)`` with *dz* the height relative to the
-    plane centre.
+    plane centre; *per* is the number of planes in one lattice repeat (the
+    labels repeat after it).
     """
     surf = build_surface(bulk_atoms, miller, layers=1)
     L = float(surf.cell[2, 2])
     z = surf.positions[:, 2]
     atoms_z = np.column_stack([surf.numbers, z, np.zeros(len(surf))])
     planes = sorted(identify_planes(atoms_z, L, plane_tol=plane_tol), key=lambda p: p["z_center"])
-    labels, _, _ = _repeat_names(planes, surf, L, _surface_a3_xy(bulk_atoms, miller, surf.cell[:2, :2]))
+    labels, _, per = _repeat_names(planes, surf, L, _surface_a3_xy(bulk_atoms, miller, surf.cell[:2, :2]))
     frac = surf.get_scaled_positions()
     catalog = []
     for plane, label in zip(planes, labels):
@@ -1608,7 +1609,7 @@ def _bulk_plane_catalog(bulk_atoms, miller, plane_tol=None):
                 for i in plane["indices"]
             ],
         })
-    return catalog, L, np.array(surf.cell[:2, :2])
+    return catalog, L, np.array(surf.cell[:2, :2]), per
 
 
 def _supercell_matrix(bulk_cell2d, cell2d, atol=0.02):
@@ -1700,14 +1701,15 @@ def _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, site_tol=0.3, a3_xy=(0.0, 
     place: tiled when the slab cell is a supercell of the bulk surface cell,
     folded (and relabelled) when *bulk_atoms* is a supercell of the cell the
     slab was built from.  A few per cent of strain between the cells is
-    accepted.
+    accepted.  Returns the number of planes in one lattice repeat of the
+    relabelled catalog, or ``None`` when the labels were kept.
     """
     M = np.asarray(cell2d, dtype=float) @ np.linalg.inv(bulk_cell2d)
     if np.allclose(M, np.round(M), atol=0.02) and round(np.linalg.det(np.round(M))) != 0:
         for entry in catalog:
             entry["atoms"] = _tile_plane(entry["atoms"], bulk_cell2d, cell2d)
             entry["counts"] = dict(Counter(a[0] for a in entry["atoms"]))
-        return
+        return None
     K = np.linalg.inv(M)  # bulk surface cell = K @ slab cell
     K_int = np.round(K).astype(int)
     copies = abs(int(round(np.linalg.det(K_int))))
@@ -1748,9 +1750,10 @@ def _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, site_tol=0.3, a3_xy=(0.0, 
     cell[:2, :2] = cell2d
     cell[2, 2] = L
     folded = Atoms(numbers=numbers, scaled_positions=scaled, cell=cell, pbc=True)
-    labels, _, _ = _repeat_names(planes, folded, L, a3_xy)
+    labels, _, per = _repeat_names(planes, folded, L, a3_xy)
     for entry, label in zip(catalog, labels):
         entry["label"] = label
+    return per
 
 
 class _BulkSites:
@@ -2021,13 +2024,15 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
     shift) and a label with ``~`` (``O4~``) when it is more deformed or has a
     different composition.
 
-    Returns ``(planes_sorted, labels, reduced_counts)`` with planes in the
-    format of :func:`identify_planes`.
+    Returns ``(planes_sorted, labels, reduced_counts, stacking)`` with planes
+    in the format of :func:`identify_planes`; ``stacking[i]`` is the bulk's
+    ``stacking_labels`` from plane *i* up (one lattice repeat of catalog
+    labels starting at the bulk plane of plane *i*).
     """
-    catalog, L, bulk_cell2d = _bulk_plane_catalog(bulk_atoms, miller, plane_tol)
+    catalog, L, bulk_cell2d, per = _bulk_plane_catalog(bulk_atoms, miller, plane_tol)
     cell2d = np.array(atoms.cell[:2, :2])
     a3_xy = _surface_a3_xy(bulk_atoms, miller, cell2d)
-    _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, a3_xy=a3_xy)
+    per = _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, a3_xy=a3_xy) or per
 
     numbers = atoms.numbers
     z = atoms.positions[:, 2]
@@ -2050,17 +2055,19 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
         return [(int(numbers[i]), frac[i, 0] % 1.0, frac[i, 1] % 1.0, z[i] - zc) for i in idx]
 
     keyed = sorted(groups.items(), key=lambda kv: catalog[kv[0][0]]["z"] + kv[0][1] * L)
-    planes_sorted, labels = [], []
+    planes_sorted, labels, stacking = [], [], []
+    n_cat = len(catalog)
     for (k, _), idx in keyed:
         idx = sorted(idx)
         plane = _make_plane(idx, z[idx], atoms_z, charge_tol)
         deviation = _plane_rmsd(catalog[k]["atoms"], geometry(idx, plane["z_center"]), cell2d)
         planes_sorted.append(plane)
         labels.append(catalog[k]["label"] + ("" if deviation <= deform_tol else "~"))
+        stacking.append([catalog[(k + j) % n_cat]["label"] for j in range(per)])
 
     bulk_numbers = np.asarray(bulk_atoms.numbers, dtype=float)
     reduced = compute_reduced_counts(np.column_stack([bulk_numbers, bulk_numbers * 0, bulk_numbers * 0]))
-    return planes_sorted, labels, reduced
+    return planes_sorted, labels, reduced, stacking
 
 
 def compute_delete_info(cut_plane, deletion_mask, atoms_z_matrix, surf_bulk):
