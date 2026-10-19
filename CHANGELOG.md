@@ -160,6 +160,18 @@ Fixes from the code review of 0.5.1 (2026-10-18).
   setuptools >= 77, which breaks ``--no-build-isolation`` installs on
   systems with an older setuptools.
 
+### Other
+- ``is_stoichiometric_sequence`` returns ``(False, None)`` for a sequence
+  with a species absent from the bulk formula (an adsorbate); the two
+  callers that patched this with a set difference no longer need to, and
+  ``enumerate_cut_pairs`` (which did not) reports such sequences as not
+  stoichiometric.
+- ``matplotlib.pyplot`` is imported by the plot functions, not by the
+  package: importing taskerslabgen takes about half the time.
+- Tasker III orbits are expanded once each instead of once per pattern.
+- Dead code removed (``_wave_rows``, ``_wave_shifts``); the smoke test of
+  the CeO2 (110) plane labels asserts the two-plane case it actually sees.
+
 ## 0.5.1 — 2026-10-02
 
 ### Fixes

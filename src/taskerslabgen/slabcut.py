@@ -489,7 +489,7 @@ def cutslab(
                 counts = counts - deleted_sums[p][1]
             count_map = {Z: int(c) for Z, c in zip(species, counts) if c > 0}
             is_stoich, stoich_k = is_stoichiometric_sequence(count_map, reduced_counts)
-            if not is_stoich or set(count_map) - set(reduced_counts):
+            if not is_stoich:
                 continue
             n_atoms, total_q, sum_z, sum_qz, sum_abs_q = sums
             q_scale = sum_abs_q / n_atoms if sum_abs_q > 0 else 1.0  # _charge_scale of the sub-slab

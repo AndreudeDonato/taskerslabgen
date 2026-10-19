@@ -4,7 +4,6 @@ Plots of slabs and where they were cut (plot_slab), used by genslab and cutslab.
 from pathlib import Path
 
 import numpy as np
-import matplotlib.pyplot as plt
 from ase.data import chemical_symbols
 from ase.data.colors import jmol_colors
 
@@ -75,6 +74,8 @@ def plot_unitcell_atoms(
         Custom title.  When None the default Miller-index title is used.
     """
     import warnings
+
+    import matplotlib.pyplot as plt
 
     warnings.warn("plot_unitcell_atoms is deprecated; use plot_slab, the plot of "
                   "generate_slabs_for_miller and cutslab.", DeprecationWarning, stacklevel=2)
@@ -265,6 +266,8 @@ def plot_slab(
     top = n - 1 if top is None else top
     bottom_ok = set(bottom_ok or ())
     top_ok = set(top_ok or ())
+    import matplotlib.pyplot as plt  # here, not at import: half the package's import time
+
     removed = set(int(i) for i in removed)
     in_plane = [i for i in range(3) if i != axis]
     frac = atoms.get_scaled_positions(wrap=False)[:, in_plane]

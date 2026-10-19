@@ -253,16 +253,13 @@ def test_assign_plane_names_110_alternation(ceo2_bulk):
 
     names, name_map = assign_plane_names(planes_sorted, atoms=surf)
 
-    unique_names = set(names)
-    assert len(unique_names) <= 2, (
-        f"CeO2 (110) should have at most 2 plane labels, got {unique_names}"
-    )
-    bases = {plane_name_base(n) for n in names}
-    assert len(bases) <= 2
-    if len(names) >= 4:
-        assert names[0] == names[2], (
-            f"Expected ABAB alternation, got {names}"
-        )
+    # The conventional cell holds two Ce2O4 planes, one arrangement in two
+    # phases (shifted copies): same composition, different phase marks.
+    assert len(names) == 2
+    assert {plane_name_base(n) for n in names} == {"Ce2O4"}
+    assert len(set(names)) == 2 and set(name_map) == set(names)
+    for name in names:
+        assert name_map[name] == {58: 2, 8: 4}
 
 
 def test_iro2_001_plane_variants(iro2_bulk):

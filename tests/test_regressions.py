@@ -2250,3 +2250,18 @@ def test_negative_vacuum_is_rejected(ceo2_111_slab):
     bare = ceo2_111_slab.copy()
     apply_vacuum_to_slab(bare, vacuum=0.0)
     assert np.allclose(bare.cell, ceo2_111_slab.cell) and np.allclose(bare.positions, ceo2_111_slab.positions)
+
+
+def test_stoichiometry_check_rejects_species_absent_from_the_bulk():
+    """Finding 19: is_stoichiometric_sequence ignored species absent from
+    reduced_counts, so a sequence with an adsorbate counted as stoichiometric
+    (two callers patched it with a set difference, enumerate_cut_pairs not)."""
+    from taskerslabgen.advanced import enumerate_cut_pairs, identify_planes, is_stoichiometric_sequence
+
+    assert is_stoichiometric_sequence({58: 1, 8: 2, 1: 5}, {58: 1, 8: 2}) == (False, None)
+    assert is_stoichiometric_sequence({58: 2, 8: 4}, {58: 1, 8: 2}) == (True, 2)
+    atoms_z = np.array([[58, 0.0, 4.0], [8, 1.0, -2.0], [8, 1.0, -2.0], [1, 2.0, 0.0]])  # Ce | O2 | H
+    planes = identify_planes(atoms_z, 3.0, plane_tol=0.1)
+    sequences = enumerate_cut_pairs(planes, 3.0, {58: 1, 8: 2}, area=1.0, charge_scale=1.0)
+    assert all(not seq["is_stoich"] for seq in sequences if 2 in seq["plane_indices"])
+    assert any(seq["is_stoich"] and seq["plane_indices"] == [0, 1] for seq in sequences)

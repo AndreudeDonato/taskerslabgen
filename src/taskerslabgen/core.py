@@ -494,10 +494,14 @@ def is_stoichiometric_sequence(sequence_counts, reduced_counts):
     Returns
     -------
     is_stoich : bool
-        True if the sequence is a whole-number multiple of the bulk formula.
+        True if the sequence is a whole-number multiple of the bulk formula
+        (a species absent from *reduced_counts*, e.g. an adsorbate, makes
+        it False).
     k : int or None
         The multiplier, or None if not stoichiometric.
     """
+    if any(c > 0 and Z not in reduced_counts for Z, c in sequence_counts.items()):
+        return False, None
     ks = []
     for Z, reduced in reduced_counts.items():
         if reduced == 0:
@@ -781,7 +785,7 @@ def validate_slab(slab, charges, reduced_counts, axis=2, charge_tol=1e-3,
     for Z in slab.numbers:
         counts[int(Z)] = counts.get(int(Z), 0) + 1
     is_stoich, k = is_stoichiometric_sequence(counts, reduced_counts)
-    if not is_stoich or set(counts) - set(reduced_counts):
+    if not is_stoich:
         problems.append("not stoichiometric")
         k = max(1, round(len(slab) / max(1, sum(reduced_counts.values()))))
 
@@ -835,14 +839,6 @@ def _finalize_slab(slab, charges_list, reduced_counts, charge_tol, dipole_tol,
 # densities (normalised to 1 for identical planes).
 _WAVE_SIGMA = 0.5   # angstrom; how smooth the density is, not a cutoff
 _SAME_PLANE = 0.9   # normalised overlap from which two planes count as the same
-
-
-def _wave_rows(geom):
-    """Plane atoms ``[(Z, fx, fy[, dz]), ...]`` as an ``(n, 4)`` float array."""
-    rows = np.zeros((len(geom), 4))
-    for k, atom in enumerate(geom):
-        rows[k, :len(atom[:4])] = atom[:4]
-    return rows
 
 
 def _wave_images(cell2d, sigma=_WAVE_SIGMA, eps=1e-12):
@@ -934,28 +930,6 @@ def _wave_alignment(A, B, cell2d, ops=None, images=None):
             if s > best[0] + 1e-9:
                 best = (s, np.asarray(W), t % 1.0)
     return best
-
-
-def _wave_shifts(A, B, cell2d, images=None, same_plane=_SAME_PLANE):
-    """
-    Every in-plane shift *t* (fractional) that moves plane *A* onto plane *B*
-    without rotation (overlap at least *same_plane*): one for a plane with no
-    translational symmetry inside the cell, several otherwise.
-    """
-    if len(A) != len(B) or sorted(A[:, 0]) != sorted(B[:, 0]):
-        return []
-    cell2d = np.asarray(cell2d, dtype=float)
-    images = _wave_images(cell2d) if images is None else images
-    species, counts = np.unique(A[:, 0], return_counts=True)
-    anchor = A[A[:, 0] == species[np.argmin(counts)]][0]
-    found = []
-    for target in B[B[:, 0] == anchor[0]]:
-        t = (target[1:3] - anchor[1:3]) % 1.0
-        if _wave_similarity(A, B, cell2d, t, images=images) < same_plane:
-            continue
-        if not any(_frac_distance(t, u, cell2d) < 1e-3 for u in found):
-            found.append(t)
-    return found
 
 
 def assign_plane_names(planes_sorted, atoms=None, axis=2, same_plane=_SAME_PLANE, context=None):
