@@ -1609,3 +1609,35 @@ def test_half_occupied_surface_planes_hint_at_reconstruction():
     with pytest.warns(UserWarning, match="with the same atoms"):
         subs = cutslab(term["atoms"][0], Q_CEO2, bulk_atoms=CEO2)
     assert len(subs) == 1
+
+
+# ------------------------------------------------------------------
+# Review of 0.5.1 (2026-10-18)
+# ------------------------------------------------------------------
+def test_all_zero_stored_charges_are_rejected():
+    """Finding 1: all-zero calculator or initial charges made every
+    neutrality and polarity check vacuous, so polar slabs were returned."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+    from taskerslabgen.advanced import build_surface
+
+    polar = build_surface(CEO2, (0, 0, 1), layers=2, vacuum=15.0)
+    with_calc = polar.copy()
+    with_calc.calc = SinglePointCalculator(with_calc, charges=np.zeros(len(polar)))
+    with pytest.raises(ValueError, match="all zero"):
+        cutslab(with_calc, None, cut_at="all", cuts="all")
+    with_initial = polar.copy()
+    with_initial.set_initial_charges(np.zeros(len(polar)))
+    with pytest.raises(ValueError, match="all zero"):
+        cutslab(with_initial, None, cut_at="all", cuts="all")
+    bulk = CEO2.copy()
+    bulk.calc = SinglePointCalculator(bulk, charges=np.zeros(len(bulk)))
+    with pytest.raises(ValueError, match="all zero"):
+        generate_slabs_for_miller(bulk, None, (0, 0, 1), [1])
+    # An explicit zero dict states that zero is meant (a metal).
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert cutslab(polar, {"Ce": 0.0, "O": 0.0}, cut_at="all", cuts="all")
+
+

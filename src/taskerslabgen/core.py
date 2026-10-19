@@ -279,13 +279,29 @@ def _oriented_bulk(bulk_atoms, miller, surface_supercell=(1, 1)):
 
 
 def _charges_from_atoms(atoms):
-    """Per-atom charges stored on *atoms*: calculator results, then initial charges."""
+    """
+    Per-atom charges stored on *atoms*: calculator results, then initial
+    charges.  A stored set that is all zero is rejected: it would make the
+    neutrality and polarity checks vacuous (every slab passes).  For a metal
+    pass an explicit zero dict instead.
+    """
     calc = getattr(atoms, "calc", None)
     results = getattr(calc, "results", None) or {}
+    stored = None
     if results.get("charges") is not None:
-        return [float(q) for q in results["charges"]]
-    if atoms.has("initial_charges") and np.any(atoms.get_initial_charges()):
-        return [float(q) for q in atoms.get_initial_charges()]
+        stored, source = results["charges"], "calculator results 'charges'"
+    elif atoms.has("initial_charges"):
+        stored, source = atoms.get_initial_charges(), "initial_charges"
+    if stored is not None:
+        charges = [float(q) for q in stored]
+        if not any(charges):
+            raise ValueError(
+                f"charges=None found {source} on the Atoms object, but they are all zero, "
+                "so no slab could be charged or polar.  Pass the charges explicitly, "
+                "e.g. charges={'Ce': 4.0, 'O': -2.0}; for a metal, where zero is meant, "
+                "pass an explicit zero dict such as charges={'Pt': 0.0}."
+            )
+        return charges
     raise ValueError(
         "charges=None needs per-atom charges on the Atoms object (calculator results "
         "'charges' or atoms.set_initial_charges(...)).  For FHI-aims Hirshfeld charges "

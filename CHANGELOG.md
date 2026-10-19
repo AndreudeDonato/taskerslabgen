@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Fixes from the code review of 0.5.1 (2026-10-18).
+
+### Fixes
+- **All-zero stored charges are rejected.**  ``charges=None`` with
+  calculator results or ``initial_charges`` that are all zero made every
+  neutrality and polarity check vacuous, so polar slabs were returned (also
+  after ``.traj``/extxyz round trips).  ``_charges_to_list`` now raises and
+  says to pass an explicit zero dict (``{'Pt': 0.0}``) for a metal; explicit
+  zero dicts and lists stay accepted.
 ## 0.5.1 — 2026-10-02
 
 ### Fixes
