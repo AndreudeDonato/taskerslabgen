@@ -4,8 +4,12 @@ keeps its terminations and reconstruction.
 """
 import warnings
 from collections import Counter
+from functools import reduce
+from math import gcd
 
 import numpy as np
+from ase.data import atomic_numbers
+from ase.formula import Formula
 from ase.io import read
 from scipy.optimize import linear_sum_assignment
 
@@ -34,6 +38,7 @@ from .core import (
     compute_reduced_counts,
     apply_vacuum_to_slab,
     is_stoichiometric_sequence,
+    plane_name_base,
     plane_name_for_filename,
     plane_name_matches,
 )
@@ -150,7 +155,11 @@ def cutslab(
         from z-clustering and are labelled from the slab itself: the repeat
         unit is learned from the slab's interior, so copies one repeat apart
         share a label as in the bulk (with genslab's ``stacking_labels``
-        from ``slab.info``, the names are genslab's).
+        from ``slab.info``, the names are genslab's).  The bulk formula that
+        sub-slabs must be a multiple of is then that of one repeat unit of
+        labels (learned, or genslab's); only when neither is available is
+        it taken from the whole slab, with a warning, since a slab with
+        vacancies or adsorbates is then taken as its own bulk.
     miller : tuple of int or None
         Miller index of the slab, needed with *bulk_atoms*; defaults to
         ``input_structure.info["miller"]`` (set by genslab).
@@ -283,9 +292,9 @@ def cutslab(
             planes_sorted, _ = _merge_surface_planes(
                 planes_sorted, None, recon["recon_counts"], atoms_z_matrix, charge_tol
             )
-        plane_names, repeat = _slab_plane_names(
-            atoms, planes_sorted, axis, atoms.info.get("stacking_labels")
-        )
+        inherited = atoms.info.get("stacking_labels")
+        plane_names, repeat = _slab_plane_names(atoms, planes_sorted, axis, inherited)
+        inherited = list(inherited) if inherited else None
         if repeat is None and len(planes_sorted) > 2 and cut_at != "all":
             warnings.warn(
                 "cutslab could not find a repeat unit inside this slab (too thin or too "
@@ -294,7 +303,23 @@ def cutslab(
                 "to name planes by the bulk.",
                 stacklevel=2,
             )
-        reduced_counts = compute_reduced_counts(atoms_z_matrix)
+        # The bulk formula: one repeat unit of labels (learned from the
+        # interior, else genslab's), not the slab itself, so that a slab with
+        # vacancies or adsorbates is not taken as its own bulk.
+        if repeat is not None and inherited is not None and len(inherited) != repeat[0]:
+            inherited = None
+        cycle = _repeat_labels(plane_names, 0, repeat[0], inherited) if repeat is not None else inherited
+        if cycle is not None:
+            reduced_counts = _formula_of_labels(cycle)
+        else:
+            warnings.warn(
+                "cutslab could not learn the repeat unit of this slab and it carries no "
+                "stacking_labels, so the bulk formula is taken from the whole slab: a "
+                "slab with vacancies or adsorbates is not caught.  Pass bulk_atoms= to "
+                "judge sub-slabs by the bulk.",
+                stacklevel=2,
+            )
+            reduced_counts = compute_reduced_counts(atoms_z_matrix)
         stacking_from = {}
     n = len(planes_sorted)
     validation = {
@@ -558,7 +583,9 @@ def cutslab(
         if bi in stacking_from:
             slab.info["stacking_labels"] = stacking_from[bi]
         elif repeat is not None:
-            slab.info["stacking_labels"] = _repeat_labels(bulk_names, bi, repeat[0])
+            labels = _repeat_labels(bulk_names, bi, repeat[0], inherited)
+            if labels is not None:
+                slab.info["stacking_labels"] = labels
         _finalize_slab(slab, **validation)
 
         if plot:
@@ -583,20 +610,39 @@ def cutslab(
 # ---- Private helpers -------------------------------------------------------
 
 
-def _repeat_labels(names, bottom, per):
+def _repeat_labels(names, bottom, per, inherited=None):
     """
     Bulk labels of one repeat unit of planes starting at plane *bottom*
     (``stacking_labels`` of a sub-slab).  Each is taken from an undeformed
     copy of that plane anywhere in the input slab (copies are *per* planes
-    apart), so sub-slabs thinner than a repeat unit get them too.
+    apart), so sub-slabs thinner than a repeat unit get them too; a plane
+    the slab does not hold at all (fewer planes than *per*) takes the label
+    from *inherited*, the input's own ``stacking_labels`` (one repeat unit
+    from its plane 0).  Returns ``None`` when a label cannot be found.
     """
     labels = []
     for k in range(per):
         copies = [names[i] for i in range(bottom + k, len(names), per)]
         copies += [names[i] for i in range(bottom + k - per, -1, -per)]
         clean = [c for c in copies if not c.endswith("~")]
-        labels.append(_undeformed((clean or copies)[0]))
+        if clean or copies:
+            labels.append(_undeformed((clean or copies)[0]))
+        elif inherited is not None and len(inherited) == per:
+            labels.append(_undeformed(inherited[(bottom + k) % per]))
+        else:
+            return None
     return labels
+
+
+def _formula_of_labels(labels):
+    """Reduced composition ``{Z: count}`` of one repeat unit of plane labels
+    (their composition parts, e.g. ``O4`` and ``Ce4`` give ``{58: 1, 8: 2}``)."""
+    counts = Counter()
+    for label in labels:
+        for symbol, c in Formula(plane_name_base(label)).count().items():
+            counts[atomic_numbers[symbol]] += c
+    g = reduce(gcd, counts.values(), 0) or 1
+    return {int(Z): c // g for Z, c in sorted(counts.items())}
 
 
 def _put_vacuum_at_boundary(atoms, axis):

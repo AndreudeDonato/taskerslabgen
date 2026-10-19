@@ -1717,3 +1717,47 @@ def test_shift_related_phases_numbered_independently_of_origin(atoms, charges, h
     for shift in [np.array([0.5, 0.0, 0.0])] + [rng.random(3) for _ in range(3)]:
         assert labelled(_shifted(atoms, shift)) == reference, f"origin-dependent labels at {shift}"
     assert labelled(atoms, surface_supercell=(1, 1)) == reference
+
+
+def test_slab_only_cutslab_judges_sub_slabs_by_the_repeat_unit_formula(ceo2_111_slab):
+    """Finding 4: slab-only mode took the bulk formula from the input slab,
+    so a slab with a vacancy was its own bulk and came back validated."""
+    from ase import Atoms
+
+    from taskerslabgen import cutslab, validate_slab
+
+    slab = ceo2_111_slab
+    z = slab.positions[:, 2]
+    middle_o = next(int(i) for i in np.argsort(np.abs(z - z.mean())) if slab.numbers[i] == 8)
+    vacancy = slab.copy()
+    del vacancy[middle_o]
+    q = np.array([Q_CEO2[s] for s in vacancy.get_chemical_symbols()])
+    q[vacancy.numbers == 58] *= -q[vacancy.numbers == 8].sum() / q[vacancy.numbers == 58].sum()
+    # genslab's stacking_labels say what the bulk is: no sub-slab is CeO2 and neutral.
+    with pytest.raises(ValueError, match="No stoichiometric"):
+        cutslab(vacancy, list(q), cut_at="all", cuts="all", dipole_tol=0.05)
+    # Without them, and too thin to learn its repeat, cutslab says it falls back.
+    bare = vacancy.copy()
+    bare.info.pop("stacking_labels")
+    with pytest.warns(UserWarning, match="whole slab"):
+        cutslab(bare, list(q), cut_at="all", cuts="all", dipole_tol=0.05)
+    # An adsorbate is never part of a sub-slab.
+    adsorbed = slab + Atoms("H", positions=[[0.0, 0.0, z.max() + 1.0]])
+    subs = cutslab(adsorbed, {**Q_CEO2, "H": 0.0}, cut_at="all", cuts="all", dipole_tol=0.05)
+    assert subs and all(1 not in s.numbers for s in subs)
+    for s in subs:
+        validate_slab(s, Q_CEO2, {58: 1, 8: 2}, dipole_tol=0.05)
+
+
+def test_cutslab_recuts_its_own_thinnest_output():
+    """Finding 13: a sub-slab thinner than one repeat unit carries the
+    stacking_labels of a whole unit; re-cutting it raised IndexError."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    slab = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, (0, 0, 1), [3])[(0, 0, 1)].values()))["atoms"][0]
+    one = min(cutslab(slab, Q_IRO2, cut_at="all"), key=len)
+    assert one.info["cut_n_planes"] == 1
+    assert one.info["stacking_labels"] == slab.info["stacking_labels"]
+    again = cutslab(one, Q_IRO2)
+    assert [len(s) for s in again] == [len(one)]
+    assert again[0].info["stacking_labels"] == one.info["stacking_labels"]

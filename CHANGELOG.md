@@ -27,6 +27,16 @@ Fixes from the code review of 0.5.1 (2026-10-18).
   its neighbours (translation-invariant); the labels of such facets change
   (e.g. rutile (100) terminations are now ``O`` to ``O''`` and ``O'`` to
   ``O'''``), and cutslab's slab-only labels use the same order.
+- **Slab-only cutslab judges sub-slabs by the bulk formula.**  Without
+  ``bulk_atoms`` the formula came from the input slab itself, so a slab
+  with a vacancy or an adsorbate was its own bulk and its sub-slabs came
+  back validated.  The formula is now that of one repeat unit of plane
+  labels (learned from the slab's interior, else genslab's
+  ``stacking_labels``); only when neither exists does it fall back to the
+  whole slab, with a warning.
+- cutslab on a sub-slab thinner than one repeat unit (its own thinnest
+  output) raised ``IndexError`` in ``_repeat_labels``; the missing planes'
+  labels now come from the input's ``stacking_labels``.
 
 ## 0.5.1 — 2026-10-02
 
