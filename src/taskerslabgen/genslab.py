@@ -9,10 +9,13 @@ from numbers import Real
 
 import numpy as np
 from ase import Atoms
-from ase.data import atomic_numbers, chemical_symbols
+from ase.data import chemical_symbols
 from ase.io import write
 
 from .core import (
+    _periodic_cell,
+    _prefer_plane_matches,
+    _atoms_z,
     DEFAULT_DIPOLE_TOL,
     PolarSurfaceError,
     _charge_scale,
@@ -88,32 +91,12 @@ def _filter_by_prefer_plane(terminations, prefer_plane, selection="relative"):
         raise ValueError(f"Invalid prefer_plane: {prefer_plane!r}")
 
     labels = {t.get("plane_type", "") for t in terminations.values()}
-    element_Zs = set()
-    plane_type_names = set()
-    for s in str_list:
-        if s in atomic_numbers and not any(plane_name_matches(s, pt, selection) for pt in labels):
-            element_Zs.add(atomic_numbers[s])
-        else:
-            plane_type_names.add(s)
-
-    selected = {}
-    for tid, term in terminations.items():
-        counts = term.get("plane_counts", {})
-        present_Zs = {Z for Z, c in counts.items() if c > 0}
-
-        if element_Zs:
-            for target_Z in element_Zs:
-                if present_Zs == {target_Z}:
-                    selected[tid] = term
-                    break
-            if tid in selected:
-                continue
-
-        if plane_type_names:
-            pt = term.get("plane_type", "")
-            if any(plane_name_matches(q, pt, selection) for q in plane_type_names):
-                selected[tid] = term
-                continue
+    selected = {
+        tid: term for tid, term in terminations.items()
+        if any(_prefer_plane_matches(s, term.get("plane_type", ""), term.get("plane_counts", {}),
+                                     labels, selection)
+               for s in str_list)
+    }
 
     if not selected:
         raise ValueError(
@@ -344,13 +327,7 @@ def _miller_list(millers):
 
     if is_index(millers):
         millers = [millers]
-    out = []
-    for m in millers:
-        if not is_index(m):
-            raise ValueError(f"Miller index must be three integers, got {m!r}.")
-        _check_miller(m)
-        out.append(tuple(int(round(x)) for x in m))
-    return out
+    return [_check_miller(m) for m in millers]
 
 
 def _check_layers(layer_thickness_list):
@@ -466,10 +443,6 @@ def _analyse_facet(bulk_atoms, charges, miller, opts, surface_supercell=None):
     # Slabs are cut from an index-tagged copy of the bulk so every slab atom
     # can be traced back to its bulk atom (charges, validation).
     charges_list = _charges_to_list(bulk_atoms, charges)
-    if len(charges_list) != len(bulk_atoms):
-        raise ValueError(
-            f"Charges length ({len(charges_list)}) does not match atoms ({len(bulk_atoms)})."
-        )
     bulk = _tag_atom_indices(bulk_atoms)
     out_miller = tuple(miller)
     if surface_supercell is not None:
@@ -486,7 +459,7 @@ def _analyse_facet(bulk_atoms, charges, miller, opts, surface_supercell=None):
         verbose=opts.verbose,
     )
     planes = sorted(
-        identify_planes(atoms_z, L, plane_tol=opts.plane_tol, charge_tol=opts.charge_tol),
+        identify_planes(atoms_z, L, plane_tol=opts.plane_tol),
         key=lambda p: p["z_center"] % L,
     )
     a3_xy = _surface_a3_xy(bulk, miller, surf_bulk.cell[:2, :2])
@@ -602,12 +575,12 @@ def _plot_termination(facet, opts, context, slab, bottom, path, title,
 
     n_pl = len(facet.names)
     n = opts.layers[0]
-    atoms_z = np.column_stack([context.numbers, context.positions[:, 2], np.zeros(len(context))])
+    atoms_z = _atoms_z(context.numbers, context.positions[:, 2])
     planes = sorted(identify_planes(atoms_z, float(context.cell[2, 2]), plane_tol=opts.plane_tol),
                     key=lambda p: p["z_center"])
     extra = 1 if recon_label is not None else 0  # a reconstructed slab ends on the cut plane
     if len(planes) != (n + 2) * n_pl + extra:
-        atoms_z = np.column_stack([slab.numbers, slab.positions[:, 2], np.zeros(len(slab))])
+        atoms_z = _atoms_z(slab.numbers, slab.positions[:, 2])
         planes = sorted(identify_planes(atoms_z, float(slab.cell[2, 2]), plane_tol=opts.plane_tol),
                         key=lambda p: p["z_center"])
         names = [facet.names[(bottom + k) % n_pl] for k in range(len(planes))]
@@ -641,12 +614,9 @@ def _tasker12_path(facet, sequences, opts, prefer_plane, candidates_mode, saveca
     # broken at the cut, then by surface atom density (denser = more
     # compact), then by label, so the order does not depend on the bulk
     # origin.  IDs follow the ranking (ID 0 = best).
-    periodic = Atoms(
-        numbers=facet.surf_bulk.numbers, positions=facet.surf_bulk.positions,
-        cell=surface_bulk_cell(facet.bulk, facet.miller), pbc=True,
-    )
+    periodic = _periodic_cell(facet.surf_bulk, surface_bulk_cell(facet.bulk, facet.miller))
     bonds = _bond_pairs(periodic, opts.bond_threshold, opts.bond_distances)
-    area = float(np.linalg.norm(np.cross(facet.surf_bulk.cell[0], facet.surf_bulk.cell[1])))
+    area = facet.area
     ranked = []
     for s in sequences:
         if not (s["is_neutral"] and s["is_stoich"] and s["is_full_period"]
@@ -784,18 +754,19 @@ def _tasker3_termination(facet, opts, cand, plot_path=None):
     return slabs, reconstruction
 
 
+def _tasker3_terminations(valid):
+    """``{id: termination}`` of the ranked valid Tasker III candidates (for :func:`_select`)."""
+    return {
+        tid: {"candidate": cand, "plane_type": cand["recon_label"], "plane_counts": dict(cand["plane_counts"])}
+        for tid, cand in enumerate(valid)
+    }
+
+
 def _tasker3_path(facet, opts, prefer_plane, candidates_mode, savecandidates):
     # Ranked independently of prefer_plane, so IDs do not depend on it;
     # prefer_plane only filters.
     _, valid = _tasker3_candidates(facet, opts)
-    terminations = {
-        tid: {
-            "candidate": cand,
-            "plane_type": cand["recon_label"],
-            "plane_counts": dict(cand["plane_counts"]),
-        }
-        for tid, cand in enumerate(valid)
-    }
+    terminations = _tasker3_terminations(valid)
     selected = _select(terminations, prefer_plane, candidates_mode, opts.selection)
 
     if savecandidates:

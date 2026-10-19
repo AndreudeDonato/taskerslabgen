@@ -7,7 +7,7 @@ import numpy as np
 from ase.data import chemical_symbols
 from ase.data.colors import jmol_colors
 
-from .core import identify_planes
+from .core import _inplane_cell, _inplane_frac, identify_planes
 
 
 def _composition_label(counts):
@@ -269,15 +269,14 @@ def plot_slab(
     import matplotlib.pyplot as plt  # here, not at import: half the package's import time
 
     removed = set(int(i) for i in removed)
-    in_plane = [i for i in range(3) if i != axis]
-    frac = atoms.get_scaled_positions(wrap=False)[:, in_plane]
+    in_plane, cell2d = _inplane_cell(atoms, axis)
+    frac = _inplane_frac(atoms, axis)
     z = atoms.positions[:, axis]
     kept = {i for p in planes[bottom:top + 1] for i in p["indices"]} - removed
 
     # View along the in-plane lattice direction that hides the fewest atoms
     # behind others (removed atoms first): the horizontal coordinate is
     # w . f (mod 1) times the spacing of the lattice rows seen end-on.
-    cell2d = np.asarray(atoms.cell)[np.ix_(in_plane, in_plane)]
     area = abs(np.linalg.det(cell2d))
     surface_atoms = [i for k in {bottom, top} for i in planes[k]["indices"]]
 

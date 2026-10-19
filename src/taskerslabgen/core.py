@@ -4,13 +4,15 @@ phase, from smooth plane densities), cut enumeration, polarity, validation and
 matching slab planes to the bulk.
 """
 import re
+import warnings
 from collections import Counter
 from functools import cmp_to_key
 from itertools import product
 from math import gcd
-from numbers import Integral, Real
+from numbers import Integral
 
 import numpy as np
+from ase import Atoms
 from ase.build import surface
 from ase.data import atomic_numbers, chemical_symbols
 from ase.formula import Formula
@@ -32,6 +34,18 @@ def _charge_scale(charges):
     q = np.abs(np.asarray(charges, dtype=float))
     scale = float(q.mean()) if q.size else 0.0
     return scale if scale > 0 else 1.0
+
+
+def _is_neutral(total_q, k, scale, charge_tol):
+    """Net charge *total_q* (e) within *charge_tol* per formula unit, for *k*
+    formula units and charges in units of *scale*."""
+    return abs(total_q) <= charge_tol * k * scale
+
+
+def _is_nonpolar(mu, area, scale, dipole_tol):
+    """Dipole *mu* (e*angstrom) along the normal within *dipole_tol* per
+    surface *area*, charges in units of *scale*."""
+    return abs(mu) / (area * scale) <= dipole_tol
 
 
 def _surface_area(cell, axis=2):
@@ -112,8 +126,11 @@ def _hkl_str(miller):
 
 
 def _check_miller(miller):
+    """Validate a Miller index; returns it as a tuple of three ints."""
     try:
         hkl = tuple(int(round(x)) for x in miller)
+        if any(isinstance(x, bool) for x in miller):
+            raise TypeError
     except (TypeError, ValueError):
         raise ValueError(f"Miller index must be three integers, got {miller!r}.") from None
     if len(hkl) != 3 or any(abs(x - y) > 1e-9 for x, y in zip(miller, hkl)):
@@ -126,6 +143,27 @@ def _check_miller(miller):
         raise ValueError(
             f"Miller index {hkl} is not reduced; use {reduced} (same surface orientation)."
         )
+    return hkl
+
+
+def _bulk_key(bulk_atoms, miller):
+    """Cache key of an ``ase.build.surface`` build: the bulk's atoms and cell, and the index."""
+    return (_check_miller(miller), np.asarray(bulk_atoms.numbers).tobytes(),
+            np.ascontiguousarray(bulk_atoms.positions, dtype=float).tobytes(),
+            np.ascontiguousarray(bulk_atoms.cell, dtype=float).tobytes())
+
+
+def _cached(cache, key, build, limit=64):
+    """*cache[key]*, built by *build()* on a miss (a small, bounded cache)."""
+    if key not in cache:
+        if len(cache) >= limit:
+            cache.clear()
+        cache[key] = build()
+    return cache[key]
+
+
+_SURFACE_CELL_CACHE = {}
+_ONE_LAYER_Z_CACHE = {}
 
 
 def _tag_atom_indices(atoms):
@@ -176,7 +214,9 @@ def build_surface(bulk_atoms, miller, layers=1, vacuum=None, verbose=None):
     L = float(a3[2])
     # From the one-layer build for every *layers*: equally wide gaps (e.g.
     # rutile (110)) must not be told apart by rounding noise.
-    z0 = np.sort(surface(bulk_atoms, miller, layers=1).positions[:, 2] % L)
+    z1 = _cached(_ONE_LAYER_Z_CACHE, _bulk_key(bulk_atoms, miller),
+                 lambda: surface(bulk_atoms, miller, layers=1).positions[:, 2].copy())
+    z0 = np.sort(z1 % L)
     gaps = np.diff(np.append(z0, z0[0] + L))
     k = int(np.flatnonzero(gaps >= gaps.max() - 1e-6)[0])
     z_cut = (z0[k] + 0.5 * gaps[k]) % L
@@ -198,6 +238,12 @@ def build_surface(bulk_atoms, miller, layers=1, vacuum=None, verbose=None):
         print("REORIENTED BULK")
         print(slab, slab.positions, "\n")
     return slab
+
+
+def _atoms_z(numbers, z, charges=None):
+    """``[Z, z, q]`` rows for :func:`identify_planes`; charges default to zero."""
+    q = np.zeros(len(numbers)) if charges is None else np.asarray(charges, dtype=float)
+    return np.column_stack([np.asarray(numbers, dtype=float), np.asarray(z, dtype=float), q])
 
 
 def compute_projection(bulk, surf_bulk, charges, miller, verbose=None):
@@ -227,12 +273,7 @@ def compute_projection(bulk, surf_bulk, charges, miller, verbose=None):
         Lattice-plane spacing (angstrom) for this Miller index.
     """
     _check_miller(miller)
-    if charges is None or isinstance(charges, dict):
-        charges = _charges_to_list(surf_bulk, charges)
-    if len(charges) != len(surf_bulk):
-        raise ValueError(
-            f"Charges length ({len(charges)}) does not match atoms ({len(surf_bulk)})."
-        )
+    charges = _charges_to_list(surf_bulk, charges)
     cell = bulk.cell
     recip = cell.reciprocal()
     hkl = np.array(miller, dtype=float)
@@ -241,9 +282,7 @@ def compute_projection(bulk, surf_bulk, charges, miller, verbose=None):
     if L <= 0.0:
         raise ValueError("Invalid cell height along z.")
     z_coords = surf_bulk.positions[:, 2]
-    atoms_z_matrix = np.array(
-        [[num, z, q] for num, z, q in zip(surf_bulk.numbers, z_coords, charges)]
-    )
+    atoms_z_matrix = _atoms_z(surf_bulk.numbers, z_coords, charges)
     if verbose:
         print("Atom matrix [Z, z, q]:")
         print(atoms_z_matrix, "\n")
@@ -266,11 +305,18 @@ def surface_bulk_cell(bulk_atoms, miller):
         Rows ``a1, a2`` (in-plane, as in :func:`build_surface`) and the bulk
         lattice vector ``a3`` that stacks one layer onto the next.
     """
-    _check_miller(miller)
-    two = surface(bulk_atoms, miller, layers=2)
-    n = len(bulk_atoms)
-    a3 = two.positions[n] - two.positions[0]
-    return np.array([two.cell[0], two.cell[1], a3])
+    def build():
+        two = surface(bulk_atoms, miller, layers=2)
+        a3 = two.positions[len(bulk_atoms)] - two.positions[0]
+        return np.array([two.cell[0], two.cell[1], a3])
+
+    return _cached(_SURFACE_CELL_CACHE, _bulk_key(bulk_atoms, miller), build).copy()
+
+
+def _periodic_cell(surf_bulk, cell):
+    """*surf_bulk* (a one-layer cell of :func:`build_surface`) in the periodic
+    *cell*, usually :func:`surface_bulk_cell`: the crystal for bonds and symmetry."""
+    return Atoms(numbers=surf_bulk.numbers, positions=surf_bulk.positions, cell=cell, pbc=True)
 
 
 def _oriented_bulk(bulk_atoms, miller, surface_supercell=(1, 1)):
@@ -358,13 +404,16 @@ def _charges_to_list(atoms, charges):
                 raise ValueError(f"Missing charge for atomic number: {Z}")
             charges_list.append(charge_map[Z])
         return charges_list
-    return list(charges)
+    charges = list(charges)
+    if len(charges) != len(atoms):
+        raise ValueError(f"Charges length ({len(charges)}) does not match atoms ({len(atoms)}).")
+    return charges
 
 
-def _make_plane(indices, z_values, atoms_z, charge_tol=None, period=None):
-    """Plane dict of the atoms *indices* at heights *z_values* (unwrapped).
-    *charge_tol* is accepted for compatibility and ignored: plane charges
-    are kept exact, the callers compare sums with their own tolerance."""
+def _make_plane(indices, z_values, atoms_z, period=None):
+    """Plane dict of the atoms *indices* at heights *z_values* (unwrapped);
+    plane charges are kept exact, the callers compare sums with their own
+    tolerance."""
     z_values = np.asarray(z_values, dtype=float)
     z_mean = float(np.mean(z_values))
     q = np.asarray(atoms_z[indices, 2], dtype=float)
@@ -383,7 +432,7 @@ def _make_plane(indices, z_values, atoms_z, charge_tol=None, period=None):
     }
 
 
-def identify_planes(atoms_z, L, plane_tol=None, charge_tol=1e-3):
+def identify_planes(atoms_z, L, plane_tol=None, charge_tol=None):
     """
     Cluster atoms into atomic planes along the stacking direction.
 
@@ -418,6 +467,9 @@ def identify_planes(atoms_z, L, plane_tol=None, charge_tol=1e-3):
         its atoms), ``indices``, and ``counts`` (element composition
         ``{Z: count}``).
     """
+    if charge_tol is not None:
+        warnings.warn("identify_planes ignores charge_tol; it will be removed.",
+                      DeprecationWarning, stacklevel=2)
     if len(atoms_z) == 0:
         return []
 
@@ -448,11 +500,20 @@ def identify_planes(atoms_z, L, plane_tol=None, charge_tol=1e-3):
         group.append(order[k])
         group_z.append(z_sorted[k] + (L if start + m >= n else 0.0))
         if k in break_set or m == n - 1:
-            planes.append(_make_plane(group, group_z, atoms_z, charge_tol, period=L))
+            planes.append(_make_plane(group, group_z, atoms_z, period=L))
             group, group_z = [], []
 
     planes.sort(key=lambda p: p["z_center"])
     return planes
+
+
+def _reduce_counts(counts):
+    """``{Z: count}`` with the greatest common divisor of the counts factored out."""
+    g = 0
+    for c in counts.values():
+        g = np.gcd(g, int(c))
+    g = max(int(g), 1)
+    return {int(Z): int(c) // g for Z, c in sorted(counts.items())}
 
 
 def compute_reduced_counts(atoms_z):
@@ -470,13 +531,7 @@ def compute_reduced_counts(atoms_z):
         ``{atomic_number: reduced_count}`` with the GCD factored out.
     """
     types = np.unique(atoms_z[:, 0].astype(int))
-    counts = {Z: int(np.sum(atoms_z[:, 0] == Z)) for Z in types}
-    gcd = 0
-    for c in counts.values():
-        gcd = np.gcd(gcd, c)
-    gcd = max(int(gcd), 1)
-    reduced = {Z: counts[Z] // gcd for Z in types}
-    return reduced
+    return _reduce_counts({int(Z): int(np.sum(atoms_z[:, 0] == Z)) for Z in types})
 
 
 def is_stoichiometric_sequence(sequence_counts, reduced_counts):
@@ -790,11 +845,9 @@ def validate_slab(slab, charges, reduced_counts, axis=2, charge_tol=1e-3,
         k = max(1, round(len(slab) / max(1, sum(reduced_counts.values()))))
 
     q = np.asarray(_charges_to_list(slab, charges), dtype=float)
-    if len(q) != len(slab):
-        raise ValueError(f"Charges length ({len(q)}) does not match atoms ({len(slab)}).")
     scale = _charge_scale(q)
     net_q = float(np.sum(q))
-    if abs(net_q) > charge_tol * k * scale:
+    if not _is_neutral(net_q, k, scale, charge_tol):
         problems.append(f"net charge {net_q:+.4f} e")
 
     z = slab.positions[:, axis]
@@ -841,11 +894,16 @@ _WAVE_SIGMA = 0.5   # angstrom; how smooth the density is, not a cutoff
 _SAME_PLANE = 0.9   # normalised overlap from which two planes count as the same
 
 
+def _wave_reach(sigma=_WAVE_SIGMA, eps=1e-12):
+    """Distance beyond which two Gaussian densities overlap by less than *eps*."""
+    return np.sqrt(-4.0 * sigma ** 2 * np.log(eps))
+
+
 def _wave_images(cell2d, sigma=_WAVE_SIGMA, eps=1e-12):
     """In-plane lattice translations (integer pairs) needed for the overlap
     sum to converge to *eps*: beyond them a Gaussian pair contributes less."""
     cell2d = np.asarray(cell2d, dtype=float)
-    reach = np.sqrt(-4.0 * sigma ** 2 * np.log(eps))
+    reach = _wave_reach(sigma, eps)
     area = abs(np.linalg.det(cell2d))
     lengths = np.linalg.norm(cell2d, axis=1)
     n = [int(np.ceil(reach * lengths[1 - k] / area)) + 1 for k in range(2)]
@@ -878,12 +936,30 @@ def _wave_overlap(A, B, cell2d, t=(0.0, 0.0), W=None, sigma=_WAVE_SIGMA, images=
     return total
 
 
+_SELF_OVERLAP_CACHE = {}
+
+
+def _self_overlap(A, cell2d, images):
+    """``_wave_overlap(A, A)``, cached by content: a wave's norm is asked for
+    once per alignment it takes part in."""
+    key = (np.ascontiguousarray(A).tobytes(), cell2d.tobytes(), images.tobytes())
+    return _cached(_SELF_OVERLAP_CACHE, key, lambda: _wave_overlap(A, A, cell2d, images=images),
+                   limit=1024)
+
+
 def _wave_similarity(A, B, cell2d, t=(0.0, 0.0), W=None, images=None):
     """Normalised overlap in [0, 1]: 1 when *B* is *A* moved by *W* and *t*."""
+    cell2d = np.asarray(cell2d, dtype=float)
     images = _wave_images(cell2d) if images is None else images
-    norm = np.sqrt(_wave_overlap(A, A, cell2d, images=images)
-                   * _wave_overlap(B, B, cell2d, images=images))
+    norm = np.sqrt(_self_overlap(A, cell2d, images) * _self_overlap(B, cell2d, images))
     return _wave_overlap(A, B, cell2d, t, W, images=images) / norm if norm > 0 else 0.0
+
+
+def _rarest_anchor(numbers):
+    """Index of the first atom of the rarest species in *numbers*."""
+    numbers = np.asarray(numbers)
+    species, counts = np.unique(numbers, return_counts=True)
+    return int(np.flatnonzero(numbers == species[np.argmin(counts)])[0])
 
 
 def _wave_alignment(A, B, cell2d, ops=None, images=None):
@@ -902,8 +978,8 @@ def _wave_alignment(A, B, cell2d, ops=None, images=None):
     cell2d = np.asarray(cell2d, dtype=float)
     images = _wave_images(cell2d) if images is None else images
     ops = [np.eye(2, dtype=int)] if ops is None else ops
-    species, counts = np.unique(A[:, 0], return_counts=True)
-    anchor = A[A[:, 0] == species[np.argmin(counts)]][0]
+    species = np.unique(A[:, 0])
+    anchor = A[_rarest_anchor(A[:, 0])]
     targets = B[B[:, 0] == anchor[0]]
     best = (-1.0, None, None)
     for W in ops:
@@ -1042,16 +1118,10 @@ def assign_plane_names(planes_sorted, atoms=None, axis=2, same_plane=_SAME_PLANE
     # what still ties keeps stacking order.
     phase_rank = {}
     for a, (_, _, phases) in enumerate(arrangements):
-        sigs = [_plane_signature([tuple(row[:3]) for row in waves[p]]) for p in phases]
-        ctx = [context[p] for p in phases] if context is not None else None
-
-        def compare(i, j):
-            c = _compare_signatures(sigs[i], sigs[j])
-            if c == 0 and ctx is not None:
-                c = _compare_contexts(ctx[i], ctx[j])
-            return c
-
-        order = sorted(range(len(phases)), key=cmp_to_key(compare))
+        keys = [_LazyParts([lambda p=p: _plane_signature([tuple(row[:3]) for row in waves[p]])]
+                           + (_part_makers(context[p]) if context is not None else []))
+                for p in phases]
+        order = sorted(range(len(phases)), key=cmp_to_key(lambda i, j: _compare_contexts(keys[i], keys[j])))
         for rank, k in enumerate(order):
             phase_rank[(a, k)] = rank
     names = [f"{arrangements[a][0]}{letter[a]}{_phase_suffix(phase_rank[(a, k)])}" for a, k in member]
@@ -1070,16 +1140,21 @@ def _inplane_frac(atoms, axis=2):
     pymatgen, keep an oblique a3), so planes are compared where their atoms
     are.
     """
-    ab_axes = [i for i in range(3) if i != axis]
-    cell2d = np.asarray(atoms.cell, dtype=float)[np.ix_(ab_axes, ab_axes)]
+    ab_axes, cell2d = _inplane_cell(atoms, axis)
     return np.linalg.solve(cell2d.T, atoms.positions[:, ab_axes].T).T
+
+
+def _inplane_cell(atoms, axis=2):
+    """The two axes perpendicular to *axis* and the 2x2 in-plane cell (rows:
+    those two cell vectors' in-plane components)."""
+    ab_axes = [i for i in range(3) if i != axis]
+    return ab_axes, np.asarray(atoms.cell, dtype=float)[np.ix_(ab_axes, ab_axes)]
 
 
 def _plane_waves(atoms, planes_sorted, axis=2):
     """Waves (rows ``(Z, fx, fy, dz)``) of the planes and the in-plane cell."""
-    ab_axes = [i for i in range(3) if i != axis]
+    _, cell2d = _inplane_cell(atoms, axis)
     frac = _inplane_frac(atoms, axis)
-    cell2d = np.array(atoms.cell)[np.ix_(ab_axes, ab_axes)]
     height = float(atoms.cell.lengths()[axis])
     z = atoms.positions[:, axis]
     waves = []
@@ -1119,29 +1194,56 @@ def _neighbours(waves, planes_sorted, i, below=None, above=None):
     return out
 
 
+def _stack(wave, neighbours):
+    """*wave* stacked with the *neighbours* that exist (``None`` entries are skipped)."""
+    return np.vstack([wave] + [m for m in neighbours if m is not None])
+
+
 def _sandwich(waves, planes_sorted, i, below=None, above=None):
     """Wave of plane *i* with the planes directly below and above it
     (:func:`_neighbours`): the plane in its stacking context."""
-    rows = [waves[i]] + [m for m in _neighbours(waves, planes_sorted, i, below, above) if m is not None]
-    return np.vstack(rows)
+    return _stack(waves[i], _neighbours(waves, planes_sorted, i, below, above))
+
+
+class _LazyParts:
+    """The parts of a fingerprint, each computed when first compared: most
+    comparisons are decided by the first part (:func:`_compare_contexts`)."""
+
+    def __init__(self, makers):
+        self.makers = list(makers)
+        self._parts = [None] * len(self.makers)
+
+    def __len__(self):
+        return len(self.makers)
+
+    def __getitem__(self, i):
+        if i >= len(self.makers):
+            raise IndexError(i)
+        if self._parts[i] is None:
+            self._parts[i] = self.makers[i]()
+        return self._parts[i]
 
 
 def _context_signature(wave, neighbours):
     """
     Translation-invariant fingerprint of a plane in its stacking context, as
-    a list of parts compared in turn (:func:`_compare_contexts`):
+    parts compared in turn (:func:`_compare_contexts`, computed on demand):
     :func:`_plane_signature` of the plane together with the plane below it,
     then with the plane above it (both projected onto the surface), then
     the same with the higher-order invariants.  Phases that differ only by
     a shift have the same fingerprint on their own, but their neighbours
     sit elsewhere relative to them.
     """
-    parts = []
-    for high in (False, True):
-        for other in neighbours:
-            rows = wave if other is None else np.vstack([wave, other])
-            parts.append(_plane_signature([tuple(r[:3]) for r in rows], high=high))
-    return parts
+    return _LazyParts([
+        lambda other=other, high=high: _plane_signature(
+            [tuple(r[:3]) for r in _stack(wave, [other])], high=high)
+        for high in (False, True) for other in neighbours
+    ])
+
+
+def _part_makers(parts):
+    """Makers of the *parts* of a fingerprint (:class:`_LazyParts`, or a plain list)."""
+    return list(parts.makers) if isinstance(parts, _LazyParts) else [lambda part=part: part for part in parts]
 
 
 def _compare_contexts(a, b):
@@ -1174,13 +1276,7 @@ def _cell_neighbours(waves, planes_sorted, L, a3_xy):
     return out
 
 
-def _cell_sandwiches(waves, planes_sorted, L, a3_xy):
-    """Sandwiches of the planes of a periodic bulk cell (:func:`_cell_neighbours`)."""
-    return [np.vstack([waves[i]] + [m for m in nb if m is not None])
-            for i, nb in enumerate(_cell_neighbours(waves, planes_sorted, L, a3_xy))]
-
-
-def _cell_repeat(planes_sorted, waves, cell2d, L, a3_xy, same_plane=_SAME_PLANE):
+def _cell_repeat(planes_sorted, waves, neighbours, cell2d, a3_xy, same_plane=_SAME_PLANE):
     """
     Smallest number of planes after which the stacking of a periodic bulk
     cell repeats by a lattice translation.
@@ -1196,7 +1292,7 @@ def _cell_repeat(planes_sorted, waves, cell2d, L, a3_xy, same_plane=_SAME_PLANE)
     n = len(planes_sorted)
     images = _wave_images(cell2d)
     a3_xy = np.asarray(a3_xy, dtype=float)
-    sandwiches = _cell_sandwiches(waves, planes_sorted, L, a3_xy)
+    sandwiches = [_stack(waves[i], nb) for i, nb in enumerate(neighbours)]
     for per in range(1, n):
         if n % per or planes_sorted[per]["counts"] != planes_sorted[0]["counts"]:
             continue
@@ -1224,8 +1320,8 @@ def _repeat_names(planes_sorted, atoms, L, a3_xy, axis=2):
     *per* the number of planes in one lattice repeat.
     """
     waves, cell2d = _plane_waves(atoms, planes_sorted, axis)
-    per = _cell_repeat(planes_sorted, waves, cell2d, L, a3_xy)
     neighbours = _cell_neighbours(waves, planes_sorted, L, a3_xy)
+    per = _cell_repeat(planes_sorted, waves, neighbours, cell2d, a3_xy)
     context = [_context_signature(waves[i], neighbours[i]) for i in range(per)]
     first, _ = assign_plane_names(planes_sorted[:per], atoms=atoms, axis=axis, context=context)
     names = [first[i % per] for i in range(len(planes_sorted))]
@@ -1285,6 +1381,11 @@ def _slab_repeat(planes_sorted, waves, cell2d, same_plane=_SAME_PLANE):
     return None
 
 
+def _label_fits(label, counts):
+    """Whether the composition part of *label* is the formula of a plane with *counts*."""
+    return plane_name_base(label) == _formula_label(counts)
+
+
 def _slab_plane_names(atoms, planes_sorted, axis=2, stacking_labels=None):
     """
     Labels of the planes of a slab, by relative phase: copies one lattice
@@ -1314,13 +1415,12 @@ def _slab_plane_names(atoms, planes_sorted, axis=2, stacking_labels=None):
         # differ: reconstructed or relaxed).
         per = len(stacking_labels)
         cyclic = [stacking_labels[i % per] for i in range(n)]
-        if all(plane_name_base(cyclic[i]) == _formula_label(planes_sorted[i]["counts"])
-               for i in range(1, n - 1)):
+        if all(_label_fits(cyclic[i], planes_sorted[i]["counts"]) for i in range(1, n - 1)):
             names = list(cyclic)
             for i in {0, n - 1}:
-                if plane_name_base(names[i]) != _formula_label(planes_sorted[i]["counts"]):
+                if not _label_fits(names[i], planes_sorted[i]["counts"]):
                     names[i] = _formula_label(planes_sorted[i]["counts"]) + "~"
-            return names, (per, None, None)
+            return names, per
     def context(indices):
         return [_context_signature(waves[i], _neighbours(waves, planes_sorted, i)) for i in indices]
 
@@ -1375,8 +1475,7 @@ def _slab_plane_names(atoms, planes_sorted, axis=2, stacking_labels=None):
         # atoms per cell, and an in-plane supercell of a genslab slab holds
         # several per cell (O16 where the inherited label says O4).
         if ref_names is not None and any(
-            plane_name_base(ref_names[c]) != _formula_label(planes_sorted[r]["counts"])
-            for c, r in enumerate(ref)
+            not _label_fits(ref_names[c], planes_sorted[r]["counts"]) for c, r in enumerate(ref)
         ):
             ref_names = None
     if ref_names is None:
@@ -1394,7 +1493,7 @@ def _slab_plane_names(atoms, planes_sorted, axis=2, stacking_labels=None):
             names.append(_undeformed(ref_names[c]) + "~")
         else:
             names.append(_formula_label(planes_sorted[i]["counts"]) + "~")
-    return names, (per, t, dz_rep)
+    return names, per
 
 
 def _gauss_reduce_basis(cell2d):
@@ -1469,8 +1568,13 @@ def _plane_signature(geom, high=False):
     w = np.array([a[0] for a in geom], dtype=float)
     f = np.array([[a[1], a[2]] for a in geom], dtype=float)
 
+    cache = {}
+
     def F(g):
-        return np.sum(w * np.exp(2j * np.pi * (f @ np.asarray(g, dtype=float)))) / w.sum()
+        key = tuple(int(x) for x in g)
+        if key not in cache:
+            cache[key] = np.sum(w * np.exp(2j * np.pi * (f @ np.asarray(g, dtype=float)))) / w.sum()
+        return cache[key]
 
     gs, triplets = (_SIG_G_HIGH, _SIG_TRIPLETS_HIGH) if high else (_SIG_G, _SIG_TRIPLETS)
     mags = [abs(F(g)) for g in gs]
@@ -1561,6 +1665,20 @@ def plane_name_for_filename(name):
     return name.replace("'", "p").replace("~", "d")
 
 
+def _prefer_plane_matches(query, label, counts, facet_labels, selection="relative"):
+    """
+    Whether a plane with *label* and composition *counts* is selected by
+    the string *query* (one entry of ``prefer_plane``): a plane label is
+    matched by :func:`plane_name_matches` with *selection*; an element
+    symbol that is no label of the facet (*facet_labels*) selects the
+    planes made only of that element.
+    """
+    if query in atomic_numbers and not any(plane_name_matches(query, name, selection)
+                                           for name in facet_labels):
+        return {Z for Z, c in counts.items() if c > 0} == {atomic_numbers[query]}
+    return plane_name_matches(query, label, selection)
+
+
 def plane_name_matches(query, name, selection="relative"):
     """
     Whether *query* selects plane label *name*.
@@ -1640,9 +1758,8 @@ def _plane_pairing(ref, tgt):
     tgt_f = np.array([[a[1], a[2]] for a in tgt], dtype=float).reshape(-1, 2)
     shifts = []
     if len(ref):
-        anchor_Z = species[np.argmin(counts)]
-        anchor = int(np.flatnonzero(ref_Z == anchor_Z)[0])
-        shifts = [tgt_f[b] - ref_f[anchor] for b in np.flatnonzero(tgt_Z == anchor_Z)]
+        anchor = _rarest_anchor(ref_Z)
+        shifts = [tgt_f[b] - ref_f[anchor] for b in np.flatnonzero(tgt_Z == ref_Z[anchor])]
     return {
         "ref_f": ref_f,
         "tgt_f": tgt_f,
@@ -1680,7 +1797,7 @@ def _shift_matches(ref, tgt, t, cell2d, tol):
     return True
 
 
-def _bulk_plane_catalog(bulk_atoms, miller, plane_tol=None):
+def _bulk_plane_catalog(bulk_atoms, miller):
     """
     Planes of one bulk repeat unit in the frame of :func:`build_surface`.
 
@@ -1693,10 +1810,10 @@ def _bulk_plane_catalog(bulk_atoms, miller, plane_tol=None):
     surf = build_surface(bulk_atoms, miller, layers=1)
     L = float(surf.cell[2, 2])
     z = surf.positions[:, 2]
-    atoms_z = np.column_stack([surf.numbers, z, np.zeros(len(surf))])
-    planes = sorted(identify_planes(atoms_z, L, plane_tol=plane_tol), key=lambda p: p["z_center"])
+    atoms_z = _atoms_z(surf.numbers, z)
+    planes = sorted(identify_planes(atoms_z, L), key=lambda p: p["z_center"])
     labels, _, per = _repeat_names(planes, surf, L, _surface_a3_xy(bulk_atoms, miller, surf.cell[:2, :2]))
-    frac = surf.get_scaled_positions()
+    frac = _inplane_frac(surf) % 1.0
     catalog = []
     for plane, label in zip(planes, labels):
         zc = plane["z_center"]
@@ -1770,8 +1887,6 @@ def _tile_plane(plane_atoms, bulk_cell2d, cell2d):
     """Express plane atoms ``(Z, fx, fy, ...)`` of in-plane cell *bulk_cell2d*
     in the integer in-plane supercell *cell2d*."""
     M_int, det = _supercell_matrix(bulk_cell2d, cell2d)
-    if det == 1 and np.array_equal(M_int, np.eye(2, dtype=int)):
-        return list(plane_atoms)
     M_inv = np.linalg.inv(M_int)
     tiled = []
     for t in _supercell_translations(M_int, det):
@@ -1862,8 +1977,6 @@ def _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, site_tol=0.3, a3_xy=(0.0, 
             entry["atoms"] = [a for a, _ in sites]
             entry["counts"] = dict(Counter(a[0] for a in entry["atoms"]))
     # Labels count atoms per cell: recompute them in the slab's cell.
-    from ase import Atoms
-
     numbers, scaled, planes, start = [], [], [], 0
     for entry in catalog:
         for Z, fx, fy, dz in entry["atoms"]:
@@ -1910,7 +2023,7 @@ class _BulkSites:
         # pair closer than half the cell's smallest height; neighbouring
         # images are checked only when that is within reach of the densities.
         heights = abs(np.linalg.det(self.cell2d)) / np.linalg.norm(self.cell2d, axis=1)[::-1]
-        reach = np.sqrt(-4.0 * _WAVE_SIGMA ** 2 * np.log(1e-12))
+        reach = _wave_reach()
         self.images = (np.array([(i, j) for i in (-1, 0, 1) for j in (-1, 0, 1)], dtype=float)
                        if heights.min() / 2 < reach else np.zeros((1, 2)))
         # Squared distance from every site to the nearest other site of its
@@ -2012,8 +2125,7 @@ def _bulk_registry(atoms, sites, sigma=_WAVE_SIGMA):
         _, _, _, df, dz = sites.pairs(numbers, frac, z, t, offset, scale)
         return float(sites.weights(df, dz, sigma).sum())
 
-    elements, counts = np.unique(numbers, return_counts=True)
-    rare = elements[np.argmin(counts)]
+    rare = numbers[_rarest_anchor(numbers)]
     pool = np.flatnonzero(numbers == rare)
     pool = pool[np.argsort(z[pool])]
     seeds = sorted({int(pool[int(round(q * (len(pool) - 1)))]) for q in (0.1, 0.3, 0.5, 0.7, 0.9)})
@@ -2135,7 +2247,7 @@ def _assign_to_sites(numbers, frac, z, sites, t, offset, scale):
     return groups
 
 
-def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, charge_tol=1e-3, deform_tol=0.3):
+def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, deform_tol=0.3):
     """
     Assign the atoms of a slab to the planes of its bulk and label them.
 
@@ -2161,8 +2273,7 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, charge_tol=1e-3, 
 
     numbers = atoms.numbers
     z = atoms.positions[:, 2]
-    q = np.asarray(charges_list, dtype=float)
-    atoms_z = np.column_stack([numbers, z, q])
+    atoms_z = _atoms_z(numbers, z, charges_list)
     missing = set(numbers.tolist()) - {Z for entry in catalog for Z in entry["counts"]}
     if missing:
         raise ValueError(
@@ -2184,14 +2295,13 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, charge_tol=1e-3, 
     n_cat = len(catalog)
     for (k, _), idx in keyed:
         idx = sorted(idx)
-        plane = _make_plane(idx, z[idx], atoms_z, charge_tol)
+        plane = _make_plane(idx, z[idx], atoms_z)
         deviation = _plane_rmsd(catalog[k]["atoms"], geometry(idx, plane["z_center"]), cell2d)
         planes_sorted.append(plane)
         labels.append(catalog[k]["label"] + ("" if deviation <= deform_tol else "~"))
         stacking.append([catalog[(k + j) % n_cat]["label"] for j in range(per)])
 
-    bulk_numbers = np.asarray(bulk_atoms.numbers, dtype=float)
-    reduced = compute_reduced_counts(np.column_stack([bulk_numbers, bulk_numbers * 0, bulk_numbers * 0]))
+    reduced = _reduce_counts(Counter(int(Z) for Z in bulk_atoms.numbers))
     return planes_sorted, labels, reduced, stacking
 
 
@@ -2203,7 +2313,7 @@ def compute_delete_info(cut_plane, deletion_mask, atoms_z_matrix, surf_bulk):
     This information can be reused to apply the same reconstruction
     to any plane with the same composition in a thicker slab.
     """
-    frac = surf_bulk.get_scaled_positions()
+    frac = _inplane_frac(surf_bulk)
     deleted_set = set(deletion_mask)
     delete_info = []
     for idx in cut_plane["indices"]:

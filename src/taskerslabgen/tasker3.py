@@ -16,6 +16,9 @@ from ase.neighborlist import neighbor_list
 
 from .core import (
     DEFAULT_DIPOLE_TOL,
+    _periodic_cell,
+    _prefer_plane_matches,
+    _rarest_anchor,
     PolarSurfaceError,
     _charge_scale,
     _hkl_str,
@@ -74,12 +77,7 @@ def build_adjacency_matrix(atoms, bond_threshold=(0.85, 1.15), bond_distances=No
                 "bulk_atoms requires miller: the bulk lattice must be rotated into "
                 "the surface frame (see surface_bulk_cell)."
             )
-        atoms = Atoms(
-            numbers=atoms.numbers,
-            positions=atoms.get_positions(),
-            cell=surface_bulk_cell(bulk_atoms, miller),
-            pbc=True,
-        )
+        atoms = _periodic_cell(atoms, surface_bulk_cell(bulk_atoms, miller))
 
     n = len(atoms)
     adj = np.zeros((n, n), dtype=int)
@@ -241,8 +239,10 @@ def _stacking_symmetry(numbers, positions, cell, tol=0.1, charges=None, charge_t
     frac = np.asarray(positions, dtype=float) @ np.linalg.inv(cell)
     cell2d = cell[:2, :2]
     inv2d = np.linalg.inv(cell2d)
-    species, counts = np.unique(numbers, return_counts=True)
-    anchor = int(np.flatnonzero(numbers == species[np.argmin(counts)])[0])
+    anchor = _rarest_anchor(numbers)
+    foreign = numbers[:, None] != numbers[None, :]  # atoms an operation may not map onto each other
+    if charges is not None:
+        foreign |= np.abs(charges[:, None] - charges[None, :]) > charge_tol
     perms = [np.arange(len(numbers))]
     seen = {tuple(perms[0])}
     for W in _lattice_point_ops(cell2d):
@@ -265,9 +265,7 @@ def _stacking_symmetry(numbers, positions, cell, tol=0.1, charges=None, charge_t
                 d = (rotated + t)[:, None, :] - frac[None, :, :]
                 d -= np.round(d)
                 dist = np.linalg.norm(d @ cell, axis=-1)
-                dist[numbers[:, None] != numbers[None, :]] = np.inf
-                if charges is not None:
-                    dist[np.abs(charges[:, None] - charges[None, :]) > charge_tol] = np.inf
+                dist[foreign] = np.inf
                 perm = np.argmin(dist, axis=1)
                 if dist[np.arange(len(perm)), perm].max() > tol or len(set(perm)) != len(perm):
                     continue
@@ -337,11 +335,10 @@ def _parse_bond_distances_map(bond_distances):
                 a, b = number(parts[0], key), number(parts[1], key)
             else:
                 try:
-                    a, b = (number(x, key) for x in key)
-                except (TypeError, ValueError) as exc:
-                    if isinstance(exc, ValueError) and "bond_distances" in str(exc):
-                        raise
+                    x, y = key
+                except (TypeError, ValueError):
                     raise ValueError(f"Bond key must be 'X-Y' or (Z1, Z2), got: {key!r}") from None
+                a, b = number(x, key), number(y, key)
             manual_map[(min(a, b), max(a, b))] = d
     return manual_map
 
@@ -391,15 +388,13 @@ def _tasker3_slab_moments(q, r, plane_idx, mask, L, atoms_per_fu, min_layers=1,
     slab, the largest |dipole| / *area* and the largest |charge| per formula
     unit over every thickness from *min_layers* to *max_layers* (or a
     spread of thicknesses up to ``10 * min_layers`` if not given).  *mask*
-    may also be a 2D integer array, one mask per row: the four results are
-    then arrays, one entry per mask.
+    is a 2D integer array, one mask per row: the four results are arrays,
+    one entry per mask.
     """
     q = np.asarray(q, dtype=float)
     r = np.asarray(r, dtype=float)
     P = np.asarray(plane_idx, dtype=int)
-    M = np.asarray(mask if isinstance(mask, np.ndarray) else list(mask), dtype=int)
-    single = M.ndim == 1
-    M = M.reshape(1, -1) if single else M
+    M = np.asarray(mask, dtype=int)  # one mask per row
     Nu, Qu, Du, Ru = len(q), q.sum(), q @ r, r.sum()
     NP, QP, DP, RP = len(P), q[P].sum(), q[P] @ r[P], r[P].sum()
     NM, QM, DM, RM = M.shape[1], q[M].sum(axis=1), (q[M] * r[M]).sum(axis=1), r[M].sum(axis=1)
@@ -421,8 +416,6 @@ def _tasker3_slab_moments(q, r, plane_idx, mask, L, atoms_per_fu, min_layers=1,
     mu0, Q0 = values[0][0], values[0][1]
     dipole_per_area = np.max([v[2] for v in values], axis=0)
     charge_per_fu = np.maximum(np.max([v[3] for v in values], axis=0), abs(Qu) / (Nu / atoms_per_fu))
-    if single:
-        return float(mu0[0]), float(Q0[0]), float(dipole_per_area[0]), float(charge_per_fu[0])
     return mu0, Q0, dipole_per_area, charge_per_fu
 
 
@@ -437,16 +430,8 @@ def _prefer_matches(prefer_plane, label, counts, labels=()):
         return False
     queries = [prefer_plane] if isinstance(prefer_plane, (str, int)) or _is_index(prefer_plane) \
         else list(prefer_plane)
-    present = {Z for Z, c in counts.items() if c > 0}
-    for query in queries:
-        if not isinstance(query, str):
-            continue
-        if query in atomic_numbers and not any(plane_name_matches(query, name) for name in labels):
-            if present == {atomic_numbers[query]}:
-                return True
-        elif plane_name_matches(query, label):
-            return True
-    return False
+    return any(isinstance(query, str) and _prefer_plane_matches(query, label, counts, labels)
+               for query in queries)
 
 
 def _compute_distribution_score(kept_indices, atoms_z_matrix, numbers, dists, bond_distances):
@@ -627,8 +612,7 @@ def find_tasker3_candidates(
     numbers = atoms_z_matrix[:, 0].astype(int)
     if surf_bulk is not None:
         cell = surface_bulk_cell(bulk_atoms, miller) if bulk_atoms is not None else surf_bulk.cell
-        periodic = Atoms(numbers=surf_bulk.numbers, positions=surf_bulk.positions,
-                         cell=cell, pbc=True)
+        periodic = _periodic_cell(surf_bulk, cell)
         bi, bj, D = _bond_pairs(periodic, bond_threshold, bond_distances)
         bonds = (bi, bj, D[:, 2])
         dists = surf_bulk.get_all_distances(mic=True)
@@ -692,13 +676,10 @@ def find_tasker3_candidates(
         j, key = member
         return per_plane[j]["index"].get(key) if j in per_plane else None
 
-    def is_valid(member):
-        pos = position(member)
-        return pos is not None and bool(per_plane[member[0]]["is_valid"][pos])
-
     # Symmetry orbits, each expanded once from its first pattern: the
     # representative is the lowest-index valid member (or the lowest member
     # when none is valid) and the multiplicity counts the valid members.
+    P = np.array(perms) if perms else None  # one permutation per row
     seen = set()
     representatives = []
     for i in per_plane:
@@ -706,12 +687,13 @@ def find_tasker3_candidates(
             if (i, key) in seen:
                 continue
             images = {(i, key)}
-            for perm in perms or ():
-                image = perm[list(key)]
-                images.add((int(plane_of[image[0]]), tuple(sorted(int(a) for a in image))))
+            if P is not None:
+                for row in np.sort(P[:, list(key)], axis=1):
+                    images.add((int(plane_of[row[0]]), tuple(int(a) for a in row)))
             seen |= images
-            members = sorted(m for m in images if position(m) is not None)
-            valid_members = [m for m in members if is_valid(m)]
+            where = {m: position(m) for m in images}
+            members = sorted(m for m, pos in where.items() if pos is not None)
+            valid_members = [m for m in members if per_plane[m[0]]["is_valid"][where[m]]]
             if valid_members:
                 representatives.append((valid_members[0], len(valid_members)))
             else:
@@ -1077,6 +1059,7 @@ def reconstruct_tasker_iii(
     """
     from .genslab import (
         _Options, _analyse_facet, _check_layers, _miller_list, _select, _tasker3_candidates,
+        _tasker3_terminations,
         _tasker3_termination,
     )
 
@@ -1094,10 +1077,7 @@ def reconstruct_tasker_iii(
     facet = _analyse_facet(bulk_atoms, charges, miller, opts, surface_supercell)
     candidates, valid = _tasker3_candidates(facet, opts)
     # IDs are ranks over the valid candidates; prefer_plane filters them.
-    terminations = {
-        tid: {"candidate": cand, "plane_type": cand["recon_label"], "plane_counts": dict(cand["plane_counts"])}
-        for tid, cand in enumerate(valid)
-    }
+    terminations = _tasker3_terminations(valid)
     best = next(iter(_select(terminations, prefer_plane, "best").values()))["candidate"]
     if verbose:
         print(f"\n→ Best: {best['recon_label']}  "

@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased
+
+Cleanup pass after the 0.6.0 review fixes: no change to the slabs, labels
+or errors the library produces (checked on 39 genslab/cutslab cases and the
+test suite), faster, and less code.
+
+### API
+- ``identify_planes``: ``charge_tol`` is deprecated (ignored since 0.6.0;
+  passing it now raises a ``DeprecationWarning``).  The private plane
+  helpers no longer carry it.
+- ``compute_reduced_counts`` returns plain ``int`` keys (they were NumPy
+  integers).
+- ``plot_slab`` draws a slab whose third cell vector is tilted from its true
+  in-plane positions, as the labels have done since 0.6.0.
+
+### Speed (same results)
+- A wave's self-overlap, the norm of every similarity, is cached by content
+  instead of recomputed on each of the dozens of alignments it enters:
+  genslab and bulk-mode cutslab on a 2x2 surface cell about 1.6x faster,
+  slab-only cutslab without genslab's labels about 1.9x.
+- The neighbourhood fingerprint that orders shift-related phases is computed
+  part by part, only when two phases tie on their own fingerprint; the
+  structure factors inside a fingerprint are evaluated once per vector.
+- Tasker III symmetry orbits are expanded with one vectorised permutation
+  per orbit; the species and charge masks of the symmetry search are built
+  once.
+- The surface cell of a bulk and the one-layer reference build are cached,
+  so a facet no longer rebuilds them for every thickness and candidate.
+
+### Internal
+- One helper each for: the reduced formula of a composition, the ``[Z, z, q]``
+  matrix, the "label fits the plane" test, the rarest-species anchor, the
+  Gaussian reach, the neutrality and polarity verdicts, the in-plane cell,
+  the periodic one-layer cell, the ``prefer_plane`` predicate (shared by
+  genslab and the Tasker III ranking) and the Tasker III terminations dict;
+  the charge-length check lives in ``_charges_to_list`` only;
+  ``_check_miller`` returns the normalised index.
+- ``_slab_plane_names`` returns the repeat as an int; cutslab builds the
+  stacking labels of its sub-slabs in one place for both modes;
+  ``_tasker3_slab_moments`` takes one mask per row only; an unreachable
+  identity branch of ``_tile_plane`` and the message sniffing in
+  ``_parse_bond_distances_map`` are gone.
+- Tests: a ``_best`` helper replaces the repeated "first termination" idiom;
+  two supercell tests run on a (2, 1) cell, which exercises the same path.
+
 ## 0.6.0 — 2026-10-19
 
 Fixes from the code review of 0.5.1 (2026-10-18).

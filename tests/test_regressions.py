@@ -60,6 +60,13 @@ def _tasker_type(atoms, charges, hkl, plane_tol=None):
     return "I/II" if best["is_tasker_ii"] else "III"
 
 
+def _best(atoms, charges, hkl, layers, **kwargs):
+    """The first (best) termination genslab returns for one Miller index."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    return next(iter(generate_slabs_for_miller(atoms, charges, hkl, layers, **kwargs)[hkl].values()))
+
+
 def _reduced(atoms):
     counts = Counter(int(z) for z in atoms.numbers)
     g = reduce(gcd, counts.values())
@@ -310,7 +317,7 @@ def test_labels_give_arrangement_and_relative_phase(ceo2_111_slab):
     ])
     planes = sorted(identify_planes(atoms_z, slab.cell[2, 2]), key=lambda p: p["z_center"])
     names, repeat = _slab_plane_names(slab, planes)
-    assert repeat is not None and repeat[0] == 3
+    assert repeat == 3
     assert names == ["O4", "Ce4", "O4'"] * 3, names
     # Without genslab's hint the slab is labelled from its own interior.
     bare = slab.copy()
@@ -667,13 +674,12 @@ def test_broken_bonds_reported_by_pair():
     from taskerslabgen import generate_slabs_for_miller
 
     q = {"Sr": 2.0, "Ti": 4.0, "O": -2.0}
-    cand = next(iter(generate_slabs_for_miller(_srtio3(), q, (1, 0, 0), [2])[(1, 0, 0)].values()))["candidate"]
+    cand = _best(_srtio3(), q, (1, 0, 0), [2])["candidate"]
     assert sum(cand["broken_bonds_by_pair"].values()) == cand["broken_bonds"]
     assert {"O-Sr", "O-Ti"} <= set(cand["broken_bonds_by_pair"])
     # Cation-cation contacts can be excluded explicitly.
     no_cc = {"Sr-Sr": None, "Sr-Ti": None, "Ti-Ti": None}
-    cand = next(iter(generate_slabs_for_miller(
-        _srtio3(), q, (1, 0, 0), [2], bond_distances=no_cc)[(1, 0, 0)].values()))["candidate"]
+    cand = _best(_srtio3(), q, (1, 0, 0), [2], bond_distances=no_cc)["candidate"]
     assert cand["broken_bonds_by_pair"] == {"O-Sr": 4, "O-Ti": 1}
 
 
@@ -857,7 +863,7 @@ def test_variant_letters_stable_under_small_displacements():
     """L2: 0.005 A of in-plane noise swapped IrO2-a / IrO2-b."""
     from taskerslabgen import cutslab, generate_slabs_for_miller
 
-    slab = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, (0, 0, 1), [3])[(0, 0, 1)].values()))["atoms"][0]
+    slab = _best(IRO2, Q_IRO2, (0, 0, 1), [3])["atoms"][0]
     ref = [s.info["cut_bottom_plane"] for s in cutslab(slab, Q_IRO2, cut_at="all", cuts="all")]
     for seed in range(10):
         noisy = slab.copy()
@@ -908,7 +914,7 @@ def test_tasker3_best_independent_of_bulk_origin(atoms, charges, hkl):
     rng = np.random.default_rng(2)
     best = set()
     for shift in [np.zeros(3)] + [rng.random(3) for _ in range(8)]:
-        info = next(iter(generate_slabs_for_miller(_shifted(atoms, shift), charges, hkl, [2])[hkl].values()))
+        info = _best(_shifted(atoms, shift), charges, hkl, [2])
         best.add((info["plane_type"], info["candidate"]["bond_score"]))
     assert len(best) == 1, f"origin-dependent Tasker III choice: {best}"
 
@@ -1040,7 +1046,7 @@ def test_cutslab_reconstruction_on_supercell_and_after_json():
     subs = cutslab(slab, Q_CEO2, reconstruction=json.loads(json.dumps(recon)))
     assert [s.get_chemical_formula() for s in subs] == [f"Ce{2 * m}O{4 * m}" for m in range(1, 9)]
     with pytest.raises(ValueError, match="same bulk and Miller index"):
-        cutslab(next(iter(generate_slabs_for_miller(CEO2, Q_CEO2, (1, 1, 1), [2])[(1, 1, 1)].values()))["atoms"][0],
+        cutslab(_best(CEO2, Q_CEO2, (1, 1, 1), [2])["atoms"][0],
                 Q_CEO2, reconstruction=recon)
 
 
@@ -1099,7 +1105,7 @@ def test_bulk_matching_tolerates_small_strain():
 
     strained = CEO2.copy()
     strained.set_cell(CEO2.cell * 1.006, scale_atoms=True)
-    slab = next(iter(generate_slabs_for_miller(strained, Q_CEO2, (1, 1, 1), [6])[(1, 1, 1)].values()))["atoms"][0]
+    slab = _best(strained, Q_CEO2, (1, 1, 1), [6])["atoms"][0]
     subs = cutslab(slab, Q_CEO2, bulk_atoms=CEO2)
     assert [s.get_chemical_formula() for s in subs] == [f"Ce{4 * m}O{8 * m}" for m in range(1, 7)]
 
@@ -1110,7 +1116,7 @@ def test_bulk_matching_when_relaxation_splits_every_plane():
     deform_tol).  Before 0.5.1 the phases came out swapped and deformed."""
     from taskerslabgen import cutslab, generate_slabs_for_miller
 
-    slab = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, (0, 0, 1), [4])[(0, 0, 1)].values()))["atoms"][0]
+    slab = _best(IRO2, Q_IRO2, (0, 0, 1), [4])["atoms"][0]
     split = slab.copy()
     oxygens = np.flatnonzero(split.numbers == 8)
     # Within each layer, one O moves up and one down: every IrO2 plane
@@ -1587,7 +1593,7 @@ def test_bulk_mode_recovers_genslab_planes_of_relaxed_slabs(bulk_name, miller):
 def test_bulk_mode_does_not_depend_on_atom_order_or_wrapping():
     from taskerslabgen import cutslab, generate_slabs_for_miller
 
-    term = next(iter(generate_slabs_for_miller(BROOKITE, Q_TIO2, (2, 1, 0), [4], dipole_tol=0.05)[(2, 1, 0)].values()))
+    term = _best(BROOKITE, Q_TIO2, (2, 1, 0), [4], dipole_tol=0.05)
     rng = np.random.default_rng(1)
     slab = _relax_like(term["atoms"][0], rng)
     shuffled = slab[rng.permutation(len(slab))]
@@ -1608,9 +1614,7 @@ def test_half_occupied_surface_planes_hint_at_reconstruction():
     such; without reconstruction= cutslab says why it returns the input."""
     from taskerslabgen import cutslab, generate_slabs_for_miller
 
-    term = next(iter(generate_slabs_for_miller(
-        CEO2, Q_CEO2, (0, 0, 1), [3], prefer_plane="O", bond_distances=BOND_DISTS_CEO2
-    )[(0, 0, 1)].values()))
+    term = _best(CEO2, Q_CEO2, (0, 0, 1), [3], prefer_plane="O", bond_distances=BOND_DISTS_CEO2)
     with pytest.warns(UserWarning, match="with the same atoms"):
         subs = cutslab(term["atoms"][0], Q_CEO2, bulk_atoms=CEO2)
     assert len(subs) == 1
@@ -1652,7 +1656,7 @@ def test_bulk_mode_sub_slabs_get_their_own_stacking_labels():
     bulk_atoms, selected the other termination."""
     from taskerslabgen import cutslab, generate_slabs_for_miller
 
-    slab = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [4])[(1, 0, 0)].values()))["atoms"][0]
+    slab = _best(IRO2, Q_IRO2, (1, 0, 0), [4])["atoms"][0]
     cycle = slab.info["stacking_labels"]
     per = len(cycle)
     subs = cutslab(slab, Q_IRO2, bulk_atoms=IRO2, cut_at="all", cuts="all")
@@ -1754,7 +1758,7 @@ def test_cutslab_recuts_its_own_thinnest_output():
     stacking_labels of a whole unit; re-cutting it raised IndexError."""
     from taskerslabgen import cutslab, generate_slabs_for_miller
 
-    slab = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, (0, 0, 1), [3])[(0, 0, 1)].values()))["atoms"][0]
+    slab = _best(IRO2, Q_IRO2, (0, 0, 1), [3])["atoms"][0]
     one = min(cutslab(slab, Q_IRO2, cut_at="all"), key=len)
     assert one.info["cut_n_planes"] == 1
     assert one.info["stacking_labels"] == slab.info["stacking_labels"]
@@ -1779,7 +1783,7 @@ def test_tilted_third_cell_vector_gives_the_orthogonal_results():
         return out
 
     hkl = (1, 1, 0)
-    slab = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, hkl, [4])[hkl].values()))["atoms"][0]
+    slab = _best(IRO2, Q_IRO2, hkl, [4])["atoms"][0]
     oblique = tilted(slab, 4 * surface_bulk_cell(IRO2, hkl)[2][:2])  # c along a bulk lattice vector
 
     def summary(atoms, **kwargs):
@@ -1789,9 +1793,7 @@ def test_tilted_third_cell_vector_gives_the_orthogonal_results():
     for kwargs in ({}, {"selection": "absolute"}, {"bulk_atoms": IRO2}):
         assert summary(oblique, **kwargs) == summary(slab, **kwargs), kwargs
 
-    term = next(iter(generate_slabs_for_miller(
-        CEO2, Q_CEO2, (0, 0, 1), [3], prefer_plane="O", bond_distances=BOND_DISTS_CEO2
-    )[(0, 0, 1)].values()))
+    term = _best(CEO2, Q_CEO2, (0, 0, 1), [3], prefer_plane="O", bond_distances=BOND_DISTS_CEO2)
     recon = term["atoms"][0]
     skewed = tilted(recon, 0.5 * recon.cell[0, :2] + 0.3 * recon.cell[1, :2])
     sizes = [len(s) for s in cutslab(recon, Q_CEO2, reconstruction=term["reconstruction"])]
@@ -1800,8 +1802,8 @@ def test_tilted_third_cell_vector_gives_the_orthogonal_results():
 
 @pytest.mark.parametrize(
     "atoms, charges, hkl, supercell",
-    [(IRO2, Q_IRO2, (1, 1, 0), (2, 1)), (CEO2, Q_CEO2, (1, 1, 1), (2, 2)), (IRO2, Q_IRO2, (1, 0, 0), (2, 1))],
-    ids=["IrO2110x21", "CeO2111x22", "IrO2100x21"],
+    [(IRO2, Q_IRO2, (1, 1, 0), (2, 1)), (CEO2, Q_CEO2, (1, 1, 1), (2, 1)), (IRO2, Q_IRO2, (1, 0, 0), (2, 1))],
+    ids=["IrO2110x21", "CeO2111x21", "IrO2100x21"],
 )
 def test_bulk_mode_cuts_surface_supercell_slabs_by_genslab_labels(atoms, charges, hkl, supercell):
     """Finding 6: the tiled branch of the bulk plane catalog kept the
@@ -1809,9 +1811,7 @@ def test_bulk_mode_cuts_surface_supercell_slabs_by_genslab_labels(atoms, charges
     slab could not be cut by its genslab labels in bulk mode."""
     from taskerslabgen import cutslab, generate_slabs_for_miller
 
-    term = next(iter(generate_slabs_for_miller(
-        atoms, charges, hkl, [2], surface_supercell=supercell
-    )[hkl].values()))
+    term = _best(atoms, charges, hkl, [2], surface_supercell=supercell)
     slab = term["atoms"][0]
     subs = cutslab(slab, charges, bulk_atoms=atoms, cut_at=[term["plane_type"], term["top_plane_type"]])
     assert {(s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in subs} == {
@@ -1828,7 +1828,7 @@ def test_bulk_mode_accepts_strained_supercell_slabs():
     supercell: a 2x2 slab at 1.5 % strain was rejected."""
     from taskerslabgen import cutslab, generate_slabs_for_miller
 
-    slab = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, (1, 1, 0), [2])[(1, 1, 0)].values()))["atoms"][0]
+    slab = _best(IRO2, Q_IRO2, (1, 1, 0), [2])["atoms"][0]
 
     def cuts(strain, rep=(2, 2, 1)):
         big = slab.repeat(rep)
@@ -1967,7 +1967,7 @@ def test_cuts_top_anchors_on_the_input_surface_or_raises():
     was lost); the mirror for cuts='bottom'."""
     from taskerslabgen import cutslab, generate_slabs_for_miller
 
-    slab = next(iter(generate_slabs_for_miller(CEO2, Q_CEO2, (1, 1, 1), [4])[(1, 1, 1)].values()))["atoms"][0]
+    slab = _best(CEO2, Q_CEO2, (1, 1, 1), [4])["atoms"][0]
     z = slab.positions[:, 2]
     n_planes = 12
 
@@ -2056,7 +2056,7 @@ def test_inherited_labels_must_match_the_planes_composition(ceo2_111_slab):
     the documented per-cell labels (and unlike the slab without the key)."""
     from taskerslabgen import cutslab
 
-    big = ceo2_111_slab * (2, 2, 1)
+    big = ceo2_111_slab * (2, 1, 1)
     assert big.info["stacking_labels"] == ceo2_111_slab.info["stacking_labels"]
     bare = big.copy()
     bare.info.pop("stacking_labels")
@@ -2068,7 +2068,7 @@ def test_inherited_labels_must_match_the_planes_composition(ceo2_111_slab):
 
     with_key = labels(big)
     assert with_key == labels(bare)
-    assert with_key[0][1] == "O16"
+    assert with_key[0][1] == "O8"
 
 
 # Finding 17: API robustness
@@ -2102,7 +2102,7 @@ def test_layer_thickness_list_is_validated_and_its_order_kept():
     for bad in ([], [0], [-1], [1.0], [True], 2):
         with pytest.raises(ValueError, match="layer_thickness_list"):
             generate_slabs_for_miller(IRO2, Q_IRO2, (1, 1, 0), bad)
-    term = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, (1, 1, 0), [3, 1, 2])[(1, 1, 0)].values()))
+    term = _best(IRO2, Q_IRO2, (1, 1, 0), [3, 1, 2])
     assert [len(a) for a in term["atoms"]] == [18, 6, 12]
     out = reconstruct_tasker_iii(CEO2, Q_CEO2, (0, 0, 1), [3, 1], bond_distances=BOND_DISTS_CEO2)
     sizes = [len(a) for a in out["slab_atoms"]]

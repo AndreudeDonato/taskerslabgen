@@ -4,8 +4,6 @@ keeps its terminations and reconstruction.
 """
 import warnings
 from collections import Counter
-from functools import reduce
-from math import gcd
 
 import numpy as np
 from ase.data import atomic_numbers
@@ -15,6 +13,10 @@ from scipy.optimize import linear_sum_assignment
 
 from .core import (
     DEFAULT_DIPOLE_TOL,
+    _atoms_z,
+    _is_neutral,
+    _is_nonpolar,
+    _reduce_counts,
     _INDEX_KEY,
     _surface_area,
     _SAME_PLANE,
@@ -23,6 +25,7 @@ from .core import (
     _finalize_slab,
     _frac_distance,
     _hkl_str,
+    _inplane_cell,
     _inplane_frac,
     _is_index,
     _make_plane,
@@ -245,10 +248,6 @@ def cutslab(
         )
         charges_list = _charges_to_list(atoms, charges)
 
-    if len(charges_list) != len(atoms):
-        raise ValueError(
-            f"Charges length ({len(charges_list)}) does not match atoms ({len(atoms)})."
-        )
     # Track input indices through slicing (charges for validation).
     atoms.arrays[_INDEX_KEY] = np.arange(len(atoms))
     _put_vacuum_at_boundary(atoms, axis)
@@ -258,9 +257,7 @@ def cutslab(
         raise ValueError("Invalid cell length on selected axis.")
 
     coords = atoms.positions[:, axis]
-    atoms_z_matrix = np.array(
-        [[num, z, q] for num, z, q in zip(atoms.numbers, coords, charges_list)]
-    )
+    atoms_z_matrix = _atoms_z(atoms.numbers, coords, charges_list)
 
     vec = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
     input_miller = miller if miller is not None else atoms.info.get("miller")
@@ -270,8 +267,7 @@ def cutslab(
 
     recon = None
     if reconstruction is not None:
-        ab_axes = [i for i in range(3) if i != axis]
-        cell2d = np.array(atoms.cell)[np.ix_(ab_axes, ab_axes)]
+        _, cell2d = _inplane_cell(atoms, axis)
         recon = _prepare_reconstruction(reconstruction, cell2d)
 
     # ---- Planes and their labels ----
@@ -285,25 +281,25 @@ def cutslab(
             )
         planes_sorted, plane_names, reduced_counts, bulk_stacking = _planes_from_bulk(
             atoms, charges_list, bulk_atoms, tuple(input_miller),
-            charge_tol=charge_tol, deform_tol=deform_tol,
+            deform_tol=deform_tol,
         )
         repeat = None
         if recon is not None:
             planes_sorted, merged = _merge_surface_planes(
                 planes_sorted, list(zip(plane_names, bulk_stacking)), recon["recon_counts"],
-                atoms_z_matrix, charge_tol,
+                atoms_z_matrix,
             )
             plane_names, bulk_stacking = (list(x) for x in zip(*merged))
         # Every sub-slab gets the bulk's labels from its own bottom plane up.
-        stacking_from = {i: list(labels) for i, labels in enumerate(bulk_stacking)}
+        stacking_from = dict(enumerate(bulk_stacking))
     else:
         planes_sorted = sorted(
-            identify_planes(atoms_z_matrix, L, plane_tol=plane_tol, charge_tol=charge_tol),
+            identify_planes(atoms_z_matrix, L, plane_tol=plane_tol),
             key=lambda p: p["z_center"] % L,
         )
         if recon is not None:
             planes_sorted, _ = _merge_surface_planes(
-                planes_sorted, None, recon["recon_counts"], atoms_z_matrix, charge_tol
+                planes_sorted, None, recon["recon_counts"], atoms_z_matrix
             )
         inherited = atoms.info.get("stacking_labels")
         plane_names, repeat = _slab_plane_names(atoms, planes_sorted, axis, inherited)
@@ -319,9 +315,12 @@ def cutslab(
         # The bulk formula: one repeat unit of labels (learned from the
         # interior, else genslab's), not the slab itself, so that a slab with
         # vacancies or adsorbates is not taken as its own bulk.
-        if repeat is not None and inherited is not None and len(inherited) != repeat[0]:
-            inherited = None
-        cycle = _repeat_labels(plane_names, 0, repeat[0], inherited) if repeat is not None else inherited
+        # stacking_labels of a sub-slab starting at each plane.
+        stacking_from = {} if repeat is None else {
+            bi: labels for bi in range(len(planes_sorted))
+            if (labels := _repeat_labels(plane_names, bi, repeat, inherited)) is not None
+        }
+        cycle = stacking_from.get(0) if repeat is not None else inherited
         if cycle is not None:
             reduced_counts = _formula_of_labels(cycle)
         else:
@@ -333,7 +332,6 @@ def cutslab(
                 stacklevel=2,
             )
             reduced_counts = compute_reduced_counts(atoms_z_matrix)
-        stacking_from = {}
     n = len(planes_sorted)
     validation = {
         "charges_list": charges_list,
@@ -352,7 +350,6 @@ def cutslab(
     # thick slab's outer planes if they are already reconstructed, and every
     # interior copy of the cut plane, which gets the pattern when a cut
     # exposes it.
-    bulk_names = list(plane_names)
     recon_label = None
     deletions = {}
     if recon is not None:
@@ -361,7 +358,7 @@ def cutslab(
                  if planes_sorted[i]["counts"] == recon["recon_counts"]]
         for i in outer:
             plane_names[i] = recon_label
-        deletions = _reconstruction_deletions(atoms, planes_sorted, outer, recon, cell2d, ab_axes)
+        deletions = _reconstruction_deletions(atoms, planes_sorted, outer, recon, cell2d, axis)
         if not deletions and not outer:
             raise ValueError(
                 f"The reconstruction ({recon_label}) matches no plane of the slab: no "
@@ -493,10 +490,10 @@ def cutslab(
                 continue
             n_atoms, total_q, sum_z, sum_qz, sum_abs_q = sums
             q_scale = sum_abs_q / n_atoms if sum_abs_q > 0 else 1.0  # _charge_scale of the sub-slab
-            if abs(total_q) > charge_tol * stoich_k * q_scale:
+            if not _is_neutral(total_q, stoich_k, q_scale, charge_tol):
                 continue
             mu = float(sum_qz - total_q * sum_z / n_atoms)  # about the mean height
-            if abs(mu) / (area * q_scale) > dipole_tol:
+            if not _is_nonpolar(mu, area, q_scale, dipole_tol):
                 continue
             valid_cuts.append({
                 "bottom_plane": bi,
@@ -608,11 +605,7 @@ def cutslab(
         # 0 when shifted or a different arrangement (a---a', a---b).
         slab.info["cut_phase_overlap"] = round(float(in_phase(bi, ti)), 4)
         if bi in stacking_from:
-            slab.info["stacking_labels"] = stacking_from[bi]
-        elif repeat is not None:
-            labels = _repeat_labels(bulk_names, bi, repeat[0], inherited)
-            if labels is not None:
-                slab.info["stacking_labels"] = labels
+            slab.info["stacking_labels"] = list(stacking_from[bi])
         _finalize_slab(slab, **validation)
 
         if plot:
@@ -652,7 +645,7 @@ def _repeat_labels(names, bottom, per, inherited=None):
         copies = [names[i] for i in range(bottom + k, len(names), per)]
         copies += [names[i] for i in range(bottom + k - per, -1, -per)]
         clean = [c for c in copies if not c.endswith("~")]
-        if clean or copies:
+        if copies:
             labels.append(_undeformed((clean or copies)[0]))
         elif inherited is not None and len(inherited) == per:
             labels.append(_undeformed(inherited[(bottom + k) % per]))
@@ -668,8 +661,7 @@ def _formula_of_labels(labels):
     for label in labels:
         for symbol, c in Formula(plane_name_base(label)).count().items():
             counts[atomic_numbers[symbol]] += c
-    g = reduce(gcd, counts.values(), 0) or 1
-    return {int(Z): c // g for Z, c in sorted(counts.items())}
+    return _reduce_counts(counts)
 
 
 def _put_vacuum_at_boundary(atoms, axis):
@@ -694,7 +686,7 @@ def _put_vacuum_at_boundary(atoms, axis):
     atoms.set_scaled_positions(frac)
 
 
-def _merge_surface_planes(planes_sorted, names, recon_counts, atoms_z, charge_tol, max_planes=4):
+def _merge_surface_planes(planes_sorted, names, recon_counts, atoms_z, max_planes=4):
     """
     Merge the outermost planes at each end of a slab when together they have
     the composition of a reconstructed plane: once atoms are deleted, the
@@ -712,7 +704,7 @@ def _merge_surface_planes(planes_sorted, names, recon_counts, atoms_z, charge_to
             if dict(total) != recon_counts:
                 continue
             idx = [i for plane in group for i in plane["indices"]]
-            merged = _make_plane(idx, atoms_z[idx, 1], atoms_z, charge_tol)
+            merged = _make_plane(idx, atoms_z[idx, 1], atoms_z)
             if top:
                 planes[-k:] = [merged]
                 if names is not None:
@@ -803,7 +795,7 @@ def _prepare_reconstruction(reconstruction, cell2d):
     }
 
 
-def _reconstruction_deletions(atoms, planes_sorted, outer, recon, cell2d, ab_axes, tol=0.5):
+def _reconstruction_deletions(atoms, planes_sorted, outer, recon, cell2d, axis, tol=0.5):
     """
     ``{plane index: atom indices to delete}`` for every interior copy of the
     reconstructed bulk plane.
@@ -817,7 +809,7 @@ def _reconstruction_deletions(atoms, planes_sorted, outer, recon, cell2d, ab_axe
     ``m * a3``.
     """
     n = len(planes_sorted)
-    frac = _inplane_frac(atoms, [i for i in range(3) if i not in ab_axes][0]) % 1.0
+    frac = _inplane_frac(atoms, axis) % 1.0
 
     def plane_atoms(p):
         return [(int(atoms.numbers[j]), frac[j, 0], frac[j, 1]) for j in planes_sorted[p]["indices"]]

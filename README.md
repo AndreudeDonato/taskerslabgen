@@ -540,7 +540,7 @@ Import these from `taskerslabgen.advanced` (except `validate_slab` and
 |---|---|
 | `build_surface(bulk_atoms, miller, layers, vacuum, verbose)` | Build an ASE surface slab from a bulk structure. |
 | `compute_projection(bulk, surf_bulk, charges, miller, verbose)` | Compute `[Z, z, q]` matrix and lattice-plane spacing *L*. |
-| `identify_planes(atoms_z, L, plane_tol, charge_tol)` | Cluster atoms into atomic planes (single-linkage; `plane_tol=None` = 0.1 Å). |
+| `identify_planes(atoms_z, L, plane_tol)` | Cluster atoms into atomic planes (single-linkage; `plane_tol=None` = 0.1 Å). |
 | `surface_bulk_cell(bulk_atoms, miller)` | True bulk lattice in the frame of `build_surface` (its third vector stacks one layer onto the next). |
 | `validate_slab(slab, charges, reduced_counts, ...)` | Check stoichiometry, neutrality and dipole (optionally internal gaps); raises `SlabValidationError`. |
 | `compute_reduced_counts(atoms_z)` | Compute reduced (primitive) stoichiometry. |
