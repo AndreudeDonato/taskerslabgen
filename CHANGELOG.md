@@ -104,6 +104,11 @@ Fixes from the code review of 0.5.1 (2026-10-18).
 - ``build_tasker3_slabs`` raises ``ValueError`` for a ``deletion_mask``
   with indices outside the cut plane or listed twice (it silently returned
   a non-stoichiometric slab).
+- cutslab's slab-only labelling adopted genslab's ``stacking_labels`` on a
+  length match alone, so an in-plane supercell of a genslab slab was
+  labelled ``O4`` for planes of 16 O; the inherited labels must now say
+  what the planes are made of (as the thin-slab path already required),
+  else the planes are labelled from the slab (``O16``).
 
 ## 0.5.1 — 2026-10-02
 

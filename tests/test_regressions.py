@@ -2049,3 +2049,23 @@ def test_build_tasker3_slabs_rejects_masks_off_the_plane():
         build_tasker3_slabs(CEO2, (0, 0, 1), [2], len(planes), tuple(o_atoms[:2]), planes, atoms_z, L)
 
 
+def test_inherited_labels_must_match_the_planes_composition(ceo2_111_slab):
+    """Finding 16: the thick path of cutslab's slab-only labelling adopted
+    genslab's stacking_labels on a length match alone, so an in-plane
+    supercell of a genslab slab was labelled O4 for planes of 16 O, unlike
+    the documented per-cell labels (and unlike the slab without the key)."""
+    from taskerslabgen import cutslab
+
+    big = ceo2_111_slab * (2, 2, 1)
+    assert big.info["stacking_labels"] == ceo2_111_slab.info["stacking_labels"]
+    bare = big.copy()
+    bare.info.pop("stacking_labels")
+
+    def labels(slab):
+        subs = cutslab(slab, Q_CEO2, cut_at="all", cuts="all")
+        return sorted({(s.info["cut_bottom_idx"], s.info["cut_bottom_plane"]) for s in subs}
+                      | {(s.info["cut_top_idx"], s.info["cut_top_plane"]) for s in subs})
+
+    with_key = labels(big)
+    assert with_key == labels(bare)
+    assert with_key[0][1] == "O16"

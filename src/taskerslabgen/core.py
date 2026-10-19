@@ -1370,6 +1370,14 @@ def _slab_plane_names(atoms, planes_sorted, axis=2, stacking_labels=None):
             if classes[i] is not None:
                 ref_names = [stacking_labels[(i + c - classes[i]) % per] for c in range(per)]
                 break
+        # They must say what the reference planes are made of: labels count
+        # atoms per cell, and an in-plane supercell of a genslab slab holds
+        # several per cell (O16 where the inherited label says O4).
+        if ref_names is not None and any(
+            plane_name_base(ref_names[c]) != _formula_label(planes_sorted[r]["counts"])
+            for c, r in enumerate(ref)
+        ):
+            ref_names = None
     if ref_names is None:
         ref_names, _ = assign_plane_names([planes_sorted[r] for r in ref], atoms=atoms, axis=axis,
                                           context=context(ref))
