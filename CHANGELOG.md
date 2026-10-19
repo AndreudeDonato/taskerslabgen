@@ -16,6 +16,17 @@ Fixes from the code review of 0.5.1 (2026-10-18).
   interior plane carried labels that started at the wrong plane; re-cutting
   it without ``bulk_atoms`` selected the other termination.  Sub-slabs now
   get one lattice repeat of the bulk's labels from their own bottom plane.
+- **Phase marks no longer depend on the bulk origin.**  When the widest
+  gaps along the normal tie (rutile (100), anatase (001), brookite (210)),
+  the bulk cell started at an origin-dependent gap and phases that differ
+  only by a shift were numbered in stacking order, so the same termination
+  was ``O'`` to ``O`` or its mirror image depending on the origin,
+  ``prefer_plane="O'"`` could return the mirror image, and the
+  ``surface_supercell`` path numbered phases from another origin.
+  Shift-related phases are now ordered by the fingerprint of the plane with
+  its neighbours (translation-invariant); the labels of such facets change
+  (e.g. rutile (100) terminations are now ``O`` to ``O''`` and ``O'`` to
+  ``O'''``), and cutslab's slab-only labels use the same order.
 
 ## 0.5.1 — 2026-10-02
 

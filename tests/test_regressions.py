@@ -533,7 +533,9 @@ def test_terminations_ranked_by_broken_bonds():
     ranked = [res[(0, 0, 1)][tid] for tid in sorted(res[(0, 0, 1)])]
     bonds = [t["candidate"]["broken_bonds"] for t in ranked]
     assert bonds == sorted(bonds) and bonds[0] < bonds[-1]
-    assert ranked[0]["plane_type"] == "Si"   # the Si cut breaks 4 bonds, the O cut 9
+    from taskerslabgen import plane_name_base
+
+    assert plane_name_base(ranked[0]["plane_type"]) == "Si"   # the Si cut breaks 4 bonds, the O cut 9
 
 
 # ------------------------------------------------------------------
@@ -1326,8 +1328,8 @@ def test_absolute_phase_and_phase_overlap_rutile110():
 
 
 def test_shape_selection_adds_other_phases_rutile100():
-    """Rutile (100): half a repeat unit ends on another O phase (O'')."""
-    from taskerslabgen import cutslab, generate_slabs_for_miller
+    """Rutile (100): half a repeat unit ends on another O phase."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller, plane_name_base
 
     term = generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [4])[(1, 0, 0)][0]
     thick = term["atoms"][0]
@@ -1335,7 +1337,9 @@ def test_shape_selection_adds_other_phases_rutile100():
     assert {s.info["cut_top_plane"] for s in relative} == {term["top_plane_type"]}
     shape = cutslab(thick, Q_IRO2, selection="shape")
     assert len(shape) == 2 * len(relative)
-    assert {s.info["cut_top_plane"] for s in shape} == {"O", "O''"}
+    tops = {s.info["cut_top_plane"] for s in shape}
+    assert len(tops) == 2 and term["top_plane_type"] in tops
+    assert {plane_name_base(t) for t in tops} == {"O"}
 
 
 def test_lattice_copies_in_a_centred_cell_share_labels():
@@ -1372,12 +1376,13 @@ def test_genslab_selection_modes():
 
     res = generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [2], candidates="all")[(1, 0, 0)]
     labels = {t["plane_type"] for t in res.values()}
-    base = sorted(labels)[0].rstrip("'")
+    primed = max(labels, key=len)  # a phase mark, so not also an element symbol
+    base = primed.rstrip("'")
     strict = generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [2], candidates="all",
-                                       prefer_plane=sorted(labels)[0])[(1, 0, 0)]
+                                       prefer_plane=primed)[(1, 0, 0)]
     loose = generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [2], candidates="all",
                                       prefer_plane=base, selection="shape")[(1, 0, 0)]
-    assert {t["plane_type"] for t in strict.values()} == {sorted(labels)[0]}
+    assert {t["plane_type"] for t in strict.values()} == {primed}
     assert {t["plane_type"] for t in loose.values()} == labels
     with pytest.raises(ValueError, match="cutslab"):
         generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [2], selection="absolute")
@@ -1664,3 +1669,51 @@ def test_bulk_mode_sub_slabs_get_their_own_stacking_labels():
     truth = table(cutslab(inner, Q_IRO2, bulk_atoms=IRO2, cut_at=want, cuts="all"))
     assert len(truth) > 1 and truth[0][0] == 0
     assert table(cutslab(inner, Q_IRO2, cut_at=want, cuts="all")) == truth
+
+
+def _slab_descriptor(slab):
+    """Translation-invariant but chiral geometry of a whole slab: species,
+    height and in-plane offset (fractional, 2 decimals) of every atom from
+    a reference atom of the bottom plane, the reference chosen so that the
+    sorted tuple is smallest."""
+    frac = slab.get_scaled_positions(wrap=False)[:, :2]
+    z = slab.positions[:, 2]
+    low = np.flatnonzero(np.abs(z - z.min()) < 1e-3)
+    low = low[slab.numbers[low] == slab.numbers[low].min()]
+    best = None
+    for ref in low:
+        d = np.round((frac - frac[ref]) % 1.0, 2) % 1.0
+        desc = tuple(sorted(
+            (int(slab.numbers[i]), round(float(z[i] - z[ref]), 2), float(d[i, 0]), float(d[i, 1]))
+            for i in range(len(slab))
+        ))
+        best = desc if best is None or desc < best else best
+    return best
+
+
+@pytest.mark.parametrize(
+    "atoms, charges, hkl",
+    [(IRO2, Q_IRO2, (1, 0, 0)), (ANATASE, Q_TIO2, (0, 0, 1)), (BROOKITE, Q_TIO2, (2, 1, 0))],
+    ids=["IrO2100", "anatase001", "brookite210"],
+)
+def test_shift_related_phases_numbered_independently_of_origin(atoms, charges, hkl):
+    """Finding 3: on facets whose widest gaps tie (four of six in rutile
+    (100)), the cell started at an origin-dependent gap and shift-related
+    phases were numbered in stacking order, so the same termination was
+    "O'" to "O" or its mirror image depending on the bulk origin, and the
+    surface_supercell path numbered phases from another origin."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    def labelled(bulk_atoms, **kwargs):
+        res = generate_slabs_for_miller(bulk_atoms, charges, hkl, [1], candidates="all", **kwargs)
+        return frozenset(
+            (t["plane_type"], t["top_plane_type"], tuple(t["atoms"][0].info["stacking_labels"]),
+             _slab_descriptor(t["atoms"][0]))
+            for t in res[hkl].values()
+        )
+
+    rng = np.random.default_rng(17)
+    reference = labelled(atoms)
+    for shift in [np.array([0.5, 0.0, 0.0])] + [rng.random(3) for _ in range(3)]:
+        assert labelled(_shifted(atoms, shift)) == reference, f"origin-dependent labels at {shift}"
+    assert labelled(atoms, surface_supercell=(1, 1)) == reference

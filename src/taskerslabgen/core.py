@@ -927,7 +927,7 @@ def _wave_shifts(A, B, cell2d, images=None, same_plane=_SAME_PLANE):
     return found
 
 
-def assign_plane_names(planes_sorted, atoms=None, axis=2, same_plane=_SAME_PLANE):
+def assign_plane_names(planes_sorted, atoms=None, axis=2, same_plane=_SAME_PLANE, context=None):
     """
     Label planes by their arrangement and their stacking phase.
 
@@ -939,10 +939,13 @@ def assign_plane_names(planes_sorted, atoms=None, axis=2, same_plane=_SAME_PLANE
     (metals first, e.g. ``O4``, ``Ir2O2``), a letter when one composition has
     several arrangements (``IrO2-a``, ``IrO2-b``), and one prime per phase
     after the first: ``O``, ``O'``, ``O''`` are the same arrangement shifted
-    or rotated, i.e. different stackings.  Phases are numbered in stacking
-    order (the order of *planes_sorted*, bottom to top of the bulk cell);
-    letters follow a rotation- and translation-invariant fingerprint of the
-    arrangement, so they do not depend on the bulk origin.
+    or rotated, i.e. different stackings.  Letters follow a rotation- and
+    translation-invariant fingerprint of the arrangement, phases related by
+    a rotation or mirror a fingerprint that sees rotations but not shifts,
+    and phases that differ only by a shift the fingerprint of the plane
+    together with its neighbours (*context*), so none of them depends on
+    the bulk origin; without *context*, shift-related phases are numbered
+    in stacking order (the order of *planes_sorted*).
 
     Reconstruction (``-recon``) and deformation (``~``) suffixes are added by
     callers, not here.  Without *atoms*, planes are labelled by composition
@@ -958,6 +961,11 @@ def assign_plane_names(planes_sorted, atoms=None, axis=2, same_plane=_SAME_PLANE
         Stacking axis.
     same_plane : float
         Normalised overlap (0-1) from which two waves count as the same.
+    context : list of ndarray or None
+        Fingerprint of every plane in its stacking context
+        (:func:`_context_signature`, one per plane): orders phases that
+        differ only by a shift.  The bulk cell (:func:`_repeat_names`) and
+        the slab's reference repeat unit (:func:`_slab_plane_names`) pass it.
 
     Returns
     -------
@@ -1023,13 +1031,22 @@ def assign_plane_names(planes_sorted, atoms=None, axis=2, same_plane=_SAME_PLANE
             letter[a] = f"-{ch}"
 
     # Phases related by a rotation or mirror are ordered by a fingerprint
-    # that sees rotations but not shifts, so their marks do not depend on
-    # the bulk origin; phases that differ only by a shift keep stacking order.
+    # that sees rotations but not shifts; phases that differ only by a shift
+    # by the fingerprint of the plane with its neighbours (where the
+    # neighbours sit relative to the plane does not depend on the origin);
+    # what still ties keeps stacking order.
     phase_rank = {}
     for a, (_, _, phases) in enumerate(arrangements):
         sigs = [_plane_signature([tuple(row[:3]) for row in waves[p]]) for p in phases]
-        order = sorted(range(len(phases)),
-                       key=cmp_to_key(lambda i, j: _compare_signatures(sigs[i], sigs[j])))
+        ctx = [context[p] for p in phases] if context is not None else None
+
+        def compare(i, j):
+            c = _compare_signatures(sigs[i], sigs[j])
+            if c == 0 and ctx is not None:
+                c = _compare_signatures(ctx[i], ctx[j])
+            return c
+
+        order = sorted(range(len(phases)), key=cmp_to_key(compare))
         for rank, k in enumerate(order):
             phase_rank[(a, k)] = rank
     names = [f"{arrangements[a][0]}{letter[a]}{_phase_suffix(phase_rank[(a, k)])}" for a, k in member]
@@ -1059,32 +1076,56 @@ def _plane_waves(atoms, planes_sorted, axis=2):
     return waves, cell2d
 
 
-def _sandwich(waves, planes_sorted, i, below=None, above=None):
+def _neighbours(waves, planes_sorted, i, below=None, above=None):
     """
-    Wave of plane *i* with the planes directly below and above it, heights
-    relative to plane *i*: the plane in its stacking context.  *below* and
-    *above* override the neighbours as ``(wave, dz, shift)`` (e.g. a plane
-    of the next repeat unit, *dz* its height above plane *i* and *shift* its
-    fractional in-plane offset).
+    Waves of the planes directly below and above plane *i*, heights relative
+    to plane *i* (``[below, above]``, ``None`` where the slab ends).  *below*
+    and *above* override the neighbours as ``(wave, dz, shift)`` (e.g. a
+    plane of the next repeat unit, *dz* its height above plane *i* and
+    *shift* its fractional in-plane offset).
     """
     z = [p["z_center"] for p in planes_sorted]
-    rows = [waves[i]]
+    out = []
     for k, given in ((i - 1, below), (i + 1, above)):
         if given is None:
             if not 0 <= k < len(waves):
+                out.append(None)
                 continue
             given = (waves[k], z[k] - z[i], (0.0, 0.0))
         wave, dz, shift = given
         moved = wave.copy()
         moved[:, 1:3] = (moved[:, 1:3] + np.asarray(shift, dtype=float)) % 1.0
         moved[:, 3] += dz
-        rows.append(moved)
+        out.append(moved)
+    return out
+
+
+def _sandwich(waves, planes_sorted, i, below=None, above=None):
+    """Wave of plane *i* with the planes directly below and above it
+    (:func:`_neighbours`): the plane in its stacking context."""
+    rows = [waves[i]] + [m for m in _neighbours(waves, planes_sorted, i, below, above) if m is not None]
     return np.vstack(rows)
 
 
-def _cell_sandwiches(waves, planes_sorted, L, a3_xy):
-    """Sandwiches of the planes of a periodic bulk cell: the neighbours of the
-    first and last planes come from the repeat units below and above."""
+def _context_signature(wave, neighbours):
+    """
+    Translation-invariant fingerprint of a plane in its stacking context:
+    :func:`_plane_signature` of the plane together with the plane below it,
+    then with the plane above it (both projected onto the surface).  Phases
+    that differ only by a shift have the same fingerprint on their own, but
+    their neighbours sit elsewhere relative to them.
+    """
+    parts = []
+    for other in neighbours:
+        rows = wave if other is None else np.vstack([wave, other])
+        parts.append(_plane_signature([tuple(r[:3]) for r in rows]))
+    return np.concatenate(parts)
+
+
+def _cell_neighbours(waves, planes_sorted, L, a3_xy):
+    """Neighbours (:func:`_neighbours`) of the planes of a periodic bulk
+    cell: those of the first and last planes come from the repeat units
+    below and above."""
     n = len(planes_sorted)
     z = [p["z_center"] for p in planes_sorted]
     a3_xy = np.asarray(a3_xy, dtype=float)
@@ -1098,8 +1139,14 @@ def _cell_sandwiches(waves, planes_sorted, L, a3_xy):
         if n == 1:
             below = (waves[0], -L, -a3_xy)
             above = (waves[0], L, a3_xy)
-        out.append(_sandwich(waves, planes_sorted, i, below, above))
+        out.append(_neighbours(waves, planes_sorted, i, below, above))
     return out
+
+
+def _cell_sandwiches(waves, planes_sorted, L, a3_xy):
+    """Sandwiches of the planes of a periodic bulk cell (:func:`_cell_neighbours`)."""
+    return [np.vstack([waves[i]] + [m for m in nb if m is not None])
+            for i, nb in enumerate(_cell_neighbours(waves, planes_sorted, L, a3_xy))]
 
 
 def _cell_repeat(planes_sorted, waves, cell2d, L, a3_xy, same_plane=_SAME_PLANE):
@@ -1147,7 +1194,9 @@ def _repeat_names(planes_sorted, atoms, L, a3_xy, axis=2):
     """
     waves, cell2d = _plane_waves(atoms, planes_sorted, axis)
     per = _cell_repeat(planes_sorted, waves, cell2d, L, a3_xy)
-    first, _ = assign_plane_names(planes_sorted[:per], atoms=atoms, axis=axis)
+    neighbours = _cell_neighbours(waves, planes_sorted, L, a3_xy)
+    context = [_context_signature(waves[i], neighbours[i]) for i in range(per)]
+    first, _ = assign_plane_names(planes_sorted[:per], atoms=atoms, axis=axis, context=context)
     names = [first[i % per] for i in range(len(planes_sorted))]
     name_map = {}
     for name, plane in zip(names, planes_sorted):
@@ -1241,8 +1290,11 @@ def _slab_plane_names(atoms, planes_sorted, axis=2, stacking_labels=None):
                 if plane_name_base(names[i]) != _formula_label(planes_sorted[i]["counts"]):
                     names[i] = _formula_label(planes_sorted[i]["counts"]) + "~"
             return names, (per, None, None)
+    def context(indices):
+        return [_context_signature(waves[i], _neighbours(waves, planes_sorted, i)) for i in indices]
+
     if found is None:
-        names, _ = assign_plane_names(planes_sorted, atoms=atoms, axis=axis)
+        names, _ = assign_plane_names(planes_sorted, atoms=atoms, axis=axis, context=context(range(n)))
         return names, None
     per, t, dz_rep, first = found
     images = _wave_images(cell2d)
@@ -1289,7 +1341,8 @@ def _slab_plane_names(atoms, planes_sorted, axis=2, stacking_labels=None):
                 ref_names = [stacking_labels[(i + c - classes[i]) % per] for c in range(per)]
                 break
     if ref_names is None:
-        ref_names, _ = assign_plane_names([planes_sorted[r] for r in ref], atoms=atoms, axis=axis)
+        ref_names, _ = assign_plane_names([planes_sorted[r] for r in ref], atoms=atoms, axis=axis,
+                                          context=context(ref))
 
     names = []
     for i, c in enumerate(classes):
