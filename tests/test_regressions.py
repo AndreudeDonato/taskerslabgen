@@ -1928,3 +1928,33 @@ def test_cutslab_enumeration_and_validation_use_the_same_charge_scale(ceo2_111_s
         assert {(s.info["cut_bottom_idx"], s.info["cut_top_idx"]) for s in subs} == expected
 
 
+def test_plane_charges_are_not_zeroed_by_an_absolute_tolerance():
+    """Finding 10: identify_planes set plane charges below charge_tol (an
+    absolute number) to zero, so with computed charges and charge_tol=0.05
+    the cut enumeration saw a non-polar stacking and the built slab failed
+    validation (SlabValidationError) instead of the Tasker III verdict."""
+    from taskerslabgen import SlabValidationError, generate_slabs_for_miller
+    from taskerslabgen.advanced import build_surface, compute_projection, identify_planes
+    from taskerslabgen.core import _INDEX_KEY, _tag_atom_indices
+
+    tagged = _tag_atom_indices(CEO2)
+    surf = build_surface(tagged, (1, 1, 0), layers=1)
+    tags = surf.arrays[_INDEX_KEY]
+    atoms_z, L = compute_projection(tagged, surf, [Q_CEO2[s] for s in surf.get_chemical_symbols()], (1, 1, 0))
+    planes = sorted(identify_planes(atoms_z, L), key=lambda p: p["z_center"])
+    assert len(planes) == 2
+    # Computed-like charges whose two Ce2O4 planes carry -0.04 and +0.04: a polar stacking.
+    q = np.where(CEO2.numbers == 58, 1.2, -0.6)
+    for k, plane in enumerate(planes):
+        for i in plane["indices"]:
+            if CEO2.numbers[tags[i]] == 8:
+                q[tags[i]] = -0.61 if k == 0 else -0.59
+    assert abs(q.sum()) < 1e-12
+    try:
+        res = generate_slabs_for_miller(CEO2, list(q), (1, 1, 0), [1, 2], charge_tol=0.05, dipole_tol=1e-3)
+    except SlabValidationError as exc:
+        pytest.fail(f"internal inconsistency: {exc}")
+    except ValueError:
+        pass  # polar and no reconstruction of whole Ce2O4 planes: the honest verdict
+    else:
+        assert {t["tasker_type"] for t in res[(1, 1, 0)].values()} == {"III"}

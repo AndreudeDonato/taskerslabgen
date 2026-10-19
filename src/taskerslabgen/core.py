@@ -340,14 +340,14 @@ def _charges_to_list(atoms, charges):
     return list(charges)
 
 
-def _make_plane(indices, z_values, atoms_z, charge_tol, period=None):
-    """Plane dict of the atoms *indices* at heights *z_values* (unwrapped)."""
+def _make_plane(indices, z_values, atoms_z, charge_tol=None, period=None):
+    """Plane dict of the atoms *indices* at heights *z_values* (unwrapped).
+    *charge_tol* is accepted for compatibility and ignored: plane charges
+    are kept exact, the callers compare sums with their own tolerance."""
     z_values = np.asarray(z_values, dtype=float)
     z_mean = float(np.mean(z_values))
     q = np.asarray(atoms_z[indices, 2], dtype=float)
     q_total = float(np.sum(q))
-    if abs(q_total) < charge_tol:
-        q_total = 0.0
     counts = {}
     for Z in atoms_z[indices, 0].astype(int):
         counts[int(Z)] = counts.get(int(Z), 0) + 1
@@ -382,7 +382,11 @@ def identify_planes(atoms_z, L, plane_tol=None, charge_tol=1e-3):
         Largest z-gap (angstrom) between neighbouring atoms of one plane.
         ``None`` (default) uses ``DEFAULT_PLANE_TOL`` (0.1 Å).
     charge_tol : float
-        Plane charges with ``abs(q) < charge_tol`` are set to exactly 0.
+        Ignored (kept for compatibility).  Plane charges used to be set to
+        exactly 0 below this absolute value, which with computed charges
+        hid a polar stacking from the cut enumeration; they are now kept
+        exact and compared by the callers in units of the mean absolute
+        charge.
 
     Returns
     -------

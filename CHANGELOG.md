@@ -78,6 +78,13 @@ Fixes from the code review of 0.5.1 (2026-10-18).
   between planes a cut could pass the enumeration and fail validation
   (``SlabValidationError`` aborted the whole call) or be dropped although
   valid.  The enumeration now uses each sub-slab's own scale.
+- **Plane charges are no longer zeroed by an absolute tolerance.**
+  ``identify_planes`` set a plane's charge to exactly 0 when below
+  ``charge_tol`` (in e, not relative to the charge scale), so with computed
+  charges and ``charge_tol=0.05`` a polar stacking looked non-polar to the
+  cut enumeration and the built slab failed validation instead of getting
+  the Tasker III verdict.  Plane charges are kept exact; the ``charge_tol``
+  parameter of ``identify_planes`` is accepted and ignored.
 
 ## 0.5.1 — 2026-10-02
 
