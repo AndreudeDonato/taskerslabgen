@@ -18,6 +18,8 @@ from .core import (
     DEFAULT_DIPOLE_TOL,
     PolarSurfaceError,
     _charge_scale,
+    _hkl_str,
+    _is_index,
     _surface_area,
     _lattice_point_ops,
     _formula_label,
@@ -315,6 +317,16 @@ def _parse_bond_distances_map(bond_distances):
     """Convert user-facing bond_distances dict to a {(Zmin,Zmax): value} map."""
     from ase.data import atomic_numbers as ase_atomic_numbers
 
+    def number(symbol, key):
+        if isinstance(symbol, str):
+            symbol = symbol.strip()
+            if symbol not in ase_atomic_numbers:
+                raise ValueError(f"Unknown element {symbol!r} in bond_distances key {key!r}.")
+            return ase_atomic_numbers[symbol]
+        if not _is_index(symbol) or not 0 < symbol < len(ase_atomic_numbers):
+            raise ValueError(f"Invalid atomic number {symbol!r} in bond_distances key {key!r}.")
+        return int(symbol)
+
     manual_map = {}
     if bond_distances:
         for key, d in bond_distances.items():
@@ -322,14 +334,14 @@ def _parse_bond_distances_map(bond_distances):
                 parts = key.split("-")
                 if len(parts) != 2:
                     raise ValueError(f"Bond key must be 'X-Y', got: {key!r}")
-                a = ase_atomic_numbers[parts[0].strip()]
-                b = ase_atomic_numbers[parts[1].strip()]
+                a, b = number(parts[0], key), number(parts[1], key)
             else:
-                a, b = key
-                if isinstance(a, str):
-                    a = ase_atomic_numbers[a]
-                if isinstance(b, str):
-                    b = ase_atomic_numbers[b]
+                try:
+                    a, b = (number(x, key) for x in key)
+                except (TypeError, ValueError) as exc:
+                    if isinstance(exc, ValueError) and "bond_distances" in str(exc):
+                        raise
+                    raise ValueError(f"Bond key must be 'X-Y' or (Z1, Z2), got: {key!r}") from None
             manual_map[(min(a, b), max(a, b))] = d
     return manual_map
 
@@ -414,20 +426,22 @@ def _tasker3_slab_moments(q, r, plane_idx, mask, L, atoms_per_fu, min_layers=1,
     return mu0, Q0, dipole_per_area, charge_per_fu
 
 
-def _prefer_matches(prefer_plane, label, counts):
+def _prefer_matches(prefer_plane, label, counts, labels=()):
     """
-    Whether a plane matches *prefer_plane* (str or list of str): an element
-    symbol selects planes made only of that element, any other string is a
-    plane label (:func:`plane_name_matches`).  Integers are ignored.
+    Whether a plane matches *prefer_plane* (str or list of str): a string
+    that matches one of the facet's *labels* is a plane label
+    (:func:`plane_name_matches`), else an element symbol selects planes
+    made only of that element.  Integers (termination IDs) are ignored.
     """
     if prefer_plane is None:
         return False
-    queries = [prefer_plane] if isinstance(prefer_plane, str) else list(prefer_plane)
+    queries = [prefer_plane] if isinstance(prefer_plane, (str, int)) or _is_index(prefer_plane) \
+        else list(prefer_plane)
     present = {Z for Z, c in counts.items() if c > 0}
     for query in queries:
         if not isinstance(query, str):
             continue
-        if query in atomic_numbers:
+        if query in atomic_numbers and not any(plane_name_matches(query, name) for name in labels):
             if present == {atomic_numbers[query]}:
                 return True
         elif plane_name_matches(query, label):
@@ -704,7 +718,9 @@ def find_tasker3_candidates(
                 representatives.append((members[0], len(members)))
 
     candidates = []
-    matches = {i: _prefer_matches(prefer_plane, f"{plane_names[i]}-recon", planes_sorted[i]["counts"])
+    all_labels = {f"{plane_names[i]}-recon" for i in per_plane}
+    matches = {i: _prefer_matches(prefer_plane, f"{plane_names[i]}-recon", planes_sorted[i]["counts"],
+                                  all_labels)
                for i in per_plane}
     for (i, key), multiplicity in representatives:
         info = per_plane[i]
@@ -926,7 +942,8 @@ def build_tasker3_slabs(
     Returns
     -------
     list of Atoms
-        One slab per requested thickness, sorted by atom count.
+        One slab per requested thickness, in the order of
+        *layer_thickness_list*.
     """
     if plane_tol is not None:
         warnings.warn("build_tasker3_slabs ignores plane_tol; it will be removed.",
@@ -969,8 +986,6 @@ def build_tasker3_slabs(
         slab.set_pbc((True, True, True))
         apply_vacuum_to_slab(slab, vacuum=vacuum, axis=2)
         slabs.append(slab)
-
-    slabs.sort(key=len)
     return slabs
 
 
@@ -1033,9 +1048,12 @@ def reconstruct_tasker_iii(
         ``(lo, hi)`` scaling factors for bond detection.
     bond_distances : dict or None
         Per-pair bond reference distances.
-    prefer_plane : str, list[str], or None
-        Candidates on matching planes are ranked first (element symbol or
-        plane label, e.g. ``"O"``, ``"O4"``, ``"O4-recon"``).
+    prefer_plane : None, int, list[int], str, or list[str]
+        Filter on the valid candidates, as in
+        :func:`generate_slabs_for_miller`: termination IDs (ranks over the
+        valid candidates, 0 = best), an element symbol (planes made only of
+        it) or a plane label (``"O4"``, ``"O4-recon"``); ``ValueError`` when
+        nothing matches.  The best remaining candidate is built.
     surface_supercell : tuple of int or None
         ``(n1, n2)`` in-plane repetition of the surface cell (see
         :func:`generate_slabs_for_miller`).
@@ -1054,10 +1072,16 @@ def reconstruct_tasker_iii(
     Raises
     ------
     ValueError
-        If no candidate gives a neutral, non-polar slab.
+        If no candidate gives a neutral, non-polar slab, or none matches
+        *prefer_plane*.
     """
-    from .genslab import _Options, _analyse_facet, _tasker3_candidates, _tasker3_termination
+    from .genslab import (
+        _Options, _analyse_facet, _check_layers, _miller_list, _select, _tasker3_candidates,
+        _tasker3_termination,
+    )
 
+    miller, = _miller_list(miller)
+    _check_layers(layer_thickness_list)
     h, k, l = miller
     if verbose:
         print(f"\nTasker III reconstruction for {bulk_name} ({h},{k},{l})\n")
@@ -1068,12 +1092,17 @@ def reconstruct_tasker_iii(
         bond_distances=bond_distances, max_masks=max_masks,
     )
     facet = _analyse_facet(bulk_atoms, charges, miller, opts, surface_supercell)
-    candidates, valid = _tasker3_candidates(facet, opts, prefer_plane=prefer_plane)
-    best = valid[0]
+    candidates, valid = _tasker3_candidates(facet, opts)
+    # IDs are ranks over the valid candidates; prefer_plane filters them.
+    terminations = {
+        tid: {"candidate": cand, "plane_type": cand["recon_label"], "plane_counts": dict(cand["plane_counts"])}
+        for tid, cand in enumerate(valid)
+    }
+    best = next(iter(_select(terminations, prefer_plane, "best").values()))["candidate"]
     if verbose:
         print(f"\n→ Best: {best['recon_label']}  "
               f"mu={best['net_dipole']:+.4e}  bonds_broken={best['bond_score']}\n")
-    plot_path = f"{plot_out_dir}/{bulk_name}_hkl_{h}{k}{l}_tasker3.png" if plot else None
+    plot_path = f"{plot_out_dir}/{bulk_name}_hkl_{_hkl_str(miller)}_tasker3.png" if plot else None
     slabs, reconstruction = _tasker3_termination(facet, opts, best, plot_path=plot_path)
     return {
         "plot": plot_path,

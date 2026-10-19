@@ -8,6 +8,7 @@ from collections import Counter
 from functools import cmp_to_key
 from itertools import product
 from math import gcd
+from numbers import Integral, Real
 
 import numpy as np
 from ase.build import surface
@@ -94,9 +95,27 @@ class PolarSurfaceError(ValueError):
         super().__init__(message)
         self.min_dipole = float(min_dipole)
 
+    def __reduce__(self):
+        # Pickle (multiprocessing, deepcopy) with both constructor arguments.
+        return type(self), (self.args[0], self.min_dipole)
+
+
+def _is_index(x):
+    """Whether *x* is an integer (Python or NumPy) and not a bool."""
+    return isinstance(x, Integral) and not isinstance(x, bool)
+
+
+def _hkl_str(miller):
+    """Miller index for file names: ``(1, 1, 0)`` gives ``1_1_0`` (joined
+    with underscores, so that ``(1, 1, 10)`` and ``(11, 1, 0)`` differ)."""
+    return "_".join(str(int(x)) for x in miller)
+
 
 def _check_miller(miller):
-    hkl = tuple(int(round(x)) for x in miller)
+    try:
+        hkl = tuple(int(round(x)) for x in miller)
+    except (TypeError, ValueError):
+        raise ValueError(f"Miller index must be three integers, got {miller!r}.") from None
     if len(hkl) != 3 or any(abs(x - y) > 1e-9 for x, y in zip(miller, hkl)):
         raise ValueError(f"Miller index must be three integers, got {miller!r}.")
     if not any(hkl):
@@ -327,10 +346,12 @@ def _charges_to_list(atoms, charges):
                 if key not in atomic_numbers:
                     raise ValueError(f"Unknown element symbol: {key}")
                 charge_map[atomic_numbers[key]] = float(val)
-            elif isinstance(key, int):
-                charge_map[key] = float(val)
+            elif _is_index(key):
+                charge_map[int(key)] = float(val)
             else:
-                raise ValueError(f"Unsupported charge key type: {type(key)}")
+                raise ValueError(
+                    f"Unsupported charge key {key!r}: use element symbols or atomic numbers."
+                )
         charges_list = []
         for Z in atoms.numbers:
             if Z not in charge_map:
@@ -2134,8 +2155,7 @@ def _assign_to_sites(numbers, frac, z, sites, t, offset, scale):
     return groups
 
 
-def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
-                      charge_tol=1e-3, deform_tol=0.3):
+def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, charge_tol=1e-3, deform_tol=0.3):
     """
     Assign the atoms of a slab to the planes of its bulk and label them.
 
@@ -2154,7 +2174,7 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
     ``stacking_labels`` from plane *i* up (one lattice repeat of catalog
     labels starting at the bulk plane of plane *i*).
     """
-    catalog, L, bulk_cell2d, per = _bulk_plane_catalog(bulk_atoms, miller, plane_tol)
+    catalog, L, bulk_cell2d, per = _bulk_plane_catalog(bulk_atoms, miller)
     cell2d = np.array(atoms.cell[:2, :2])
     a3_xy = _surface_a3_xy(bulk_atoms, miller, cell2d)
     per = _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, a3_xy=a3_xy) or per

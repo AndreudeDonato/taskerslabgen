@@ -22,7 +22,9 @@ from .core import (
     _charges_to_list,
     _finalize_slab,
     _frac_distance,
+    _hkl_str,
     _inplane_frac,
+    _is_index,
     _make_plane,
     _plane_translations,
     _plane_waves,
@@ -86,7 +88,8 @@ def cutslab(
         Cartesian axis perpendicular to the surface (0, 1, or 2).
     plane_tol : float or None
         Largest z-gap (angstrom) between neighbouring atoms of one plane
-        (single-linkage clustering).  ``None`` (default) uses 0.1 Å.
+        (single-linkage clustering).  ``None`` (default) uses 0.1 Å.  Not
+        used with *bulk_atoms*, where every atom takes its bulk site.
     charge_tol : float
         Largest |net charge| per formula unit, in units of the mean absolute
         charge per atom, treated as neutral (default 1e-3).
@@ -129,9 +132,9 @@ def cutslab(
           for ``O4``).
         - ``"all"``: cut at any plane that gives a stoichiometric,
           charge-neutral, zero-dipole sub-slab.
-        - A plane label (e.g. ``"O4'"``) or a list of labels: both ends of
-          every sub-slab are planes with one of those labels.  A genslab
-          termination is ``[plane_type, top_plane_type]``.
+        - A plane label (e.g. ``"O4'"``) or a list (or tuple) of labels:
+          both ends of every sub-slab are planes with one of those labels.
+          A genslab termination is ``[plane_type, top_plane_type]``.
     cuts : str
         ``"top"`` (default) -- keep the bottom plane and cut from the top:
         every sub-slab starts at the lowest plane *cut_at* allows as a
@@ -222,6 +225,9 @@ def cutslab(
         )
     if selection not in SELECTIONS:
         raise ValueError(f"selection must be one of {SELECTIONS}, got {selection!r}")
+    if not _is_index(axis) or axis not in (0, 1, 2):
+        raise ValueError(f"axis must be 0, 1 or 2, got {axis!r}.")
+    axis = int(axis)
 
     # ---- Parse input ----
     if hasattr(input_structure, "positions"):
@@ -257,7 +263,8 @@ def cutslab(
     vec = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
     input_miller = miller if miller is not None else atoms.info.get("miller")
     plot_miller = tuple(input_miller) if input_miller is not None else vec[axis]
-    miller_str = "".join(str(i) for i in plot_miller)
+    miller_str = "".join(str(i) for i in plot_miller)  # titles
+    miller_file = _hkl_str(plot_miller)                 # file names
 
     recon = None
     if reconstruction is not None:
@@ -276,7 +283,7 @@ def cutslab(
             )
         planes_sorted, plane_names, reduced_counts, bulk_stacking = _planes_from_bulk(
             atoms, charges_list, bulk_atoms, tuple(input_miller),
-            plane_tol=plane_tol, charge_tol=charge_tol, deform_tol=deform_tol,
+            charge_tol=charge_tol, deform_tol=deform_tol,
         )
         repeat = None
         if recon is not None:
@@ -392,7 +399,12 @@ def cutslab(
                 f"Available: {sorted(set(plane_names))}.{label_hint}"
             )
         bottom_names = top_names = matched
-    elif isinstance(cut_at, list):
+    elif isinstance(cut_at, (list, tuple)):
+        if not cut_at or not all(isinstance(query, str) for query in cut_at):
+            raise ValueError(
+                f"Invalid cut_at={cut_at!r}. Must be 'all', 'termination', "
+                f"a plane name, or list of plane names."
+            )
         matched, unknown = set(), []
         for query in cut_at:
             found = matching(query)
@@ -568,8 +580,8 @@ def cutslab(
             f"matching cut_at={cut_at!r} (charge_tol={charge_tol}, "
             f"dipole_tol={dipole_tol} /A). Sub-slabs of relaxed slabs keep one "
             "relaxed surface and usually need dipole_tol~0.05, and rumpled planes "
-            "a larger plane_tol or "
-            "bulk_atoms=." + polar_hint
+            "bulk_atoms= (every atom then takes its bulk site) or, without it, a "
+            "larger plane_tol." + polar_hint
         )
 
     # ---- Build sub-slabs ----
@@ -603,7 +615,7 @@ def cutslab(
 
         if plot:
             plot_path = (
-                f"{plot_out_dir}/{stem}_hkl_{miller_str}"
+                f"{plot_out_dir}/{stem}_hkl_{miller_file}"
                 f"_cut_{cut_idx}_{plane_name_for_filename(bp)}_{plane_name_for_filename(tp)}.png"
             )
             # Only this sub-slab's surfaces carry the reconstructed label.

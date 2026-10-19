@@ -110,6 +110,38 @@ Fixes from the code review of 0.5.1 (2026-10-18).
   what the planes are made of (as the thin-slab path already required),
   else the planes are labelled from the slab (``O16``).
 
+### API
+- NumPy integers are accepted as charge-dict keys, ``prefer_plane`` IDs
+  and Miller indices (also arrays and lists for a single index); bools are
+  rejected.
+- ``layer_thickness_list`` must be a non-empty list of positive integers
+  (``ValueError`` otherwise), and ``info["atoms"]`` (also
+  ``build_cut_slabs`` and ``build_tasker3_slabs``) keeps its order instead
+  of sorting by atom count.
+- ``reconstruct_tasker_iii(prefer_plane=)`` filters like
+  ``generate_slabs_for_miller`` (IDs over the valid candidates, element or
+  label) and raises when nothing matches, instead of silently building the
+  best candidate.
+- A ``prefer_plane`` string that is both an element symbol and a label of
+  the facet (``"O"`` for rutile (100)'s ``O``, ``O'``, ...) is read as the
+  label, as ``cut_at`` does; it used to select every pure-O plane.
+- Output file names join the Miller indices with underscores
+  (``slab_hkl_1_1_0_...``), so ``(1, 1, 10)`` and ``(11, 1, 0)`` no longer
+  overwrite each other.
+- ``cutslab``: ``plane_tol`` is no longer forwarded to the bulk plane
+  catalog in bulk mode (it merged bulk planes); ``axis`` must be 0, 1 or
+  2; ``cut_at`` accepts a tuple and rejects non-string entries with the
+  "Invalid cut_at" error.
+- ``PolarSurfaceError`` pickles (multiprocessing, deepcopy).
+- A bulk cell that is not charge-neutral with the given charges says so
+  (instead of "No valid stoichiometry sequences found").
+- ``bond_distances`` keys with an unknown element raise ``ValueError``.
+- The ``surface_supercell`` plot marks each removed atom once (every copy
+  of a bulk atom shared one tag).
+- The result keys of ``generate_slabs_for_miller`` are documented as ranks
+  over all terminations (with ``prefer_plane`` they need not start at 0);
+  the examples use ``next(iter(result[miller].values()))``.
+
 ## 0.5.1 — 2026-10-02
 
 ### Fixes

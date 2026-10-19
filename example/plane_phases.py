@@ -75,7 +75,8 @@ def run_case(folder, title, bulk_file, charges, miller, layers, selections,
     bulk = read((BULKS / bulk_file).as_posix())
     term = generate_slabs_for_miller(bulk, charges, miller, [layers], bulk_name=folder,
                                      plot=True, plot_out_dir=(OUT / folder).as_posix(),
-                                     **(gen_kwargs or {}))[miller][0]
+                                     **(gen_kwargs or {}))[miller]
+    term = next(iter(term.values()))
     thick = term["atoms"][0]
     print(f"   thick slab: bottom {term['plane_type']}, top {term['top_plane_type']}, "
           f"planes of one repeat unit {thick.info['stacking_labels']}")

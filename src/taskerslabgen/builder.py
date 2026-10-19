@@ -30,7 +30,8 @@ def build_cut_slabs(bulk_atoms, miller, layer_thickness_list, zbot, ztop, L, vac
     Returns
     -------
     list of Atoms
-        One slab per requested thickness, sorted by atom count.
+        One slab per requested thickness, in the order of
+        *layer_thickness_list*.
     """
     slabs = []
     for layer_thickness in layer_thickness_list:
@@ -42,5 +43,4 @@ def build_cut_slabs(bulk_atoms, miller, layer_thickness_list, zbot, ztop, L, vac
         slab.set_pbc((True, True, True))
         apply_vacuum_to_slab(slab, vacuum=vacuum, axis=2)
         slabs.append(slab)
-    slabs.sort(key=len)
     return slabs

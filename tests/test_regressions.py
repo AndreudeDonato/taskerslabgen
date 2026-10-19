@@ -2069,3 +2069,170 @@ def test_inherited_labels_must_match_the_planes_composition(ceo2_111_slab):
     with_key = labels(big)
     assert with_key == labels(bare)
     assert with_key[0][1] == "O16"
+
+
+# Finding 17: API robustness
+def test_api_accepts_numpy_integers_and_rejects_bools():
+    """NumPy integers as charge-dict keys, prefer_plane IDs and Miller
+    indices (also arrays and lists); bools are not integers here."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller, validate_slab
+
+    q_np = {np.int64(58): 4.0, np.int64(8): -2.0}
+    res = generate_slabs_for_miller(CEO2, q_np, np.array([1, 1, 1]), [1])
+    assert list(res) == [(1, 1, 1)]
+    slab = next(iter(res[(1, 1, 1)].values()))["atoms"][0]
+    validate_slab(slab, q_np, {58: 1, 8: 2})
+    assert cutslab(slab, q_np)
+    with pytest.raises(ValueError, match="charge key"):
+        generate_slabs_for_miller(CEO2, {True: 4.0, 8: -2.0}, (1, 1, 1), [1])
+    for m in ([1, 1, 1], (np.int64(1),) * 3, tuple(np.array([1.0, 1.0, 1.0])), [np.array([1, 1, 1])]):
+        assert list(generate_slabs_for_miller(CEO2, Q_CEO2, m, [1])) == [(1, 1, 1)]
+    with pytest.raises(ValueError, match="Miller"):
+        generate_slabs_for_miller(CEO2, Q_CEO2, (1, 1), [1])
+    keys = generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [1], prefer_plane=np.int64(1))[(1, 0, 0)]
+    assert list(keys) == [1]
+    for bad in (True, [False]):
+        with pytest.raises(ValueError, match="prefer_plane"):
+            generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [1], prefer_plane=bad)
+
+
+def test_layer_thickness_list_is_validated_and_its_order_kept():
+    from taskerslabgen import generate_slabs_for_miller, reconstruct_tasker_iii
+
+    for bad in ([], [0], [-1], [1.0], [True], 2):
+        with pytest.raises(ValueError, match="layer_thickness_list"):
+            generate_slabs_for_miller(IRO2, Q_IRO2, (1, 1, 0), bad)
+    term = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, (1, 1, 0), [3, 1, 2])[(1, 1, 0)].values()))
+    assert [len(a) for a in term["atoms"]] == [18, 6, 12]
+    out = reconstruct_tasker_iii(CEO2, Q_CEO2, (0, 0, 1), [3, 1], bond_distances=BOND_DISTS_CEO2)
+    sizes = [len(a) for a in out["slab_atoms"]]
+    assert sizes == sorted(sizes, reverse=True)
+    with pytest.raises(ValueError, match="layer_thickness_list"):
+        reconstruct_tasker_iii(CEO2, Q_CEO2, (0, 0, 1), [0])
+
+
+def test_reconstruct_tasker_iii_prefer_plane_is_a_filter():
+    """It was a ranking preference that silently fell back to the best
+    candidate; it now filters like generate_slabs_for_miller and accepts IDs."""
+    from taskerslabgen import generate_slabs_for_miller, reconstruct_tasker_iii
+
+    kw = dict(bond_distances=BOND_DISTS_CEO2)
+    ref = generate_slabs_for_miller(CEO2, Q_CEO2, (0, 0, 1), [2], candidates="all", **kw)[(0, 0, 1)]
+    assert len(ref) > 1
+    for tid, term in ref.items():
+        out = reconstruct_tasker_iii(CEO2, Q_CEO2, (0, 0, 1), [2], prefer_plane=tid, **kw)
+        assert out["best_candidate"]["deletion_mask"] == term["candidate"]["deletion_mask"]
+    out = reconstruct_tasker_iii(CEO2, Q_CEO2, (0, 0, 1), [2], prefer_plane="Ce", **kw)
+    assert out["best_candidate"]["recon_label"] == "Ce2-recon"
+    with pytest.raises(ValueError, match="No termination matches"):
+        reconstruct_tasker_iii(CEO2, Q_CEO2, (0, 0, 1), [2], prefer_plane="Xx4", **kw)
+
+
+def test_prefer_plane_string_is_a_label_before_an_element():
+    """"O" on rutile (100), whose O planes are labelled O, O', ..., selects
+    the label O (phase 0) as cut_at does, not every pure-O plane."""
+    from taskerslabgen import generate_slabs_for_miller
+
+    strict = generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [1], candidates="all", prefer_plane="O")
+    assert {t["plane_type"] for t in strict[(1, 0, 0)].values()} == {"O"}
+    shape = generate_slabs_for_miller(IRO2, Q_IRO2, (1, 0, 0), [1], candidates="all", prefer_plane="O",
+                                      selection="shape")
+    assert len(shape[(1, 0, 0)]) > len(strict[(1, 0, 0)])
+    # Where no label is "O" (CeO2 (111): O4 planes), "O" is the element.
+    res = generate_slabs_for_miller(CEO2, Q_CEO2, (1, 1, 1), [1], candidates="all", prefer_plane="O")
+    assert res[(1, 1, 1)] and all(set(t["plane_counts"]) == {8} for t in res[(1, 1, 1)].values())
+
+
+def test_output_filenames_keep_miller_indices_apart(tmp_path):
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+    from taskerslabgen.core import _hkl_str
+
+    assert _hkl_str((1, 1, 10)) != _hkl_str((11, 1, 0))
+    assert _hkl_str((1, -1, 0)) == "1_-1_0"
+    res = generate_slabs_for_miller(CEO2, Q_CEO2, (1, 1, 1), [1], plot=True, plot_out_dir=tmp_path.as_posix(),
+                                    savecandidates=True)
+    names = sorted(p.name for p in tmp_path.iterdir())
+    assert names and all("hkl_1_1_1_" in n for n in names)
+    slab = next(iter(res[(1, 1, 1)].values()))["atoms"][0]
+    cutslab(slab, Q_CEO2, plot=True, plot_out_dir=tmp_path.as_posix())
+    assert any(p.name.startswith("slab_hkl_1_1_1_cut_") for p in tmp_path.iterdir())
+
+
+def test_bulk_mode_ignores_plane_tol(ceo2_111_slab):
+    """plane_tol was forwarded to the bulk plane catalog, so a coarse value
+    (meant for a rumpled slab) merged the bulk planes."""
+    from taskerslabgen import cutslab
+
+    def series(**kwargs):
+        return [(len(s), s.info["cut_n_planes"], s.info["cut_bottom_plane"])
+                for s in cutslab(ceo2_111_slab, Q_CEO2, bulk_atoms=CEO2, **kwargs)]
+
+    assert series(plane_tol=2.0) == series()
+
+
+def test_polar_surface_error_pickles():
+    import copy
+    import pickle
+
+    from taskerslabgen import PolarSurfaceError
+
+    err = PolarSurfaceError("polar", 0.1)
+    for again in (pickle.loads(pickle.dumps(err)), copy.deepcopy(err)):
+        assert isinstance(again, PolarSurfaceError)
+        assert again.min_dipole == 0.1 and str(again) == "polar"
+
+
+def test_non_neutral_bulk_charges_are_diagnosed():
+    from taskerslabgen import generate_slabs_for_miller
+
+    with pytest.raises(ValueError, match="not charge-neutral"):
+        generate_slabs_for_miller(CEO2, {"Ce": 4.0, "O": -1.99}, (1, 1, 1), [1])
+    assert generate_slabs_for_miller(CEO2, {"Ce": 4.0, "O": -1.99}, (1, 1, 1), [1], charge_tol=0.01)
+
+
+def test_supercell_plot_marks_each_removed_atom_once(tmp_path, monkeypatch):
+    """The oriented supercell kept the bulk atom's tag on every copy, so the
+    plot marked every copy of a deleted atom as removed."""
+    import taskerslabgen.plotting as plotting
+    from taskerslabgen import generate_slabs_for_miller
+
+    seen = []
+    real = plotting.plot_slab
+
+    def spy(*args, **kwargs):
+        seen.append(len(kwargs.get("removed", ())))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(plotting, "plot_slab", spy)
+    res = generate_slabs_for_miller(CEO2, Q_CEO2, (0, 0, 1), [1], prefer_plane="O", bond_distances=BOND_DISTS_CEO2,
+                                    surface_supercell=(2, 1), plot=True, plot_out_dir=tmp_path.as_posix())
+    term = next(iter(res[(0, 0, 1)].values()))
+    assert seen == [2 * len(term["candidate"]["deletion_mask"])]
+
+
+def test_cutslab_validates_axis_and_cut_at(ceo2_111_slab):
+    from taskerslabgen import cutslab
+
+    for bad in (3, -1, 2.0, "z", True):
+        with pytest.raises(ValueError, match="axis"):
+            cutslab(ceo2_111_slab, Q_CEO2, axis=bad)
+    assert cutslab(ceo2_111_slab, Q_CEO2, axis=np.int64(2))
+    labels = ceo2_111_slab.info["stacking_labels"]
+    as_tuple = cutslab(ceo2_111_slab, Q_CEO2, cut_at=(labels[0], labels[-1]))
+    as_list = cutslab(ceo2_111_slab, Q_CEO2, cut_at=[labels[0], labels[-1]])
+    assert [len(s) for s in as_tuple] == [len(s) for s in as_list]
+    for bad in ([labels[0], 3], 3, {labels[0]}, []):
+        with pytest.raises(ValueError, match="Invalid cut_at"):
+            cutslab(ceo2_111_slab, Q_CEO2, cut_at=bad)
+
+
+def test_bond_distances_unknown_element_is_a_value_error():
+    from taskerslabgen import generate_slabs_for_miller
+    from taskerslabgen.tasker3 import _parse_bond_distances_map
+
+    for bad in ({"ce-o": 2.3}, {"Xx-O": 2.3}, {("ce", "O"): 2.3}, {"Ce-O-X": 2.3}, {(58, 999): 2.3}):
+        with pytest.raises(ValueError, match="bond_distances|Bond key"):
+            _parse_bond_distances_map(bad)
+    assert _parse_bond_distances_map({"O-Ce": 2.3, (8, 8): None}) == {(8, 58): 2.3, (8, 8): None}
+    with pytest.raises(ValueError, match="bond_distances"):
+        generate_slabs_for_miller(CEO2, Q_CEO2, (1, 1, 1), [1], bond_distances={"ce-o": 2.3})

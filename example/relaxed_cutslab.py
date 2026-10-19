@@ -35,7 +35,7 @@ def fake_relaxed_slab(bulk, charges, miller, depth=2.5, shift=0.15):
     result = generate_slabs_for_miller(
         bulk, charges, miller, layer_thickness_list=[6], vacuum=10.0
     )
-    slab = result[miller][0]["atoms"][0]
+    slab = next(iter(result[miller].values()))["atoms"][0]
     z = slab.positions[:, 2]
     top, bottom = z.max(), z.min()
     pos = slab.get_positions()

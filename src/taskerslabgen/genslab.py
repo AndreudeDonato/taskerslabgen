@@ -5,6 +5,7 @@ termination or reconstruction, and build validated slabs.
 import math
 import warnings
 from dataclasses import dataclass, replace
+from numbers import Real
 
 import numpy as np
 from ase import Atoms
@@ -15,6 +16,9 @@ from .core import (
     DEFAULT_DIPOLE_TOL,
     PolarSurfaceError,
     _charge_scale,
+    _check_miller,
+    _hkl_str,
+    _is_index,
     _surface_area,
     _INDEX_KEY,
     _charges_to_list,
@@ -55,14 +59,19 @@ def _filter_by_prefer_plane(terminations, prefer_plane, selection="relative"):
     Use ``["O", "Ce"]`` to keep pure-O planes OR pure-Ce planes (but
     still not mixed CeO planes).  To select mixed planes use the plane
     label (e.g. ``"Ce2O4"``).
+
+    A string that is both an element symbol and a label of this facet
+    (``"O"`` where single-O planes are ``O``, ``O'``, ...) is read as the
+    label, i.e. with *selection*: ``"O"`` keeps the phase-0 planes only.
     """
     if prefer_plane is None:
         return dict(terminations)
 
-    if isinstance(prefer_plane, int):
+    if _is_index(prefer_plane):
         prefer_plane = [prefer_plane]
 
-    if isinstance(prefer_plane, (list, tuple)) and prefer_plane and all(isinstance(x, int) for x in prefer_plane):
+    if isinstance(prefer_plane, (list, tuple)) and prefer_plane and all(_is_index(x) for x in prefer_plane):
+        prefer_plane = [int(tid) for tid in prefer_plane]
         missing = [tid for tid in prefer_plane if tid not in terminations]
         if missing:
             raise ValueError(
@@ -78,10 +87,11 @@ def _filter_by_prefer_plane(terminations, prefer_plane, selection="relative"):
     else:
         raise ValueError(f"Invalid prefer_plane: {prefer_plane!r}")
 
+    labels = {t.get("plane_type", "") for t in terminations.values()}
     element_Zs = set()
     plane_type_names = set()
     for s in str_list:
-        if s in atomic_numbers:
+        if s in atomic_numbers and not any(plane_name_matches(s, pt, selection) for pt in labels):
             element_Zs.add(atomic_numbers[s])
         else:
             plane_type_names.add(s)
@@ -156,9 +166,11 @@ def generate_slabs_for_miller(
         Computed charges (Hirshfeld, Bader) rarely sum exactly to zero, so
         they may need a larger *charge_tol*.
     millers : tuple or list of tuples
-        Single Miller index ``(h, k, l)`` or list of Miller indices.
+        Single Miller index ``(h, k, l)`` (any sequence of three integers,
+        e.g. a list or a NumPy array) or a list of Miller indices.
     layer_thickness_list : list of int
-        Slab thicknesses in bulk repeat units.
+        Slab thicknesses in bulk repeat units (positive integers, at least
+        one); ``info["atoms"]`` follows this order.
     bulk_name : str
         Label used in plot and output filenames.
     plane_tol : float or None
@@ -206,7 +218,9 @@ def generate_slabs_for_miller(
         - ``str`` (plane label, e.g. ``"O4"``): keep terminations whose
           bottom plane label matches, as *selection* says: ``"O4'"``
           selects ``O4'`` and ``O4'-recon`` (``"relative"``), or every
-          phase ``O4``, ``O4'``, ... (``"shape"``).
+          phase ``O4``, ``O4'``, ... (``"shape"``).  A string that is
+          both an element symbol and a label of the facet (``"O"`` for
+          single-O planes ``O``, ``O'``, ...) is read as the label.
         - ``list[str]``: match any entry.  ``["O", "Ce"]`` keeps pure-O
           planes OR pure-Ce planes, but not mixed CeO planes.
     candidates : str
@@ -253,7 +267,8 @@ def generate_slabs_for_miller(
         Nested dict ``{miller: {plane_id: info}}`` where each ``info``
         dict contains:
 
-        - ``"atoms"`` -- list of ``Atoms`` (one per thickness)
+        - ``"atoms"`` -- list of ``Atoms`` (one per thickness, in the
+          order of *layer_thickness_list*)
         - ``"tasker_type"`` -- ``"I/II"`` or ``"III"``
         - ``"plane_type"`` -- label of the bottom surface plane (e.g.
           ``"O4"``, ``"O4-recon"``)
@@ -275,7 +290,10 @@ def generate_slabs_for_miller(
           ``multiplicity`` (number of symmetry-equivalent deletion patterns
           it stands for), ...).  IDs are in rank order (ID 0 = best) and
           each ID is a distinct termination: symmetry-equivalent Tasker III
-          patterns are reported once.
+          patterns are reported once.  IDs are ranks over *all* terminations
+          of the facet, so with *prefer_plane* the keys need not start at
+          0: take ``next(iter(result[miller].values()))`` for the best
+          selected termination.
 
         Every slab is checked to be stoichiometric, neutral and non-polar;
         a :class:`SlabValidationError` is raised otherwise.  A ``ValueError``
@@ -294,8 +312,8 @@ def generate_slabs_for_miller(
             f"dipole_tol_max ({dipole_tol_max}) must be at least dipole_tol ({dipole_tol})."
         )
 
-    if isinstance(millers, tuple) and len(millers) == 3 and all(isinstance(x, (int, float)) for x in millers):
-        millers = [millers]
+    millers = _miller_list(millers)
+    _check_layers(layer_thickness_list)
 
     opts = _Options(
         layers=tuple(layer_thickness_list), bulk_name=bulk_name, plane_tol=plane_tol,
@@ -311,6 +329,39 @@ def generate_slabs_for_miller(
             candidates, savecandidates, surface_supercell,
         )
     return results
+
+
+def _miller_list(millers):
+    """*millers* as a list of ``(h, k, l)`` tuples of ints: one index (any
+    sequence of three numbers, e.g. a NumPy array) or a list of them."""
+    def is_index(m):
+        try:
+            return len(m) == 3 and all(isinstance(x, Real) and not isinstance(x, bool) for x in m)
+        except TypeError:
+            return False
+
+    if is_index(millers):
+        millers = [millers]
+    out = []
+    for m in millers:
+        if not is_index(m):
+            raise ValueError(f"Miller index must be three integers, got {m!r}.")
+        _check_miller(m)
+        out.append(tuple(int(round(x)) for x in m))
+    return out
+
+
+def _check_layers(layer_thickness_list):
+    """Every slab thickness must be a positive integer, and there must be one."""
+    try:
+        layers = list(layer_thickness_list)
+    except TypeError:
+        layers = None
+    if not layers or not all(_is_index(x) and x >= 1 for x in layers):
+        raise ValueError(
+            "layer_thickness_list must be a non-empty list of positive integers "
+            f"(repeat units), got {layer_thickness_list!r}."
+        )
 
 
 def _round_up(x, digits=2):
@@ -421,6 +472,10 @@ def _analyse_facet(bulk_atoms, charges, miller, opts, surface_supercell=None):
     out_miller = tuple(miller)
     if surface_supercell is not None:
         bulk = _oriented_bulk(bulk, miller, surface_supercell)
+        # Every atom of the oriented supercell gets its own tag (the copies
+        # of a bulk atom shared one), with the charges to match.
+        charges_list = [charges_list[i] for i in bulk.arrays[_INDEX_KEY]]
+        bulk.arrays[_INDEX_KEY] = np.arange(len(bulk))
         miller = (0, 0, 1)
 
     surf_bulk = build_surface(bulk, miller, layers=1, verbose=opts.verbose)
@@ -457,7 +512,19 @@ def _generate_for_one_miller(bulk_atoms, charges, miller, opts, prefer_plane, ca
     n_units = max(opts.layers)
     best_seq = select_best_sequence(sequences, dipole_tol=opts.dipole_tol, n_units=n_units)
     if best_seq is None:
-        raise ValueError("No valid stoichiometry sequences found.")
+        # A sequence of all planes is stoichiometric, so what fails is the
+        # neutrality of the bulk cell itself.
+        net = float(np.sum(facet.atoms_z[:, 2]))
+        per_fu = abs(net) / facet.charge_scale / (len(facet.atoms_z) / sum(facet.reduced_counts.values()))
+        raise ValueError(
+            f"{opts.bulk_name} {miller}: the bulk cell is not charge-neutral with these "
+            f"charges (net {net:+.4g} e, {per_fu:.3g} per formula unit in units of the "
+            f"mean absolute charge; charge_tol={opts.charge_tol}).  Check the charges, or "
+            "raise charge_tol for computed charges."
+            if per_fu > opts.charge_tol else
+            f"{opts.bulk_name} {miller}: no stoichiometric, charge-neutral sequence of "
+            "planes spans one repeat unit; check the structure and plane_tol."
+        )
 
     if opts.verbose:
         n = len(facet.planes)
@@ -512,8 +579,7 @@ def _save_candidates(slabs, facet, opts, kind):
         frame = Atoms(numbers=slab.numbers, positions=slab.positions, cell=slab.cell, pbc=slab.pbc)
         frame.info = {"candidate_id": tid}
         frames.append(frame)
-    h, k, l = facet.out_miller
-    path = out_dir / f"{opts.bulk_name}_hkl_{h}{k}{l}_candidates.xyz"
+    path = out_dir / f"{opts.bulk_name}_hkl_{_hkl_str(facet.out_miller)}_candidates.xyz"
     write(path.as_posix(), frames, format="extxyz")
     if opts.verbose:
         print(f"Saved {len(frames)} Tasker {kind} candidates to {path}\n")
@@ -625,7 +691,7 @@ def _tasker12_path(facet, sequences, opts, prefer_plane, candidates_mode, saveca
             bp, tp = names[bottom], names[seq["top_cut"]]
             _plot_termination(
                 facet, opts, build(seq, [opts.layers[0] + 2])[0], slabs[0], bottom,
-                f"{opts.plot_out_dir}/{opts.bulk_name}_hkl_{h}{k}{l}_"
+                f"{opts.plot_out_dir}/{opts.bulk_name}_hkl_{_hkl_str(facet.out_miller)}_"
                 f"{plane_name_for_filename(bp)}_{plane_name_for_filename(tp)}_{tid}.png",
                 f"{opts.bulk_name} ({h}{k}{l}) termination {tid}: {bp} to {tp}",
             )
@@ -743,7 +809,7 @@ def _tasker3_path(facet, opts, prefer_plane, candidates_mode, savecandidates):
             print(f"  Termination {tid}:", end="")
         slabs, reconstruction = _tasker3_termination(
             facet, opts, cand,
-            plot_path=(f"{opts.plot_out_dir}/{opts.bulk_name}_hkl_{h}{k}{l}_"
+            plot_path=(f"{opts.plot_out_dir}/{opts.bulk_name}_hkl_{_hkl_str(facet.out_miller)}_"
                        f"{plane_name_for_filename(label)}_{plane_name_for_filename(label)}_{tid}.png"),
         )
         output[tid] = {
