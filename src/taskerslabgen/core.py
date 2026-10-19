@@ -1813,9 +1813,13 @@ def _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, site_tol=0.3, a3_xy=(0.0, 
     from; the labels are then recomputed in the slab's cell, since they
     count atoms per cell (genslab's ``surface_supercell`` labels do too).  A
     few per cent of strain between the cells is accepted.  Returns the
-    number of planes in one lattice repeat of the relabelled catalog.
+    number of planes in one lattice repeat of the relabelled catalog, or
+    ``None`` when the cells are the same and the labels are kept.
     """
-    if _integer_supercell(bulk_cell2d, cell2d) is not None:
+    M_int = _integer_supercell(bulk_cell2d, cell2d)
+    if M_int is not None:
+        if abs(int(round(np.linalg.det(M_int)))) == 1:
+            return None
         for entry in catalog:
             entry["atoms"] = _tile_plane(entry["atoms"], bulk_cell2d, cell2d)
             entry["counts"] = dict(Counter(a[0] for a in entry["atoms"]))
@@ -2138,10 +2142,10 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
     ``stacking_labels`` from plane *i* up (one lattice repeat of catalog
     labels starting at the bulk plane of plane *i*).
     """
-    catalog, L, bulk_cell2d, _ = _bulk_plane_catalog(bulk_atoms, miller, plane_tol)
+    catalog, L, bulk_cell2d, per = _bulk_plane_catalog(bulk_atoms, miller, plane_tol)
     cell2d = np.array(atoms.cell[:2, :2])
     a3_xy = _surface_a3_xy(bulk_atoms, miller, cell2d)
-    per = _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, a3_xy=a3_xy)
+    per = _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, a3_xy=a3_xy) or per
 
     numbers = atoms.numbers
     z = atoms.positions[:, 2]
