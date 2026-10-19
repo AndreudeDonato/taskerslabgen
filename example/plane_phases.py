@@ -67,14 +67,14 @@ def ti_depth(slab):
 
 
 def run_case(folder, title, bulk_file, charges, miller, layers, selections,
-             describe, gen_kwargs=None, cut_kwargs=None):
+             describe, gen_kwargs=None, cut_kwargs=None, plot=True):
     """Build the thick slab, cut it with each selection (pictures in
     OUT/folder/<selection>/) and return the frames: the whole series of
     every selection, one after the other."""
     print(f"\n{title}")
     bulk = read((BULKS / bulk_file).as_posix())
     term = generate_slabs_for_miller(bulk, charges, miller, [layers], bulk_name=folder,
-                                     plot=True, plot_out_dir=(OUT / folder).as_posix(),
+                                     plot=plot, plot_out_dir=(OUT / folder).as_posix(),
                                      **(gen_kwargs or {}))[miller]
     term = next(iter(term.values()))
     thick = term["atoms"][0]
@@ -83,7 +83,7 @@ def run_case(folder, title, bulk_file, charges, miller, layers, selections,
     case = title.split(":")[0]
     frames = []
     for selection in selections:
-        subs = cutslab(thick, charges, selection=selection, plot=True,
+        subs = cutslab(thick, charges, selection=selection, plot=plot,
                        plot_out_dir=(OUT / folder / selection).as_posix(), **(cut_kwargs or {}))
         print(f"   selection={selection!r}:")
         for s in subs:
@@ -99,6 +99,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--view", action="store_true", help="Open the trajectory in the ASE GUI.")
+    parser.add_argument("--no-plot", action="store_true", help="Skip the plots.")
     args = parser.parse_args(argv)
     OUT.mkdir(parents=True, exist_ok=True)
 
@@ -111,18 +112,21 @@ def main(argv=None):
         "TiO2_anatase.cif", q_ti, (1, 0, 1), 3, ("relative", "shape"),
         lambda s: f"Ti {ti_depth(s):.2f} A below the top O",
         gen_kwargs={"dipole_tol": 0.05}, cut_kwargs={"dipole_tol": 0.05},
+        plot=not args.no_plot,
     )
     frames += run_case(
         "2_IrO2_110", "2. IrO2 (110): same relative phase, different absolute phase",
         "IrO2_rutile.cif", q_ir, (1, 1, 0), 4, ("relative", "absolute"),
         lambda s: ("top exactly over bottom (a---a)" if s.info["cut_phase_overlap"] > 0.9
                    else "top half a cell off (a---a')"),
+        plot=not args.no_plot,
     )
     frames += run_case(
         "3_IrO2_001", "3. IrO2 (001): a rotation is a phase",
         "IrO2_rutile.cif", q_ir, (0, 0, 1), 3, ("relative", "shape"),
         lambda s: ("top exactly over bottom" if s.info["cut_phase_overlap"] > 0.9
                    else "top rotated from bottom"),
+        plot=not args.no_plot,
     )
 
     images = []

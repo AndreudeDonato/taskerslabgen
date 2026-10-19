@@ -2236,3 +2236,17 @@ def test_bond_distances_unknown_element_is_a_value_error():
     assert _parse_bond_distances_map({"O-Ce": 2.3, (8, 8): None}) == {(8, 58): 2.3, (8, 8): None}
     with pytest.raises(ValueError, match="bond_distances"):
         generate_slabs_for_miller(CEO2, Q_CEO2, (1, 1, 1), [1], bond_distances={"ce-o": 2.3})
+
+
+def test_negative_vacuum_is_rejected(ceo2_111_slab):
+    """Finding 18: a negative vacuum was silently treated as none."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+    from taskerslabgen.advanced import apply_vacuum_to_slab
+
+    with pytest.raises(ValueError, match="vacuum"):
+        generate_slabs_for_miller(CEO2, Q_CEO2, (1, 1, 1), [1], vacuum=-1.0)
+    with pytest.raises(ValueError, match="vacuum"):
+        cutslab(ceo2_111_slab, Q_CEO2, vacuum=-1.0)
+    bare = ceo2_111_slab.copy()
+    apply_vacuum_to_slab(bare, vacuum=0.0)
+    assert np.allclose(bare.cell, ceo2_111_slab.cell) and np.allclose(bare.positions, ceo2_111_slab.positions)

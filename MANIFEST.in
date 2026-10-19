@@ -1,0 +1,6 @@
+# The source distribution must run the test suite: the bulk structures and
+# the test data are read from the repository tree.
+include CHANGELOG.md
+graft bulk_files
+graft tests
+global-exclude __pycache__ *.py[cod]

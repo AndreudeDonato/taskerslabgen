@@ -50,7 +50,7 @@ python3 -m pip install -U pip setuptools wheel
 python3 -m pip install -e ".[dev]"
 ```
 
-Requires Python >= 3.9, ASE, NumPy, Matplotlib, SciPy.
+Requires Python >= 3.10, ASE >= 3.23, NumPy, Matplotlib, SciPy.
 
 If editable install fails on an older system `pip`, either upgrade pip or run:
 
@@ -270,7 +270,7 @@ classifies each surface as Tasker I/II (zero dipole) or Tasker III
 | `plane_tol` | `float` or `None` | `None` | Largest z-gap (Å) between neighbouring atoms of one plane (single-linkage clustering). `None` = 0.1 Å. |
 | `charge_tol` | `float` | `1e-3` | Largest net charge per formula unit, in units of the mean absolute charge per atom, treated as neutral. |
 | `dipole_tol` | `float` | `1e-3` | Largest polarity (dipole per surface area, charges normalised, 1/Å; see [Polarity](#cutslab)) treated as zero, for every thickness built: below it the surface is Tasker I/II, and Tasker III reconstructions must also stay below it. Relaxed bulks: ~0.05. |
-| `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of the slab. |
+| `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of the slab. `0` adds none: the slab keeps the cell it was cut from, with about one repeat unit of empty space on each side. Negative values raise `ValueError`. |
 | `plot` | `bool` | `False` | Plot each termination: the slab between the two cuts, the bulk above and below in grey, planes labelled. |
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
 | `verbose` | `bool` or `None` | `None` | Print detailed information (plane sequences, candidates, etc.). |
@@ -314,7 +314,7 @@ bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
 | `None` | No filtering — all terminations returned. |
 | `int` (e.g. `0`) | Keep only the termination with that numeric ID. |
 | `list[int]` (e.g. `[0, 2]`) | Keep terminations with those IDs. |
-| `str` element (e.g. `"O"`) | Keep terminations whose cut plane consists **exclusively** of that element. `"O"` matches pure-O planes but NOT mixed CeO planes. |
+| `str` element (e.g. `"O"`) | Keep terminations whose cut plane consists **exclusively** of that element. `"O"` matches pure-O planes but NOT mixed CeO planes. A string that is also a plane label of the facet (`"O"` where single-O planes are labelled `O`, `O'`, ...) is read as the label. |
 | `str` plane label (e.g. `"O4'"`) | Keep terminations whose bottom plane label matches, as `selection` says: only `O4'` (and `O4'-recon`) with `"relative"`, every phase `O4`, `O4'`, ... with `"shape"`. See [Plane labels](#plane-labels-arrangement-and-phase). |
 | `list[str]` (e.g. `["O", "Ce"]`) | Keep terminations matching **any** entry. Each element match is exclusive — `["O", "Ce"]` keeps pure-O OR pure-Ce planes but not mixed CeO. |
 
@@ -322,15 +322,18 @@ bond_distances={"Ce-Ce": None, "O-O": None, "Ce-O": 2.35}
 
 | Value | Behaviour |
 |---|---|
-| `"best"` | Return only the single best candidate per Miller index. Tasker I/II: fewest bulk bonds broken at the cut, then densest surface planes (`candidate["broken_bonds"]`, `candidate["broken_bonds_by_pair"]`, `candidate["surface_density"]`); IDs follow this ranking. Tasker III: candidates must stay neutral and non-polar for every thickness from the thinnest requested one up; ranked by `bond_score` (bulk bonds the slab's atoms lose at both surfaces), then `distribution_score`; IDs follow this ranking.  Deletion patterns related by a symmetry of the crystal that keeps the surface normal, up to its sense (so also patterns that are the same slab turned upside down), are one termination, represented by its lowest-index valid pattern; `candidate["multiplicity"]` counts the valid patterns it stands for. |
+| `"best"` | Return only the single best candidate per Miller index. Tasker I/II: fewest bulk bonds broken at the cut, then densest surface planes (`candidate["broken_bonds"]`, `candidate["broken_bonds_by_pair"]`, `candidate["surface_density"]`); IDs follow this ranking. Tasker III: candidates must stay neutral and non-polar for every requested thickness; ranked by `bond_score` (bulk bonds the slab's atoms lose at both surfaces), then `distribution_score`; IDs follow this ranking.  Deletion patterns related by a symmetry of the crystal that keeps the surface normal, up to its sense (so also patterns that are the same slab turned upside down), are one termination, represented by its lowest-index valid pattern; `candidate["multiplicity"]` counts the valid patterns it stands for. |
 | `"all"` | Return every valid candidate, generating a separate plot for each. |
 
 **Returns**
 
-Nested dict: `{miller_tuple: {plane_id: info_dict}}`.
+Nested dict: `{miller_tuple: {plane_id: info_dict}}`.  `plane_id` is the
+termination's rank among all terminations of the facet (0 = best), so with
+`prefer_plane` the keys need not start at 0: `next(iter(result[miller].values()))`
+is the best selected termination.
 
 Each `info_dict` contains:
-- `"atoms"` — list of `Atoms` objects (one per thickness)
+- `"atoms"` — list of `Atoms` objects (one per thickness, in the order of `layer_thickness_list`)
 - `"tasker_type"` — `"I/II"` or `"III"`
 - `"plane_type"` — label of the bottom surface plane (e.g. `"O4"`, `"O4-recon"`); `cutslab` uses the same labels
 - `"top_plane_type"` — label of the top surface plane; differs from `plane_type` for asymmetric terminations, so cut with `cutslab(cut_at=[plane_type, top_plane_type])` (or the default `cut_at="termination"`)
@@ -342,6 +345,7 @@ Each `info_dict` contains:
 Each `Atoms` object carries metadata in `.info`:
 - `"bulk_name"` — the `bulk_name` parameter
 - `"miller"` — the Miller index tuple
+- `"stacking_labels"` — labels of one lattice repeat of planes from the bottom plane up; `cutslab` reads them to name the planes alike
 
 ---
 
@@ -360,7 +364,7 @@ sub_slabs = cutslab(
     plot_out_dir=".",
     plot=False,
     verbose=None,
-    bond_threshold=(0.85, 1.15),
+    bond_threshold=None,
     bond_distances=None,
     reconstruction=None,
     cut_at="termination",
@@ -389,12 +393,12 @@ termination.
 | `plot_out_dir` | `str` | `"."` | Directory for output plots. |
 | `plot` | `bool` | `False` | Plot each cut: what was cut away in grey, planes allowed as bottom (red) / top (blue) surface. |
 | `verbose` | `bool` or `None` | `None` | Print plane stacking and cut details. |
-| `bond_threshold` | `tuple[float, float]` | `(0.85, 1.15)` | Unused; kept for backward compatibility. |
-| `bond_distances` | `dict` or `None` | `None` | Unused; kept for backward compatibility. |
+| `bond_threshold` | `None` | `None` | Deprecated and ignored; passing a value warns (`DeprecationWarning`). |
+| `bond_distances` | `None` | `None` | Deprecated and ignored; passing a value warns (`DeprecationWarning`). |
 | `reconstruction` | `dict` or `None` | `None` | Tasker III reconstruction dict from genslab output (`term["reconstruction"]`, JSON-serialisable). Newly exposed copies of the reconstructed plane receive the same deletions, placed as genslab places them; in-plane supercells of the slab work. Forces `cut_at="termination"` if `cut_at` was `"all"`; an explicit `cut_at` must select the `-recon` label to expose copies. |
 | `cut_at` | `str` or `list[str]` | `"termination"` | Where to place cuts (see below). |
 | `cuts` | `str` | `"top"` | Which side is cut (see below). |
-| `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of every sub-slab. |
+| `vacuum` | `float` | `15.0` | Vacuum (Å) added to each side of every sub-slab. `0` adds none: sub-slabs keep the input slab's cell and coordinates. Negative values raise `ValueError`. |
 | `bulk_atoms` | `Atoms` or `None` | `None` | Bulk the slab was built from: its unit cell or a supercell of it (e.g. a relaxed bulk calculation), up to a few per cent of strain. The slab is registered on the bulk crystal in 3D (bulk-like atoms decide) and every atom takes its own bulk site, so relaxed surface planes that rumple or shift stay whole, even where bulk planes lie a fraction of an ångström apart; each plane gets its bulk label (`O4`), or `O4~` if it deviates by more than `deform_tol` or its composition changed. Recommended for relaxed slabs. |
 | `miller` | `tuple` or `None` | `None` | Miller index of the slab, needed with `bulk_atoms`; defaults to `slab.info["miller"]` (set by genslab). |
 | `deform_tol` | `float` | `0.3` | RMSD (Å, after the best rigid shift) up to which a slab plane still counts as its bulk plane. |
@@ -413,7 +417,7 @@ termination.
 
 | Value | Behaviour |
 |---|---|
-| `"top"` (default) | Keep the bottom plane, cut from the top. Produces slabs of decreasing thickness. |
+| `"top"` (default) | Keep the bottom plane, cut from the top. Produces slabs of decreasing thickness. Every sub-slab starts at the lowest plane `cut_at` allows as a bottom (the input's bottom plane for `"termination"` and `"all"`); if no valid cut starts there, cutslab raises instead of anchoring on an interior plane. |
 | `"bottom"` | Keep the top plane, cut from the bottom. |
 | `"all"` | Keep every valid cut (all combinations of bottom/top boundaries). |
 
@@ -433,6 +437,8 @@ Each `Atoms` object carries metadata in `.info`:
 - `"cut_bottom_idx"` — integer index of the bottom plane
 - `"cut_top_idx"` — integer index of the top plane
 - `"cut_n_planes"` — number of atomic planes in the sub-slab
+- `"cut_phase_overlap"` — overlap (0-1) of the top plane with the bottom plane as they are: 1 when the top lies exactly over the bottom (a---a), about 0 when shifted (a---a') or a different arrangement
+- `"stacking_labels"` — labels of one lattice repeat of planes from the sub-slab's bottom plane up (when the repeat unit is known)
 
 Supports single-plane slabs (1 atomic plane thick).
 
@@ -520,7 +526,8 @@ Standalone Tasker III reconstruction pipeline.  Can be called directly
 when you already know the surface is Tasker III.
 
 Returns a dict with `"slab_atoms"`, `"best_candidate"`,
-`"all_candidates"`, `"tasker_type"`, and `"plot"` path.
+`"all_candidates"`, `"reconstruction"` (the pattern for
+`cutslab(reconstruction=...)`), `"tasker_type"`, and `"plot"` path.
 
 ---
 
@@ -538,7 +545,7 @@ Import these from `taskerslabgen.advanced` (except `validate_slab` and
 | `validate_slab(slab, charges, reduced_counts, ...)` | Check stoichiometry, neutrality and dipole (optionally internal gaps); raises `SlabValidationError`. |
 | `compute_reduced_counts(atoms_z)` | Compute reduced (primitive) stoichiometry. |
 | `is_stoichiometric_sequence(sequence_counts, reduced_counts)` | Check if a sequence is a whole-number multiple of bulk formula. |
-| `enumerate_cut_pairs(planes, L, reduced_counts, charge_tol)` | Enumerate all contiguous plane sequences with charge/dipole info. |
+| `enumerate_cut_pairs(planes, L, reduced_counts, charge_tol, *, area, charge_scale)` | Enumerate all contiguous plane sequences with charge/dipole info (`area` of the surface cell and `charge_scale`, the mean absolute charge, are keyword-only and required). |
 | `select_best_sequence(sequences, dipole_tol, n_units)` | Select the best full-period stoichiometric sequence (polarity of a slab of *n_units* repeat units). |
 | `compute_cut_positions(planes, L, bottom_cut_index, top_cut_index)` | Compute z-coordinates for bottom and top cuts. |
 | `apply_vacuum_to_slab(atoms, vacuum, axis)` | Add vacuum above and below a slab. |

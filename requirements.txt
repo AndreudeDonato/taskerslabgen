@@ -1,4 +1,4 @@
-ase>=3.22
+ase>=3.23
 numpy
 matplotlib
 scipy

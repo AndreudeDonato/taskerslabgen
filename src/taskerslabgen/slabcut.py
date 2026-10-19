@@ -146,7 +146,9 @@ def cutslab(
         (``"right"`` and ``"left"``, the names before 0.5, still work as
         ``"top"`` and ``"bottom"`` with a deprecation warning.)
     vacuum : float
-        Vacuum to add (angstrom, per side) to each sub-slab.
+        Vacuum to add (angstrom, per side) to each sub-slab.  ``0`` adds
+        none: sub-slabs keep the input slab's cell and coordinates.
+        Negative values raise ``ValueError``.
     bulk_atoms : Atoms or None
         Bulk the slab was built from: its unit cell or a supercell of it
         (e.g. a relaxed bulk calculation), up to a few per cent of strain.

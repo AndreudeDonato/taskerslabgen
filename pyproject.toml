@@ -7,8 +7,11 @@ name = "taskerslabgen"
 dynamic = ["version"]
 description = "Tasker I/II/III slab generation and cutting utilities for ASE."
 readme = "README.md"
+# The table form is kept on purpose: the string form (license = "MIT") needs
+# setuptools >= 77, and `pip install --no-build-isolation -e .` on systems
+# with an older setuptools (Ubuntu 24.04: 68) would then fail.
 license = { text = "MIT" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
   { name = "Andreu A. de Donato" },
 ]
@@ -25,7 +28,6 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -33,7 +35,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-  "ase>=3.22",
+  "ase>=3.23",
   "numpy",
   "matplotlib",
   "scipy",

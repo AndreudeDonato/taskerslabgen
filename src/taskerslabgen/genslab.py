@@ -191,7 +191,9 @@ def generate_slabs_for_miller(
         relaxed one gives up to ~0.04, a wrong termination of anatase (101)
         0.02, a polar repeat unit ~0.1 per repeat unit.
     vacuum : float
-        Vacuum to add (angstrom, per side).
+        Vacuum to add (angstrom, per side).  ``0`` adds none: the slab keeps
+        the cell it was cut from, with about one repeat unit of empty space
+        on each side.  Negative values raise ``ValueError``.
     plot : bool
         Plot every termination (default ``False``): the slab between the two
         cuts, one repeat unit of bulk above and below in grey, planes

@@ -141,6 +141,24 @@ Fixes from the code review of 0.5.1 (2026-10-18).
 - The result keys of ``generate_slabs_for_miller`` are documented as ranks
   over all terminations (with ``prefer_plane`` they need not start at 0);
   the examples use ``next(iter(result[miller].values()))``.
+- A negative ``vacuum`` raises ``ValueError`` (it was silently treated as
+  none); ``vacuum=0`` is documented.
+
+### Docs and packaging
+- README: cutslab's ``bond_threshold`` / ``bond_distances`` are deprecated
+  and ignored (the block showed the old default); ``enumerate_cut_pairs``
+  takes keyword-only ``area`` and ``charge_scale``; the ``stacking_labels``,
+  ``cut_phase_overlap`` and ``"reconstruction"`` keys are listed; Tasker
+  III candidates are valid "for every requested thickness"; the
+  ``compute_cut_positions`` docstring names the right planes.
+- ``example/plane_phases.py --no-plot``.
+- Packaging: ``ase>=3.23`` (the import guard needs it with NumPy 2),
+  ``requires-python >= 3.10`` (CI tests 3.10-3.12; the 3.9 classifier is
+  gone), a ``MANIFEST.in`` so the sdist holds ``bulk_files`` and the test
+  data, and a CI job that builds the sdist and runs the tests from it.
+  The license stays in the table form on purpose: the string form needs
+  setuptools >= 77, which breaks ``--no-build-isolation`` installs on
+  systems with an older setuptools.
 
 ## 0.5.1 — 2026-10-02
 

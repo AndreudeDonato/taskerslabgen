@@ -682,9 +682,11 @@ def compute_cut_positions(planes, L, bottom_cut_index, top_cut_index):
     L : float
         Lattice-plane spacing (angstrom).
     bottom_cut_index : int
-        Index of the plane *below* the bottom cut.
+        Index of the plane *below* the bottom cut (the cut lies between
+        this plane and the next one up).
     top_cut_index : int
-        Index of the plane *above* the top cut.
+        Index of the plane *below* the top cut, i.e. the last plane of the
+        slab (the cut lies between it and the next one up).
 
     Returns
     -------
@@ -712,8 +714,12 @@ def apply_vacuum_to_slab(atoms, vacuum=15.0, axis=2):
 
     Atoms are shifted so the bottom of the slab sits at 0 along the given axis,
     and the cell is extended by `vacuum` angstrom on each side (top and bottom).
+    ``vacuum=0`` leaves the structure as it is; a negative value raises
+    ``ValueError``.
     """
-    if vacuum <= 0:
+    if vacuum < 0:
+        raise ValueError(f"vacuum must be zero or positive (angstrom), got {vacuum!r}.")
+    if vacuum == 0:
         return
     positions = atoms.get_positions()
     z_positions = positions[:, axis]
