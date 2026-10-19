@@ -1820,3 +1820,33 @@ def test_bulk_mode_cuts_surface_supercell_slabs_by_genslab_labels(atoms, charges
         slab.info["stacking_labels"]] * sum(s.info["cut_bottom_idx"] == 0 for s in subs)
     assert {(s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in cutslab(slab, charges, bulk_atoms=atoms)} == {
         (term["plane_type"], term["top_plane_type"])}
+
+
+def test_bulk_mode_accepts_strained_supercell_slabs():
+    """Finding 7: the supercell test used an absolute tolerance of 0.02 on
+    the entries of the cell ratio, so the accepted strain shrank with the
+    supercell: a 2x2 slab at 1.5 % strain was rejected."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    slab = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, (1, 1, 0), [2])[(1, 1, 0)].values()))["atoms"][0]
+
+    def cuts(strain, rep=(2, 2, 1)):
+        big = slab.repeat(rep)
+        big.info = dict(slab.info)
+        cell = np.array(big.cell)
+        cell[:2] *= 1 + strain
+        big.set_cell(cell, scale_atoms=True)
+        subs = cutslab(big, Q_IRO2, bulk_atoms=IRO2, miller=(1, 1, 0), dipole_tol=0.05, cut_at="all", cuts="all")
+        return sorted((len(s), s.info["cut_bottom_idx"], s.info["cut_top_idx"],
+                       s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in subs)
+
+    reference = cuts(0.0)
+    assert len(reference) > 1
+    assert cuts(0.03) == reference
+    # The other direction (bulk a supercell of the slab's cell) too.
+    one = slab.copy()
+    cell = np.array(one.cell)
+    cell[:2] *= 1.03
+    one.set_cell(cell, scale_atoms=True)
+    subs = cutslab(one, Q_IRO2, bulk_atoms=IRO2.repeat((2, 2, 1)), miller=(1, 1, 0), dipole_tol=0.05)
+    assert [len(s) for s in subs] == [len(s) for s in cutslab(slab, Q_IRO2, bulk_atoms=IRO2, dipole_tol=0.05)]

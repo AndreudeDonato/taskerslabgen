@@ -52,6 +52,12 @@ Fixes from the code review of 0.5.1 (2026-10-18).
   gained higher-order invariants, consulted only when the low orders tie
   (they vanish along a doubled direction), so the supercell path and bulk
   mode number phases alike.
+- **Strained supercell slabs in bulk mode.**  Whether the slab's cell is an
+  integer supercell of the bulk surface cell was tested with an absolute
+  tolerance on the entries of the cell ratio, so the accepted strain shrank
+  with the supercell (a 2x2 relaxed slab at 1.5 % strain was rejected).  One
+  helper now tests the relative strain of every cell vector (up to 5 %) at
+  all four sites.
 
 ## 0.5.1 — 2026-10-02
 

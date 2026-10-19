@@ -1700,18 +1700,40 @@ def _bulk_plane_catalog(bulk_atoms, miller, plane_tol=None):
     return catalog, L, np.array(surf.cell[:2, :2]), per
 
 
-def _supercell_matrix(bulk_cell2d, cell2d, atol=0.02):
-    """Integer matrix ``M`` with ``cell2d = M @ bulk_cell2d`` (in-plane rows),
-    allowing a strain of about *atol* between the two cells."""
-    M = np.asarray(cell2d, dtype=float) @ np.linalg.inv(bulk_cell2d)
-    M_int = np.round(M).astype(int)
-    det = int(round(np.linalg.det(M_int)))
-    if not np.allclose(M, M_int, atol=atol) or det == 0:
+# Largest relative strain (per in-plane cell vector) between a slab's cell
+# and the integer supercell of the bulk surface cell it is taken for.
+_STRAIN_TOL = 0.05
+
+
+def _integer_supercell(bulk_cell2d, cell2d, strain_tol=_STRAIN_TOL):
+    """
+    Integer matrix ``M`` with ``cell2d ~ M @ bulk_cell2d`` (in-plane rows),
+    or ``None`` when no integer supercell of *bulk_cell2d* lies within
+    *strain_tol* (relative, per cell vector) of *cell2d*.  The test is
+    relative: an absolute one on the entries of ``M`` shrinks the accepted
+    strain with the size of the supercell.
+    """
+    bulk_cell2d = np.asarray(bulk_cell2d, dtype=float)
+    cell2d = np.asarray(cell2d, dtype=float)
+    M_int = np.round(cell2d @ np.linalg.inv(bulk_cell2d)).astype(int)
+    if round(np.linalg.det(M_int)) == 0:
+        return None
+    ideal = M_int @ bulk_cell2d
+    strain = np.linalg.norm(cell2d - ideal, axis=1) / np.linalg.norm(ideal, axis=1)
+    return M_int if np.all(strain <= strain_tol) else None
+
+
+def _supercell_matrix(bulk_cell2d, cell2d):
+    """Integer matrix ``M`` with ``cell2d = M @ bulk_cell2d`` (in-plane rows)
+    and its determinant, allowing a few per cent of strain between the two
+    cells (:func:`_integer_supercell`)."""
+    M_int = _integer_supercell(bulk_cell2d, cell2d)
+    if M_int is None:
         raise ValueError(
             "The slab's in-plane cell is not an integer supercell of the bulk "
             "surface cell; check bulk_atoms and miller."
         )
-    return M_int, det
+    return M_int, int(round(np.linalg.det(M_int)))
 
 
 def _supercell_translations(M_int, det):
@@ -1793,20 +1815,18 @@ def _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, site_tol=0.3, a3_xy=(0.0, 
     few per cent of strain between the cells is accepted.  Returns the
     number of planes in one lattice repeat of the relabelled catalog.
     """
-    M = np.asarray(cell2d, dtype=float) @ np.linalg.inv(bulk_cell2d)
-    if np.allclose(M, np.round(M), atol=0.02) and round(np.linalg.det(np.round(M))) != 0:
+    if _integer_supercell(bulk_cell2d, cell2d) is not None:
         for entry in catalog:
             entry["atoms"] = _tile_plane(entry["atoms"], bulk_cell2d, cell2d)
             entry["counts"] = dict(Counter(a[0] for a in entry["atoms"]))
     else:
-        K = np.linalg.inv(M)  # bulk surface cell = K @ slab cell
-        K_int = np.round(K).astype(int)
-        copies = abs(int(round(np.linalg.det(K_int))))
-        if not np.allclose(K, K_int, atol=0.02) or copies == 0:
+        K_int = _integer_supercell(cell2d, bulk_cell2d)  # bulk surface cell = K @ slab cell
+        if K_int is None:
             raise ValueError(
                 "The slab's in-plane cell is not an integer supercell of the bulk surface "
                 "cell, nor the other way round; check bulk_atoms and miller."
             )
+        copies = abs(int(round(np.linalg.det(K_int))))
         for entry in catalog:
             sites = []
             for Z, fx, fy, dz in entry["atoms"]:
@@ -1862,9 +1882,9 @@ class _BulkSites:
         # cell is a supercell of it (shifts by its vectors are equivalent).
         self.lattice = self.cell2d
         if bulk_cell2d is not None:
-            M = self.cell2d @ np.linalg.inv(bulk_cell2d)
-            if np.allclose(M, np.round(M), atol=0.02) and abs(round(np.linalg.det(np.round(M)))) > 1:
-                self.lattice = np.linalg.inv(np.round(M)) @ self.cell2d
+            M_int = _integer_supercell(bulk_cell2d, self.cell2d)
+            if M_int is not None and abs(round(np.linalg.det(M_int))) > 1:
+                self.lattice = np.linalg.inv(M_int) @ self.cell2d
         rows = [(Z, fx, fy, entry["z"] + dz, k)
                 for k, entry in enumerate(catalog) for Z, fx, fy, dz in entry["atoms"]]
         rows = np.array(rows, dtype=float)
