@@ -23,6 +23,7 @@ from .core import (
     _charges_to_list,
     _finalize_slab,
     _frac_distance,
+    _inplane_frac,
     _make_plane,
     _plane_translations,
     _plane_waves,
@@ -790,11 +791,10 @@ def _reconstruction_deletions(atoms, planes_sorted, outer, recon, cell2d, ab_axe
     ``m * a3``.
     """
     n = len(planes_sorted)
-    frac = atoms.get_scaled_positions()
+    frac = _inplane_frac(atoms, [i for i in range(3) if i not in ab_axes][0]) % 1.0
 
     def plane_atoms(p):
-        return [(int(atoms.numbers[j]), frac[j, ab_axes[0]], frac[j, ab_axes[1]])
-                for j in planes_sorted[p]["indices"]]
+        return [(int(atoms.numbers[j]), frac[j, 0], frac[j, 1]) for j in planes_sorted[p]["indices"]]
 
     def shifts(p, reference):
         found = _plane_translations(reference, plane_atoms(p), cell2d, tol)
@@ -858,19 +858,20 @@ def _reconstruction_deletions(atoms, planes_sorted, outer, recon, cell2d, ab_axe
                 "the pattern."
             )
         deletions[p] = _pick_deleted_atoms(atoms, planes_sorted[p]["indices"], recon["delete_info"],
-                                           t, frac, ab_axes, cell2d, tol)
+                                           t, frac, cell2d, tol)
     return deletions
 
 
-def _pick_deleted_atoms(atoms, plane_indices, delete_info, shift, frac, ab_axes, cell2d, tol):
+def _pick_deleted_atoms(atoms, plane_indices, delete_info, shift, frac, cell2d, tol):
     """Atoms of a plane at the pattern positions *delete_info* + *shift*
-    (one-to-one per species, each within *tol* angstrom)."""
+    (one-to-one per species, each within *tol* angstrom); *frac* are the
+    in-plane fractional coordinates of every atom."""
     chosen = set()
     plane_indices = np.asarray(plane_indices, dtype=int)
     for Z in sorted({d[0] for d in delete_info}):
         targets = np.array([[d[1], d[2]] for d in delete_info if d[0] == Z]) + shift
         cands = plane_indices[atoms.numbers[plane_indices] == Z]
-        d = frac[cands][:, ab_axes][None, :, :] - targets[:, None, :]
+        d = frac[cands][None, :, :] - targets[:, None, :]
         d -= np.round(d)
         dist = np.linalg.norm(d @ cell2d, axis=-1)
         rows, cols = linear_sum_assignment(dist)

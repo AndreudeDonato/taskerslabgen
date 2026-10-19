@@ -37,6 +37,13 @@ Fixes from the code review of 0.5.1 (2026-10-18).
 - cutslab on a sub-slab thinner than one repeat unit (its own thinnest
   output) raised ``IndexError`` in ``_repeat_labels``; the missing planes'
   labels now come from the input's ``stacking_labels``.
+- **Tilted third cell vector.**  In-plane coordinates came from
+  ``get_scaled_positions``, which includes the in-plane part of an oblique
+  a3 (slabs cut from a periodic bulk or made by pymatgen), so plane waves,
+  the bulk registry and reconstruction patterns compared planes where their
+  atoms are not: bulk mode collapsed such a slab to one sub-slab with a
+  mislabelled top.  Fractional in-plane coordinates are now taken from the
+  Cartesian positions and the two in-plane vectors (``_inplane_frac``).
 
 ## 0.5.1 — 2026-10-02
 

@@ -1761,3 +1761,38 @@ def test_cutslab_recuts_its_own_thinnest_output():
     again = cutslab(one, Q_IRO2)
     assert [len(s) for s in again] == [len(one)]
     assert again[0].info["stacking_labels"] == one.info["stacking_labels"]
+
+
+def test_tilted_third_cell_vector_gives_the_orthogonal_results():
+    """Finding 5: in-plane coordinates came from get_scaled_positions, which
+    includes the in-plane part of a tilted a3 (slabs from pymatgen or a
+    periodic bulk), so planes were compared where their atoms are not."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+    from taskerslabgen.advanced import surface_bulk_cell
+
+    def tilted(slab, xy):
+        out = slab.copy()
+        cell = np.array(out.cell)
+        cell[2, :2] = xy
+        out.set_cell(cell, scale_atoms=False)
+        assert np.allclose(out.positions, slab.positions)
+        return out
+
+    hkl = (1, 1, 0)
+    slab = next(iter(generate_slabs_for_miller(IRO2, Q_IRO2, hkl, [4])[hkl].values()))["atoms"][0]
+    oblique = tilted(slab, 4 * surface_bulk_cell(IRO2, hkl)[2][:2])  # c along a bulk lattice vector
+
+    def summary(atoms, **kwargs):
+        return [(len(s), s.info["cut_bottom_plane"], s.info["cut_top_plane"], s.info["cut_phase_overlap"])
+                for s in cutslab(atoms, Q_IRO2, **kwargs)]
+
+    for kwargs in ({}, {"selection": "absolute"}, {"bulk_atoms": IRO2}):
+        assert summary(oblique, **kwargs) == summary(slab, **kwargs), kwargs
+
+    term = next(iter(generate_slabs_for_miller(
+        CEO2, Q_CEO2, (0, 0, 1), [3], prefer_plane="O", bond_distances=BOND_DISTS_CEO2
+    )[(0, 0, 1)].values()))
+    recon = term["atoms"][0]
+    skewed = tilted(recon, 0.5 * recon.cell[0, :2] + 0.3 * recon.cell[1, :2])
+    sizes = [len(s) for s in cutslab(recon, Q_CEO2, reconstruction=term["reconstruction"])]
+    assert [len(s) for s in cutslab(skewed, Q_CEO2, reconstruction=term["reconstruction"])] == sizes

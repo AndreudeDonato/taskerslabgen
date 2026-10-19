@@ -1056,10 +1056,24 @@ def assign_plane_names(planes_sorted, atoms=None, axis=2, same_plane=_SAME_PLANE
     return names, name_map
 
 
+def _inplane_frac(atoms, axis=2):
+    """
+    Fractional in-plane coordinates of every atom, ``(n, 2)``, from the
+    Cartesian coordinates perpendicular to *axis* and the two in-plane cell
+    vectors.  Unlike ``get_scaled_positions`` they ignore the in-plane part
+    of a tilted third cell vector (slabs cut from a periodic bulk, or from
+    pymatgen, keep an oblique a3), so planes are compared where their atoms
+    are.
+    """
+    ab_axes = [i for i in range(3) if i != axis]
+    cell2d = np.asarray(atoms.cell, dtype=float)[np.ix_(ab_axes, ab_axes)]
+    return np.linalg.solve(cell2d.T, atoms.positions[:, ab_axes].T).T
+
+
 def _plane_waves(atoms, planes_sorted, axis=2):
     """Waves (rows ``(Z, fx, fy, dz)``) of the planes and the in-plane cell."""
     ab_axes = [i for i in range(3) if i != axis]
-    frac = atoms.get_scaled_positions(wrap=False)
+    frac = _inplane_frac(atoms, axis)
     cell2d = np.array(atoms.cell)[np.ix_(ab_axes, ab_axes)]
     height = float(atoms.cell.lengths()[axis])
     z = atoms.positions[:, axis]
@@ -1071,8 +1085,8 @@ def _plane_waves(atoms, planes_sorted, axis=2):
             dz = ((dz + 0.5 * height) % height) - 0.5 * height
         if "z_center" not in plane:
             dz = dz - dz.mean()
-        waves.append(np.column_stack([atoms.numbers[idx], frac[idx, ab_axes[0]] % 1.0,
-                                      frac[idx, ab_axes[1]] % 1.0, dz]))
+        waves.append(np.column_stack([atoms.numbers[idx], frac[idx, 0] % 1.0,
+                                      frac[idx, 1] % 1.0, dz]))
     return waves, cell2d
 
 
@@ -1905,7 +1919,7 @@ def _bulk_registry(atoms, sites, sigma=_WAVE_SIGMA):
     so slabs cut by genslab keep its labels.  Returns ``(t, offset, scale)``.
     """
     numbers = atoms.numbers.astype(float)
-    frac = atoms.get_scaled_positions(wrap=False)[:, :2]
+    frac = _inplane_frac(atoms)
     z = atoms.positions[:, 2]
     L, a3_xy, cell2d = sites.L, sites.a3_xy, sites.cell2d
 
@@ -2101,8 +2115,8 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
     sites = _BulkSites(catalog, L, cell2d, a3_xy, bulk_cell2d)
     t, offset, scale = _bulk_registry(atoms, sites)
 
-    frac = atoms.get_scaled_positions(wrap=False)
-    groups = _assign_to_sites(numbers.astype(float), frac[:, :2], z, sites, t, offset, scale)
+    frac = _inplane_frac(atoms)
+    groups = _assign_to_sites(numbers.astype(float), frac, z, sites, t, offset, scale)
 
     def geometry(idx, zc):
         return [(int(numbers[i]), frac[i, 0] % 1.0, frac[i, 1] % 1.0, z[i] - zc) for i in idx]
