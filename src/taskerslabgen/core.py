@@ -961,7 +961,7 @@ def assign_plane_names(planes_sorted, atoms=None, axis=2, same_plane=_SAME_PLANE
         Stacking axis.
     same_plane : float
         Normalised overlap (0-1) from which two waves count as the same.
-    context : list of ndarray or None
+    context : list or None
         Fingerprint of every plane in its stacking context
         (:func:`_context_signature`, one per plane): orders phases that
         differ only by a shift.  The bulk cell (:func:`_repeat_names`) and
@@ -1043,7 +1043,7 @@ def assign_plane_names(planes_sorted, atoms=None, axis=2, same_plane=_SAME_PLANE
         def compare(i, j):
             c = _compare_signatures(sigs[i], sigs[j])
             if c == 0 and ctx is not None:
-                c = _compare_signatures(ctx[i], ctx[j])
+                c = _compare_contexts(ctx[i], ctx[j])
             return c
 
         order = sorted(range(len(phases)), key=cmp_to_key(compare))
@@ -1123,17 +1123,29 @@ def _sandwich(waves, planes_sorted, i, below=None, above=None):
 
 def _context_signature(wave, neighbours):
     """
-    Translation-invariant fingerprint of a plane in its stacking context:
+    Translation-invariant fingerprint of a plane in its stacking context, as
+    a list of parts compared in turn (:func:`_compare_contexts`):
     :func:`_plane_signature` of the plane together with the plane below it,
-    then with the plane above it (both projected onto the surface).  Phases
-    that differ only by a shift have the same fingerprint on their own, but
-    their neighbours sit elsewhere relative to them.
+    then with the plane above it (both projected onto the surface), then
+    the same with the higher-order invariants.  Phases that differ only by
+    a shift have the same fingerprint on their own, but their neighbours
+    sit elsewhere relative to them.
     """
     parts = []
-    for other in neighbours:
-        rows = wave if other is None else np.vstack([wave, other])
-        parts.append(_plane_signature([tuple(r[:3]) for r in rows]))
-    return np.concatenate(parts)
+    for high in (False, True):
+        for other in neighbours:
+            rows = wave if other is None else np.vstack([wave, other])
+            parts.append(_plane_signature([tuple(r[:3]) for r in rows], high=high))
+    return parts
+
+
+def _compare_contexts(a, b):
+    """Order two context fingerprints part by part (:func:`_compare_signatures`)."""
+    for part_a, part_b in zip(a, b):
+        c = _compare_signatures(part_a, part_b)
+        if c:
+            return c
+    return 0
 
 
 def _cell_neighbours(waves, planes_sorted, L, a3_xy):
@@ -1421,9 +1433,16 @@ def _formula_label(counts):
 _SIG_G = [(1, 0), (0, 1), (1, 1), (1, -1), (2, 0), (0, 2), (2, 1), (1, 2), (2, -1), (1, -2)]
 _SIG_TRIPLETS = [((1, 0), (0, 1)), ((1, 0), (1, 0)), ((0, 1), (0, 1)), ((1, 0), (0, -1)),
                  ((1, 1), (1, -1)), ((2, 0), (-1, 1)), ((0, 2), (1, -1))]
+# Higher orders, consulted only when the above tie: in an in-plane supercell
+# the low orders along a repeated direction vanish for every plane.
+_SIG_G_HIGH = [(2, 2), (2, -2), (3, 0), (0, 3), (3, 1), (1, 3), (3, -1), (1, -3)]
+_SIG_TRIPLETS_HIGH = [((2, 0), (0, 1)), ((2, 0), (0, -1)), ((0, 2), (1, 0)), ((0, 2), (-1, 0)),
+                      ((2, 0), (0, 2)), ((2, 0), (0, -2)), ((3, 0), (0, 1)), ((3, 0), (0, -1)),
+                      ((0, 3), (1, 0)), ((0, 3), (-1, 0)), ((3, 0), (0, 3)), ((3, 0), (0, -3)),
+                      ((2, 2), (2, -2)), ((2, 0), (2, 2)), ((0, 2), (2, 2))]
 
 
-def _plane_signature(geom):
+def _plane_signature(geom, high=False):
     """
     Translation-invariant fingerprint of a plane ``[(Z, fx, fy), ...]``.
 
@@ -1431,7 +1450,8 @@ def _plane_signature(geom):
     :data:`_SIG_G`, then the imaginary parts of triplet invariants
     ``F(a) F(b) F(-a-b)``, which tell a plane from its 180-degree rotation.
     ``F`` is normalised by the total weight, so every entry is in [-1, 1]
-    and changes smoothly with the atom positions.
+    and changes smoothly with the atom positions.  With *high*, the
+    higher-order vectors and triplets (:data:`_SIG_G_HIGH`) instead.
     """
     w = np.array([a[0] for a in geom], dtype=float)
     f = np.array([[a[1], a[2]] for a in geom], dtype=float)
@@ -1439,8 +1459,9 @@ def _plane_signature(geom):
     def F(g):
         return np.sum(w * np.exp(2j * np.pi * (f @ np.asarray(g, dtype=float)))) / w.sum()
 
-    mags = [abs(F(g)) for g in _SIG_G]
-    trips = [(F(a) * F(b) * F(-np.add(a, b))).imag for a, b in _SIG_TRIPLETS]
+    gs, triplets = (_SIG_G_HIGH, _SIG_TRIPLETS_HIGH) if high else (_SIG_G, _SIG_TRIPLETS)
+    mags = [abs(F(g)) for g in gs]
+    trips = [(F(a) * F(b) * F(-np.add(a, b))).imag for a, b in triplets]
     return np.array(mags + trips)
 
 
@@ -1766,42 +1787,43 @@ def _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, site_tol=0.3, a3_xy=(0.0, 
     """
     Express the bulk plane catalog in the slab's in-plane cell *cell2d*, in
     place: tiled when the slab cell is a supercell of the bulk surface cell,
-    folded (and relabelled) when *bulk_atoms* is a supercell of the cell the
-    slab was built from.  A few per cent of strain between the cells is
-    accepted.  Returns the number of planes in one lattice repeat of the
-    relabelled catalog, or ``None`` when the labels were kept.
+    folded when *bulk_atoms* is a supercell of the cell the slab was built
+    from; the labels are then recomputed in the slab's cell, since they
+    count atoms per cell (genslab's ``surface_supercell`` labels do too).  A
+    few per cent of strain between the cells is accepted.  Returns the
+    number of planes in one lattice repeat of the relabelled catalog.
     """
     M = np.asarray(cell2d, dtype=float) @ np.linalg.inv(bulk_cell2d)
     if np.allclose(M, np.round(M), atol=0.02) and round(np.linalg.det(np.round(M))) != 0:
         for entry in catalog:
             entry["atoms"] = _tile_plane(entry["atoms"], bulk_cell2d, cell2d)
             entry["counts"] = dict(Counter(a[0] for a in entry["atoms"]))
-        return None
-    K = np.linalg.inv(M)  # bulk surface cell = K @ slab cell
-    K_int = np.round(K).astype(int)
-    copies = abs(int(round(np.linalg.det(K_int))))
-    if not np.allclose(K, K_int, atol=0.02) or copies == 0:
-        raise ValueError(
-            "The slab's in-plane cell is not an integer supercell of the bulk surface "
-            "cell, nor the other way round; check bulk_atoms and miller."
-        )
-    for entry in catalog:
-        sites = []
-        for Z, fx, fy, dz in entry["atoms"]:
-            f = (np.array([fx, fy]) @ K_int) % 1.0
-            for site in sites:
-                if site[0][0] == Z and _frac_distance(site[0][1:3], f, cell2d) < site_tol:
-                    site[1] += 1
-                    break
-            else:
-                sites.append([(Z, f[0], f[1], dz), 1])
-        if any(c != copies for _, c in sites):
+    else:
+        K = np.linalg.inv(M)  # bulk surface cell = K @ slab cell
+        K_int = np.round(K).astype(int)
+        copies = abs(int(round(np.linalg.det(K_int))))
+        if not np.allclose(K, K_int, atol=0.02) or copies == 0:
             raise ValueError(
-                "bulk_atoms is not periodic with the slab's in-plane cell; pass the bulk "
-                "cell the slab was built from."
+                "The slab's in-plane cell is not an integer supercell of the bulk surface "
+                "cell, nor the other way round; check bulk_atoms and miller."
             )
-        entry["atoms"] = [a for a, _ in sites]
-        entry["counts"] = dict(Counter(a[0] for a in entry["atoms"]))
+        for entry in catalog:
+            sites = []
+            for Z, fx, fy, dz in entry["atoms"]:
+                f = (np.array([fx, fy]) @ K_int) % 1.0
+                for site in sites:
+                    if site[0][0] == Z and _frac_distance(site[0][1:3], f, cell2d) < site_tol:
+                        site[1] += 1
+                        break
+                else:
+                    sites.append([(Z, f[0], f[1], dz), 1])
+            if any(c != copies for _, c in sites):
+                raise ValueError(
+                    "bulk_atoms is not periodic with the slab's in-plane cell; pass the bulk "
+                    "cell the slab was built from."
+                )
+            entry["atoms"] = [a for a, _ in sites]
+            entry["counts"] = dict(Counter(a[0] for a in entry["atoms"]))
     # Labels count atoms per cell: recompute them in the slab's cell.
     from ase import Atoms
 
@@ -2096,10 +2118,10 @@ def _planes_from_bulk(atoms, charges_list, bulk_atoms, miller, plane_tol=None,
     ``stacking_labels`` from plane *i* up (one lattice repeat of catalog
     labels starting at the bulk plane of plane *i*).
     """
-    catalog, L, bulk_cell2d, per = _bulk_plane_catalog(bulk_atoms, miller, plane_tol)
+    catalog, L, bulk_cell2d, _ = _bulk_plane_catalog(bulk_atoms, miller, plane_tol)
     cell2d = np.array(atoms.cell[:2, :2])
     a3_xy = _surface_a3_xy(bulk_atoms, miller, cell2d)
-    per = _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, a3_xy=a3_xy) or per
+    per = _catalog_in_cell(catalog, bulk_cell2d, cell2d, L, a3_xy=a3_xy)
 
     numbers = atoms.numbers
     z = atoms.positions[:, 2]

@@ -44,6 +44,14 @@ Fixes from the code review of 0.5.1 (2026-10-18).
   atoms are not: bulk mode collapsed such a slab to one sub-slab with a
   mislabelled top.  Fractional in-plane coordinates are now taken from the
   Cartesian positions and the two in-plane vectors (``_inplane_frac``).
+- **Bulk mode on surface_supercell slabs.**  The bulk plane catalog kept
+  the primitive cell's labels when the slab's cell was a supercell of it
+  (``O4`` for a plane of 16 O), so a ``surface_supercell`` slab could not
+  be cut by its genslab labels with ``bulk_atoms``.  The catalog is now
+  relabelled in the slab's cell in both directions.  The plane fingerprint
+  gained higher-order invariants, consulted only when the low orders tie
+  (they vanish along a doubled direction), so the supercell path and bulk
+  mode number phases alike.
 
 ## 0.5.1 — 2026-10-02
 

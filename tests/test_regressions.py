@@ -1796,3 +1796,27 @@ def test_tilted_third_cell_vector_gives_the_orthogonal_results():
     skewed = tilted(recon, 0.5 * recon.cell[0, :2] + 0.3 * recon.cell[1, :2])
     sizes = [len(s) for s in cutslab(recon, Q_CEO2, reconstruction=term["reconstruction"])]
     assert [len(s) for s in cutslab(skewed, Q_CEO2, reconstruction=term["reconstruction"])] == sizes
+
+
+@pytest.mark.parametrize(
+    "atoms, charges, hkl, supercell",
+    [(IRO2, Q_IRO2, (1, 1, 0), (2, 1)), (CEO2, Q_CEO2, (1, 1, 1), (2, 2)), (IRO2, Q_IRO2, (1, 0, 0), (2, 1))],
+    ids=["IrO2110x21", "CeO2111x22", "IrO2100x21"],
+)
+def test_bulk_mode_cuts_surface_supercell_slabs_by_genslab_labels(atoms, charges, hkl, supercell):
+    """Finding 6: the tiled branch of the bulk plane catalog kept the
+    primitive cell's labels (O4 for a plane of 16 O), so a surface_supercell
+    slab could not be cut by its genslab labels in bulk mode."""
+    from taskerslabgen import cutslab, generate_slabs_for_miller
+
+    term = next(iter(generate_slabs_for_miller(
+        atoms, charges, hkl, [2], surface_supercell=supercell
+    )[hkl].values()))
+    slab = term["atoms"][0]
+    subs = cutslab(slab, charges, bulk_atoms=atoms, cut_at=[term["plane_type"], term["top_plane_type"]])
+    assert {(s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in subs} == {
+        (term["plane_type"], term["top_plane_type"])}
+    assert [s.info["stacking_labels"] for s in subs if s.info["cut_bottom_idx"] == 0] == [
+        slab.info["stacking_labels"]] * sum(s.info["cut_bottom_idx"] == 0 for s in subs)
+    assert {(s.info["cut_bottom_plane"], s.info["cut_top_plane"]) for s in cutslab(slab, charges, bulk_atoms=atoms)} == {
+        (term["plane_type"], term["top_plane_type"])}
